@@ -8,7 +8,6 @@ use tauri::{AppHandle, State};
 
 use crate::core::kernel::{KernelConfig, KernelHandle, generate_secret, probe_version};
 use crate::core::state::{AppState, CoreStatus, RunMode, UserSettings, is_port_free, pick_api_addr};
-use crate::core::store::SubscriptionRecord;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,7 +59,7 @@ async fn do_start(app: &AppHandle, state: &State<'_, AppState>) -> Result<(), St
     let profile_path = work_dir.join("profile.yaml");
     let profile_text = std::fs::read_to_string(&profile_path).map_err(|_| {
         format!(
-            "尚未导入订阅：请先在“规则”页更新订阅（期望文件：{}）",
+            "尚未导入订阅：请先在“订阅”页添加订阅（期望文件：{}）",
             profile_path.display()
         )
     })?;
@@ -345,12 +344,90 @@ fn try_decode_base64(input: &str) -> Result<String, String> {
     String::from_utf8(decoded).map_err(|e| format!("decoded bytes not UTF-8: {}", e))
 }
 
-/// 获取已保存的订阅记录（规则页回填）
+/// 订阅记录（前端展示用）：在存储记录上附加 是否活跃 / 节点数
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionDto {
+    pub url: String,
+    pub updated_at: i64,
+    pub name: Option<String>,
+    /// 是否为当前生效订阅（最近更新的一条）
+    pub active: bool,
+    /// 节点数：仅活跃订阅有值（解析 work_dir/profile.yaml 统计 proxies 条目）
+    pub node_count: Option<usize>,
+}
+
+/// 获取已保存的订阅记录（订阅页展示）
 #[tauri::command]
 pub async fn list_subscriptions(
     state: State<'_, AppState>,
-) -> Result<Vec<SubscriptionRecord>, String> {
-    Ok(crate::core::store::load_subscriptions(&state.data_dir))
+) -> Result<Vec<SubscriptionDto>, String> {
+    let records = crate::core::store::load_subscriptions(&state.data_dir);
+    // 单订阅模型：最新 updated_at 即当前生效订阅
+    let active_url = records
+        .iter()
+        .max_by_key(|r| r.updated_at)
+        .map(|r| r.url.clone());
+
+    let node_count = count_profile_nodes(&state.work_dir());
+
+    Ok(records
+        .into_iter()
+        .map(|r| {
+            let active = Some(&r.url) == active_url.as_ref();
+            SubscriptionDto {
+                url: r.url,
+                updated_at: r.updated_at,
+                name: r.name,
+                active,
+                node_count: if active { node_count } else { None },
+            }
+        })
+        .collect())
+}
+
+/// 统计当前 profile.yaml 的 proxies 条目数；文件缺失/解析失败返回 None
+fn count_profile_nodes(work_dir: &std::path::Path) -> Option<usize> {
+    let text = std::fs::read_to_string(work_dir.join("profile.yaml")).ok()?;
+    let value: serde_yaml::Value = serde_yaml::from_str(&text).ok()?;
+    value.get("proxies")?.as_sequence().map(|s| s.len())
+}
+
+/// 删除一条订阅记录
+#[tauri::command]
+pub async fn delete_subscription(
+    url: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    crate::core::store::delete_subscription(&state.data_dir, &url)
+        .map_err(|e| format!("删除订阅失败: {e}"))
+}
+
+/// 激活 Pro 高级功能（占位实现）。
+// TODO(商业化)：当前仅校验激活码格式并持久化标记；
+// 正式上线前替换为真实校验（服务端签名 / StoreKit / Google Play Billing）。
+#[tauri::command]
+pub async fn activate_pro(code: String, state: State<'_, AppState>) -> Result<bool, String> {
+    if !is_valid_pro_code(&code) {
+        return Ok(false);
+    }
+    let mut settings = state.settings.read().clone();
+    settings.pro_unlocked = true;
+    state
+        .save_settings(settings)
+        .map_err(|e| format!("保存激活状态失败: {e}"))?;
+    tracing::info!("pro activated (placeholder validation)");
+    Ok(true)
+}
+
+/// 占位激活码格式：PRISM-XXXX-XXXX-XXXX（每段 4 位字母数字）
+fn is_valid_pro_code(code: &str) -> bool {
+    let parts: Vec<&str> = code.split('-').collect();
+    parts.len() == 4
+        && parts[0] == "PRISM"
+        && parts[1..]
+            .iter()
+            .all(|p| p.len() == 4 && p.chars().all(|c| c.is_ascii_alphanumeric()))
 }
 
 /// 查询内核是否就位（不触发下载）

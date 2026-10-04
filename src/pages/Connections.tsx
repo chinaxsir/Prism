@@ -3,6 +3,8 @@ import { Pause, Play, Trash2 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 
 import { formatBytes } from "@/utils/format";
+import ProGate from "@/components/ProGate";
+import { Feature } from "@/pro/gating";
 
 interface ConnRow {
   id: string;
@@ -154,6 +156,7 @@ export default function Connections() {
         </div>
       </div>
 
+      <ProGate feature={Feature.Connections}>
       {/* 筛选器 */}
       <div className="flex gap-2">
         {FILTERS.map(({ key, label }) => (
@@ -172,8 +175,8 @@ export default function Connections() {
       </div>
 
       {/* 连接表格 */}
-      <div className="bg-surface-card rounded-xl overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="bg-surface-card rounded-xl overflow-hidden overflow-x-auto">
+        <table className="w-full text-sm min-w-[720px]">
           <thead>
             <tr className="text-left text-xs text-gray-500 border-b border-white/5">
               <th className="px-4 py-3 font-medium">状态</th>
@@ -228,6 +231,7 @@ export default function Connections() {
           </tbody>
         </table>
       </div>
+      </ProGate>
     </div>
   );
 }

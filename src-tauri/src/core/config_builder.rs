@@ -552,13 +552,22 @@ fn group_to_outbound(group: &ClashGroup, warnings: &mut Vec<String>) -> Value {
                 "tolerance": 0
             })
         }
-        "load-balance" | "LoadBalance" => json!({
-            "type": "loadbalance",
-            "tag": group.name,
-            "outbounds": refs,
-            "strategy": group.strategy.clone().unwrap_or_else(|| "round-robin".into()),
-            "check": { "url": test_url, "interval": interval }
-        }),
+        // sing-box 的 loadbalance 出站 1.12 才引入，当前内核 1.11 不支持，
+        // 降级为 urltest（自动选延迟最低节点，行为最接近）
+        "load-balance" | "LoadBalance" => {
+            warnings.push(format!(
+                "策略组 '{}' 为 load-balance，sing-box 1.11 不支持，已降级为 url-test",
+                group.name
+            ));
+            json!({
+                "type": "urltest",
+                "tag": group.name,
+                "outbounds": refs,
+                "url": test_url,
+                "interval": interval,
+                "tolerance": 50
+            })
+        }
         other => {
             warnings.push(format!(
                 "策略组 '{}' 类型 {} 未知，降级为 selector",

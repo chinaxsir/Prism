@@ -50,8 +50,7 @@ function targetInfo() {
 }
 
 /** 下载源：官方 + GitHub 镜像（与 Rust 端 kernel_download.rs 保持一致） */
-function candidateUrls(asset) {
-  const official = `https://github.com/SagerNet/sing-box/releases/download/v${KERNEL_VERSION}/${asset}`;
+function mirrorUrls(official) {
   const urls = [official];
   if (process.env.PRISM_KERNEL_MIRROR) {
     urls.push(`${process.env.PRISM_KERNEL_MIRROR}${official}`);
@@ -62,6 +61,29 @@ function candidateUrls(asset) {
     `https://mirror.ghproxy.com/${official}`,
   );
   return urls;
+}
+
+function candidateUrls(asset) {
+  return mirrorUrls(`https://github.com/SagerNet/sing-box/releases/download/v${KERNEL_VERSION}/${asset}`);
+}
+
+/** geoip/geosite 数据库（平台无关）：legacy GEOIP/GEOSITE 规则需要本地库，
+ *  缺失时内核会在启动期尝试联网下载（走代理出站，必失败），故随包分发 */
+const GEO_DBS = [
+  ["geoip.db", "https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db"],
+  ["geosite.db", "https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db"],
+];
+
+async function ensureGeoDbs(force) {
+  for (const [name, official] of GEO_DBS) {
+    const dest = path.join(OUT_DIR, name);
+    if (!force && fs.existsSync(dest)) {
+      console.log(`[fetch-kernel] 已存在，跳过: src-tauri/binaries/${name}`);
+      continue;
+    }
+    await download(mirrorUrls(official), dest);
+    console.log(`[fetch-kernel] 数据库就绪: src-tauri/binaries/${name}`);
+  }
 }
 
 async function download(urls, dest) {
@@ -122,12 +144,16 @@ async function main() {
   const exeSuffix = triplet.includes("windows") ? ".exe" : "";
   const target = path.join(OUT_DIR, `sing-box-${triplet}${exeSuffix}`);
 
+  fs.mkdirSync(OUT_DIR, { recursive: true });
+
+  // 数据库与内核独立获取：内核已存在时也要保证数据库就位
+  await ensureGeoDbs(force);
+
   if (!force && fs.existsSync(target)) {
     console.log(`[fetch-kernel] 已存在，跳过: ${path.relative(ROOT, target)}（--force 可重新下载）`);
     return;
   }
 
-  fs.mkdirSync(OUT_DIR, { recursive: true });
   const stageDir = path.join(OUT_DIR, `stage-${Date.now()}`);
   fs.mkdirSync(stageDir, { recursive: true });
 

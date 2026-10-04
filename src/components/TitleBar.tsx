@@ -8,7 +8,7 @@ export default function TitleBar() {
   return (
     <div
       data-tauri-drag-region
-      className="h-9 shrink-0 flex items-center justify-between pl-4 pr-2 bg-surface border-b border-white/5 select-none"
+      className="hidden md:flex h-9 shrink-0 items-center justify-between pl-4 pr-2 bg-surface border-b border-white/5 select-none"
     >
       <span
         data-tauri-drag-region

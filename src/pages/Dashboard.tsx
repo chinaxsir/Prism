@@ -137,7 +137,7 @@ export default function Dashboard() {
       <h1 className="text-2xl font-bold">仪表盘</h1>
 
       {/* 状态卡片 */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         <button
           onClick={toggle}
           className={`rounded-xl p-5 flex flex-col items-start justify-between h-28 transition-all ${
@@ -203,7 +203,7 @@ export default function Dashboard() {
       )}
 
       {/* 实时速率 */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="bg-surface-card rounded-xl p-5">
           <div className="flex items-center gap-2 text-sm text-gray-400">
             <Activity size={16} className="text-latency-good" />

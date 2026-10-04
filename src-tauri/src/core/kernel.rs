@@ -15,7 +15,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
@@ -64,11 +64,23 @@ impl KernelHandle {
         let log_path = config.work_dir.join("kernel.log");
         std::fs::write(&log_path, b"").ok();
 
+        // 2.5 确保 geoip.db / geosite.db 就位：legacy geoip/geosite 规则需要本地
+        // 数据库，缺失时 sing-box 会走代理出站下载（启动期代理未就绪，必失败）。
+        // 数据库随包分发（见 scripts/fetch-kernel.cjs），这里从候选位置拷贝到工作目录
+        ensure_geo_databases(&config, &app_handle);
+
         // 3. 启动 sing-box 进程
+        // ENABLE_DEPRECATED_GEOIP/GEOSITE：Clash 订阅常见 GEOIP/GEOSITE 规则，
+        // 目前转换为 sing-box legacy geoip/geosite 字段；1.11 起需显式环境变量启用。
+        // TODO(内核升级)：迁移到 rule_set（.srs 规则集）后移除这两个环境变量
         let mut child = Command::new(&config.binary_path)
             .arg("run")
             .arg("-c")
             .arg(&config_path)
+            .env("ENABLE_DEPRECATED_GEOIP", "true")
+            .env("ENABLE_DEPRECATED_GEOSITE", "true")
+            // 固定工作目录：sing-box 在此读写 geoip.db / geosite.db / cache.db
+            .current_dir(&config.work_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -201,6 +213,46 @@ fn read_log_tail(path: &std::path::Path) -> String {
     };
     let start = bytes.len().saturating_sub(2048);
     String::from_utf8_lossy(&bytes[start..]).replace('\n', " | ")
+}
+
+/// 将随包分发的 geoip.db / geosite.db 拷贝到内核工作目录（已存在则跳过）。
+/// 候选来源：内核二进制同级（sidecar 位置）、应用资源目录、源码树 binaries（dev）。
+fn ensure_geo_databases(config: &KernelConfig, app_handle: &AppHandle) {
+    const DBS: [&str; 2] = ["geoip.db", "geosite.db"];
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = config.binary_path.parent() {
+        candidates.push(dir.to_path_buf());
+    }
+    if let Ok(dir) = app_handle.path().resource_dir() {
+        candidates.push(dir);
+    }
+    // dev：内核二进制在 target/debug，数据库在源码树 src-tauri/binaries
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries"));
+
+    for db in DBS {
+        let dest = config.work_dir.join(db);
+        if dest.is_file() {
+            continue;
+        }
+        for dir in &candidates {
+            let src = dir.join(db);
+            if src.is_file() {
+                match std::fs::copy(&src, &dest) {
+                    Ok(_) => {
+                        tracing::info!("copied {} -> {}", src.display(), dest.display());
+                        break;
+                    }
+                    Err(e) => tracing::warn!("copy {} failed: {e}", src.display()),
+                }
+            }
+        }
+        if !dest.is_file() {
+            tracing::warn!(
+                "{db} not found in any candidate location; kernel will try runtime download (likely fails)"
+            );
+        }
+    }
 }
 
 /// 将子进程的一条输出管道按行写入 kernel.log，同时转发到 tracing

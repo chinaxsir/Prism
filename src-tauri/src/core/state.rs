@@ -46,6 +46,9 @@ pub struct UserSettings {
     pub system_proxy: bool,
     /// 开机自启动
     pub auto_start: bool,
+    /// Pro 高级功能已解锁（仅移动端展示激活入口；桌面端恒为免费全功能）
+    #[serde(default)]
+    pub pro_unlocked: bool,
 }
 
 impl Default for UserSettings {
@@ -55,6 +58,7 @@ impl Default for UserSettings {
             allow_lan: false,
             system_proxy: true,
             auto_start: false,
+            pro_unlocked: false,
         }
     }
 }

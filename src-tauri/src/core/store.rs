@@ -99,6 +99,18 @@ pub fn upsert_subscription(data_dir: &Path, url: &str) -> anyhow::Result<()> {
     write_subscriptions(data_dir, &records)
 }
 
+/// 删除一条订阅记录（按 URL 匹配），返回是否有记录被移除
+pub fn delete_subscription(data_dir: &Path, url: &str) -> anyhow::Result<bool> {
+    let mut records = load_subscriptions(data_dir);
+    let before = records.len();
+    records.retain(|r| r.url != url);
+    if records.len() == before {
+        return Ok(false);
+    }
+    write_subscriptions(data_dir, &records)?;
+    Ok(true)
+}
+
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

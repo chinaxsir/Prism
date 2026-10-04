@@ -18,10 +18,21 @@ export interface SubscriptionRecord {
   url: string;
   updatedAt: number;
   name?: string | null;
+  /** 是否为当前生效订阅（最近更新的一条） */
+  active: boolean;
+  /** 节点数（仅活跃订阅有值） */
+  nodeCount?: number | null;
 }
 
 export const listSubscriptions = () =>
   invoke<SubscriptionRecord[]>("list_subscriptions");
+
+export const deleteSubscription = (url: string) =>
+  invoke<boolean>("delete_subscription", { url });
+
+/** 激活 Pro（占位校验：PRISM-XXXX-XXXX-XXXX 格式即通过） */
+export const activatePro = (code: string) =>
+  invoke<boolean>("activate_pro", { code });
 
 export const getConnections = () => invoke("get_connections");
 export const getTrafficStats = () => invoke("get_traffic_stats");

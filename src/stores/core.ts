@@ -8,6 +8,8 @@ export interface UserSettings {
   allowLan: boolean;
   systemProxy: boolean;
   autoStart: boolean;
+  /** Pro 高级功能已解锁（仅移动端展示激活入口；桌面端恒免费全功能） */
+  proUnlocked: boolean;
 }
 
 interface TrafficPoint {
@@ -51,6 +53,7 @@ export const useCoreStore = create<CoreState>((set, get) => ({
     allowLan: false,
     systemProxy: true,
     autoStart: false,
+    proUnlocked: false,
   },
 
   setStatus: (status) => set({ status }),

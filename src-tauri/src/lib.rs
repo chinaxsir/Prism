@@ -97,6 +97,8 @@ pub fn run() {
             ipc::commands::select_proxy,
             ipc::commands::update_subscription,
             ipc::commands::list_subscriptions,
+            ipc::commands::delete_subscription,
+            ipc::commands::activate_pro,
             ipc::commands::get_connections,
             ipc::commands::get_traffic_stats,
             ipc::commands::get_rules,

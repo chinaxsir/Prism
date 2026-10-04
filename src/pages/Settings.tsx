@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Download, ShieldAlert } from "lucide-react";
+import { Check, Download, Lock, ShieldAlert } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 
 import {
@@ -14,6 +14,9 @@ import {
   type KernelInfo,
 } from "@/api/ipc";
 import type { RunMode, UserSettings } from "@/stores/core";
+import { ActivateProModal } from "@/components/ProGate";
+import { isMobile } from "@/pro/gating";
+import { useProStore } from "@/stores/pro";
 
 const MODES: { key: RunMode; title: string; desc: string }[] = [
   {
@@ -40,8 +43,13 @@ export default function Settings() {
     allowLan: false,
     systemProxy: true,
     autoStart: false,
+    proUnlocked: false,
   });
   const [saved, setSaved] = useState(false);
+  const [showActivate, setShowActivate] = useState(false);
+  const proUnlocked = useProStore((s) => s.unlocked);
+  // TUN 为 Pro 功能（仅移动端门控，桌面端全免费）
+  const tunGated = isMobile() && !proUnlocked;
 
   // 内核信息与下载状态
   const [kernelInfo, setKernelInfo] = useState<KernelInfo | null>(null);
@@ -99,6 +107,10 @@ export default function Settings() {
   };
 
   const chooseMode = (m: RunMode) => {
+    if (m === "tun" && tunGated) {
+      setShowActivate(true);
+      return;
+    }
     setRunMode(m);
     setMode(m).catch((e) => console.error(e));
     setSaved(false);
@@ -120,7 +132,7 @@ export default function Settings() {
       {/* 运行模式 */}
       <section className="bg-surface-card rounded-xl p-5">
         <h2 className="text-base font-semibold mb-4">运行模式</h2>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           {MODES.map((m) => (
             <button
               key={m.key}
@@ -131,7 +143,12 @@ export default function Settings() {
                   : "border-white/5 hover:border-white/15"
               }`}
             >
-              <div className="font-medium text-sm mb-1">{m.title}</div>
+              <div className="flex items-center gap-1.5 font-medium text-sm mb-1">
+                {m.title}
+                {m.key === "tun" && tunGated && (
+                  <Lock size={13} className="text-accent" />
+                )}
+              </div>
               <div className="text-xs text-gray-400 leading-relaxed">
                 {m.desc}
               </div>
@@ -235,6 +252,11 @@ export default function Settings() {
           </span>
         )}
       </div>
+
+      <ActivateProModal
+        open={showActivate}
+        onClose={() => setShowActivate(false)}
+      />
     </div>
   );
 }
