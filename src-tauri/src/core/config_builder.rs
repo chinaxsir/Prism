@@ -63,6 +63,12 @@ struct ClashNode {
     tls: Option<bool>,
     #[serde(default)]
     sni: Option<String>,
+    /// Clash vless/vmess 常用 servername 字段（与 sni 同义）
+    #[serde(default, rename = "servername")]
+    servername: Option<String>,
+    /// uTLS 指纹（如 chrome）；CDN 类节点缺失时易被 reset
+    #[serde(default, rename = "client-fingerprint")]
+    client_fingerprint: Option<String>,
     #[serde(default)]
     skip_cert_verify: Option<bool>,
     #[serde(default)]
@@ -283,12 +289,16 @@ pub fn build(
     }
 
     // 5. DNS（1.11 legacy 格式：servers 用 address；1.12 的 type/server 尚未支持）
+    // dns-remote 用 DoH 直连：UDP 53 的 8.8.8.8 在国内会被污染，
+    // 非 .cn 后缀的国内域名（如 baidu.com）若被解析到假 IP，direct 出站也会 TLS 握手失败。
+    // geosite cn 覆盖国内域名（含 .com），".cn" 后缀规则仅作兜底。
     let dns = json!({
         "servers": [
-            { "tag": "dns-remote", "address": "8.8.8.8" },
+            { "tag": "dns-remote", "address": "https://1.1.1.1/dns-query", "detour": "direct" },
             { "tag": "dns-local", "address": "223.5.5.5", "detour": "direct" }
         ],
         "rules": [
+            { "geosite": ["cn"], "server": "dns-local" },
             { "domain_suffix": [".cn"], "server": "dns-local" }
         ],
         "final": "dns-remote",
@@ -417,12 +427,7 @@ fn node_to_outbound(node: &ClashNode) -> Option<Value> {
             });
             merge(&mut o, &base);
             // Trojan 始终 TLS
-            o["tls"] = json!({
-                "enabled": true,
-                "server_name": node.sni.clone().unwrap_or_else(|| node.server.clone()),
-                "insecure": node.skip_cert_verify.unwrap_or(false),
-                "alpn": node.alpn.clone().unwrap_or_default(),
-            });
+            o["tls"] = tls_block(node);
             if let Some(tp) = build_transport(node) {
                 o["transport"] = tp;
             }
@@ -437,12 +442,7 @@ fn node_to_outbound(node: &ClashNode) -> Option<Value> {
                 "congestion_control": node.congestion_control.clone().unwrap_or_else(|| "bbr".into()),
             });
             merge(&mut o, &base);
-            o["tls"] = json!({
-                "enabled": true,
-                "server_name": node.sni.clone().unwrap_or_else(|| node.server.clone()),
-                "insecure": node.skip_cert_verify.unwrap_or(false),
-                "alpn": node.alpn.clone().unwrap_or_default(),
-            });
+            o["tls"] = tls_block(node);
             o
         }
 
@@ -452,12 +452,7 @@ fn node_to_outbound(node: &ClashNode) -> Option<Value> {
                 "password": node.password.clone().unwrap_or_default(),
             });
             merge(&mut o, &base);
-            o["tls"] = json!({
-                "enabled": true,
-                "server_name": node.sni.clone().unwrap_or_else(|| node.server.clone()),
-                "insecure": node.skip_cert_verify.unwrap_or(false),
-                "alpn": node.alpn.clone().unwrap_or_default(),
-            });
+            o["tls"] = tls_block(node);
             o
         }
 
@@ -467,11 +462,7 @@ fn node_to_outbound(node: &ClashNode) -> Option<Value> {
                 "auth_str": node.password.clone().unwrap_or_default(),
             });
             merge(&mut o, &base);
-            o["tls"] = json!({
-                "enabled": true,
-                "server_name": node.sni.clone().unwrap_or_else(|| node.server.clone()),
-                "insecure": node.skip_cert_verify.unwrap_or(false),
-            });
+            o["tls"] = tls_block(node);
             o
         }
 
@@ -487,12 +478,49 @@ fn build_tls(node: &ClashNode) -> Option<Value> {
     if !node.tls.unwrap_or(false) {
         return None;
     }
-    Some(json!({
+    Some(tls_block(node))
+}
+
+/// 节点 SNI 解析顺序：sni → servername → ws Host 头 → server。
+/// 直接用 server（常为 CDN IP）作 SNI 会被对端拒绝（tls: handshake failure）
+fn node_sni(node: &ClashNode) -> String {
+    for cand in [&node.sni, &node.servername] {
+        if let Some(s) = cand
+            && !s.is_empty()
+        {
+            return s.clone();
+        }
+    }
+    if let Some(host) = node
+        .ws_opts
+        .as_ref()
+        .and_then(|w| w.headers.as_ref())
+        .and_then(|h| h.get("Host").or_else(|| h.get("host")))
+        && !host.is_empty()
+    {
+        return host.clone();
+    }
+    node.server.clone()
+}
+
+/// 完整 TLS 块：SNI / insecure / alpn / uTLS 指纹（trojan/hy2 等强制 TLS 的节点也用）
+fn tls_block(node: &ClashNode) -> Value {
+    let mut tls = json!({
         "enabled": true,
-        "server_name": node.sni.clone().unwrap_or_else(|| node.server.clone()),
+        "server_name": node_sni(node),
         "insecure": node.skip_cert_verify.unwrap_or(false),
-        "alpn": node.alpn.clone().unwrap_or_default(),
-    }))
+    });
+    if let Some(alpn) = &node.alpn
+        && !alpn.is_empty()
+    {
+        tls["alpn"] = json!(alpn);
+    }
+    if let Some(fp) = &node.client_fingerprint
+        && !fp.is_empty()
+    {
+        tls["utls"] = json!({ "enabled": true, "fingerprint": fp });
+    }
+    tls
 }
 
 fn build_transport(node: &ClashNode) -> Option<Value> {
