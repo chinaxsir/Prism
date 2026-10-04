@@ -32,6 +32,8 @@ export default function Proxies() {
   const [groups, setGroups] = useState<ProxyEntry[]>([]);
   const [activeGroup, setActiveGroup] = useState("");
   const [testing, setTesting] = useState(false);
+  /// 上一轮组测速中失败（未出现在结果 map）的节点，展示为「超时」
+  const [failed, setFailed] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     loadProxies();
@@ -67,6 +69,7 @@ export default function Proxies() {
 
   /// 0 = 超时；undefined = 未测速
   const lastDelay = (node: ProxyEntry): number | undefined => {
+    if (failed.has(node.name)) return 0;
     const history = node.history ?? [];
     if (history.length === 0) return undefined;
     return history[history.length - 1].delay;
@@ -90,7 +93,15 @@ export default function Proxies() {
     if (!activeGroup || testing) return;
     setTesting(true);
     try {
-      await urlTest(activeGroup);
+      // sing-box 组测速只回传成功节点的延迟 map；缺席成员标记为超时
+      const result = (await urlTest(activeGroup)) as Record<
+        string,
+        number
+      > | null;
+      const ok = new Set(Object.keys(result ?? {}));
+      setFailed(
+        new Set(nodes.map((n) => n.name).filter((n) => !ok.has(n)))
+      );
       await loadProxies();
     } catch (e) {
       console.error("url test failed:", e);
@@ -118,7 +129,10 @@ export default function Proxies() {
         {groups.map((g) => (
           <button
             key={g.name}
-            onClick={() => setActiveGroup(g.name)}
+            onClick={() => {
+                setActiveGroup(g.name);
+                setFailed(new Set());
+              }}
             className={clsx(
               "px-4 py-2 rounded-lg text-sm transition-colors",
               g.name === activeGroup

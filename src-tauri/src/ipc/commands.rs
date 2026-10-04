@@ -250,7 +250,7 @@ pub async fn url_test(
 ) -> Result<serde_json::Value, String> {
     state
         .kernel_api()
-        .url_test(&req.group, req.url.as_deref(), req.timeout_ms)
+        .group_url_test(&req.group, req.url.as_deref(), req.timeout_ms)
         .await
         .map_err(|e| e.to_string())
 }

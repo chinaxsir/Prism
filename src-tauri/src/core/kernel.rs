@@ -372,26 +372,26 @@ impl KernelApi {
         Ok(())
     }
 
-    /// URL-Test 单个节点/策略组测速
-    pub async fn url_test(
+    /// 策略组整组测速：GET /group/{name}/delay
+    /// （/proxies/{name}/delay 只支持单节点，对策略组调用会返回 400）
+    /// 成功响应会将每个成员的延迟写入节点 history，前端据此展示
+    pub async fn group_url_test(
         &self,
         name: &str,
         url: Option<&str>,
         timeout_ms: Option<u32>,
     ) -> Result<serde_json::Value> {
-        let endpoint = format!("{}/proxies/{}/delay", self.base, name);
-        let mut request = self.client.get(&endpoint);
-        if let Some(u) = url {
-            request = request.query(&[("url", u)]);
+        let endpoint = format!("{}/group/{}/delay", self.base, name);
+        // sing-box 要求显式携带 url 和 timeout 参数，缺省会直接 400
+        let request = self.client.get(&endpoint).query(&[
+            ("url", url.unwrap_or("http://www.gstatic.com/generate_204").to_string()),
+            ("timeout", timeout_ms.unwrap_or(5000).to_string()),
+        ]);
+        let resp = request.send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("group url test failed: HTTP {}", resp.status());
         }
-        if let Some(t) = timeout_ms {
-            request = request.query(&[("timeout", t)]);
-        }
-        Ok(request
-            .send()
-            .await?
-            .json::<serde_json::Value>()
-            .await?)
+        Ok(resp.json::<serde_json::Value>().await?)
     }
 
     /// 获取当前规则列表
