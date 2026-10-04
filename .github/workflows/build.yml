@@ -1,0 +1,147 @@
+name: Build & Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend deps
+        run: npm ci
+
+      # sing-box 内核以 sidecar 随包分发（bundle.externalBin），
+      # 构建前必须按目标平台抓取，否则 tauri build 会因缺少 externalBin 失败
+      - name: Fetch sing-box sidecar
+        run: node scripts/fetch-kernel.cjs --triplet ${{ matrix.target }}
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS 签名（后续配置）
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Prism ${{ github.ref_name }}"
+          releaseBody: "See the assets to download this version."
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }}
+
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: android-actions/setup-android@v3
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26b
+      - run: npm ci
+      - name: Init Android project
+        run: npx tauri android init
+      # externalBin 对 Android 目标没有可用的官方 sing-box 二进制（官方只发
+      # 桌面三平台），放占位文件让构建通过；移动端内核（SFA/gomobile 方案）
+      # 为后续工作，移动端当前仅 UI/设置可用
+      - name: Placeholder sidecar for Android targets
+        run: |
+          for t in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android; do
+            [ -f "src-tauri/binaries/sing-box-$t" ] || touch "src-tauri/binaries/sing-box-$t"
+          done
+      - name: Build APK (debug, 可直接安装)
+        run: npx tauri android build --debug --apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prism-apk-debug
+          path: src-tauri/gen/android/app/build/outputs/**/*.apk
+
+  build-ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - run: npm ci
+      - name: Init iOS project
+        run: npx tauri ios init
+      # 同 Android：iOS 无官方 sing-box 二进制，占位保证 externalBin 检查通过
+      - name: Placeholder sidecar for iOS targets
+        run: |
+          for t in aarch64-apple-ios x86_64-apple-ios aarch64-apple-ios-sim; do
+            [ -f "src-tauri/binaries/sing-box-$t" ] || touch "src-tauri/binaries/sing-box-$t"
+          done
+      # 巨魔（TrollStore）安装不需要 Apple 签名：xcodebuild 关闭签名直接出 .app，
+      # 手工打 Payload 包为 .ipa
+      - name: Build unsigned .app (TrollStore)
+        run: |
+          xcodebuild \
+            -project src-tauri/gen/apple/prism-proxy.xcodeproj \
+            -scheme prism-proxy_iOS \
+            -configuration Release \
+            -destination generic/platform=iOS \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+      - name: Package IPA
+        run: |
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -n1)
+          mkdir -p Payload
+          cp -r "$APP" Payload/
+          zip -qr Prism-TrollStore.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prism-ipa-trollstore
+          path: Prism-TrollStore.ipa

@@ -1,0 +1,194 @@
+import { useEffect, useState } from "react";
+import { Zap } from "lucide-react";
+
+import { getProxyGroups, selectProxy, urlTest } from "@/api/ipc";
+import clsx from "clsx";
+
+interface DelaySample {
+  delay: number;
+}
+
+interface ProxyEntry {
+  name: string;
+  type: string;
+  now?: string;
+  all?: Array<ProxyEntry | string>;
+  history?: DelaySample[];
+}
+
+const GROUP_TYPES = ["Selector", "URLTest", "Fallback", "LoadBalance"];
+
+const GROUP_TYPE_LABEL: Record<string, string> = {
+  Selector: "手动选择",
+  URLTest: "自动测速",
+  Fallback: "故障转移",
+  LoadBalance: "负载均衡",
+};
+
+export default function Proxies() {
+  const [proxiesMap, setProxiesMap] = useState<Record<string, ProxyEntry>>(
+    {}
+  );
+  const [groups, setGroups] = useState<ProxyEntry[]>([]);
+  const [activeGroup, setActiveGroup] = useState("");
+  const [testing, setTesting] = useState(false);
+
+  useEffect(() => {
+    loadProxies();
+  }, []);
+
+  const loadProxies = async () => {
+    try {
+      const resp = (await getProxyGroups()) as {
+        proxies?: Record<string, ProxyEntry>;
+      };
+      const map = resp.proxies ?? {};
+      setProxiesMap(map);
+
+      const groupList = Object.values(map).filter((g) =>
+        GROUP_TYPES.includes(g.type)
+      );
+      setGroups(groupList);
+
+      setActiveGroup((prev) =>
+        prev && map[prev] ? prev : groupList[0]?.name ?? ""
+      );
+    } catch (e) {
+      console.error("load proxies failed:", e);
+    }
+  };
+
+  const current = groups.find((g) => g.name === activeGroup);
+
+  // 组内节点（all 中可能是对象或节点名字符串）
+  const nodes: ProxyEntry[] = (current?.all ?? [])
+    .map((item) => (typeof item === "string" ? proxiesMap[item] : item))
+    .filter((item): item is ProxyEntry => Boolean(item));
+
+  /// 0 = 超时；undefined = 未测速
+  const lastDelay = (node: ProxyEntry): number | undefined => {
+    const history = node.history ?? [];
+    if (history.length === 0) return undefined;
+    return history[history.length - 1].delay;
+  };
+
+  const delayClass = (delay?: number) => {
+    if (delay === undefined) return "text-gray-500";
+    if (delay === 0) return "text-latency-bad";
+    if (delay < 200) return "text-latency-good";
+    if (delay < 500) return "text-latency-medium";
+    return "text-latency-bad";
+  };
+
+  const delayText = (delay?: number) => {
+    if (delay === undefined) return "未测速";
+    if (delay === 0) return "超时";
+    return `${delay} ms`;
+  };
+
+  const handleTestGroup = async () => {
+    if (!activeGroup || testing) return;
+    setTesting(true);
+    try {
+      await urlTest(activeGroup);
+      await loadProxies();
+    } catch (e) {
+      console.error("url test failed:", e);
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handleSelect = async (name: string) => {
+    if (current?.now === name) return;
+    try {
+      await selectProxy(activeGroup, name);
+      await loadProxies();
+    } catch (e) {
+      console.error("select proxy failed:", e);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <h1 className="text-2xl font-bold">节点</h1>
+
+      {/* 策略组标签页 */}
+      <div className="flex flex-wrap items-center gap-2">
+        {groups.map((g) => (
+          <button
+            key={g.name}
+            onClick={() => setActiveGroup(g.name)}
+            className={clsx(
+              "px-4 py-2 rounded-lg text-sm transition-colors",
+              g.name === activeGroup
+                ? "bg-accent text-white"
+                : "bg-surface-card text-gray-400 hover:text-gray-200"
+            )}
+          >
+            {g.name}
+          </button>
+        ))}
+      </div>
+
+      {current && (
+        <div className="bg-surface-card rounded-xl p-5">
+          <div className="flex items-center justify-between mb-5">
+            <div>
+              <h2 className="text-lg font-semibold">{current.name}</h2>
+              <p className="text-xs text-gray-400 mt-1">
+                {GROUP_TYPE_LABEL[current.type] ?? current.type}
+                <span className="mx-2">·</span>
+                当前：<span className="text-accent">{current.now ?? "—"}</span>
+                <span className="mx-2">·</span>
+                {nodes.length} 个节点
+              </p>
+            </div>
+            <button
+              onClick={handleTestGroup}
+              disabled={testing}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-hover hover:bg-surface-hover text-sm disabled:opacity-50"
+            >
+              <Zap size={15} className={testing ? "animate-pulse" : ""} />
+              {testing ? "测速中…" : "组内测速"}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
+            {nodes.map((node) => {
+              const delay = lastDelay(node);
+              const selected = current.now === node.name;
+
+              return (
+                <button
+                  key={node.name}
+                  onClick={() => handleSelect(node.name)}
+                  className={clsx(
+                    "text-left p-3 rounded-lg border transition-all",
+                    selected
+                      ? "border-accent bg-accent/10"
+                      : "border-white/5 hover:border-white/15"
+                  )}
+                >
+                  <div className="text-sm font-medium truncate">
+                    {node.name}
+                  </div>
+                  <div className="flex items-center justify-between mt-1">
+                    <span className="text-[11px] text-gray-500">
+                      {node.type}
+                    </span>
+                    <span
+                      className={clsx("text-[11px] font-mono", delayClass(delay))}
+                    >
+                      {delayText(delay)}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "../src-tauri/gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for Prism",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "shell:allow-open",
+    "http:default",
+    "fs:allow-read-file",
+    "fs:allow-write-file",
+    "fs:allow-read-dir",
+    "notification:default",
+    "os:default",
+    "process:default",
+    "log:default"
+  ]
+}

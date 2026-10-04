@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- 背景：深靛蓝微渐变，圆角方（iOS/现代桌面风格） -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b2145"/>
+      <stop offset="1" stop-color="#0d1030"/>
+    </linearGradient>
+    <!-- 棱镜主体：冷灰玻璃质感 -->
+    <linearGradient id="glass" x1="0" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#e8edff"/>
+      <stop offset="0.55" stop-color="#aab6e8"/>
+      <stop offset="1" stop-color="#6f7fc0"/>
+    </linearGradient>
+    <!-- 入射白光 -->
+    <linearGradient id="beam" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.95"/>
+    </linearGradient>
+    <!-- 色散光谱：一束扇形渐变 -->
+    <linearGradient id="spectrum" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0"    stop-color="#ff5f6d"/>
+      <stop offset="0.25" stop-color="#ffc371"/>
+      <stop offset="0.5"  stop-color="#fff95b"/>
+      <stop offset="0.7"  stop-color="#4fe3a5"/>
+      <stop offset="0.85" stop-color="#4aa8ff"/>
+      <stop offset="1"    stop-color="#b06bff"/>
+    </linearGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+    <clipPath id="rounded">
+      <rect x="0" y="0" width="1024" height="1024" rx="228" ry="228"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#rounded)">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+
+    <!-- 光晕，衬托主体 -->
+    <circle cx="512" cy="520" r="330" fill="#3d4a9e" opacity="0.35" filter="url(#soft)"/>
+
+    <!-- 入射光束（左 → 棱镜） -->
+    <polygon points="96,452 470,500 470,540 96,500" fill="url(#beam)" opacity="0.9"/>
+
+    <!-- 色散光谱（棱镜 → 右下展开） -->
+    <polygon points="566,512 928,636 928,748 552,560" fill="url(#spectrum)" opacity="0.92"/>
+
+    <!-- 棱镜三角形 -->
+    <polygon points="512,300 692,640 332,640" fill="url(#glass)"/>
+    <!-- 棱镜高光棱线，增强玻璃感 -->
+    <polyline points="512,300 692,640" fill="none" stroke="#ffffff" stroke-opacity="0.55" stroke-width="10" stroke-linecap="round"/>
+    <polyline points="512,300 332,640" fill="none" stroke="#ffffff" stroke-opacity="0.25" stroke-width="8" stroke-linecap="round"/>
+  </g>
+</svg>

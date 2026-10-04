@@ -1,0 +1,12 @@
+node_modules/
+dist/
+src-tauri/target/
+# gen 下的 schemas 与构建产物忽略；gen/android、gen/apple 工程文件需提交（CI/本地构建 APK/IPA 依赖）
+src-tauri/gen/schemas
+src-tauri/gen/android/.gradle
+src-tauri/gen/android/app/.cxx
+src-tauri/gen/android/app/build
+src-tauri/gen/android/build
+src-tauri/binaries/
+*.log
+.DS_Store
