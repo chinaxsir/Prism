@@ -10,6 +10,11 @@ jobs:
   android:
     name: Build Android APK
     runs-on: ubuntu-24.04
+    env:
+      # init / build 两个步骤都要通过 NDK_HOME 找到 NDK；
+      # 路径为 GitHub Ubuntu runner 标准 SDK 位置（不用 env 上下文：
+      # 它不包含系统级环境变量）
+      NDK_HOME: /usr/local/lib/android/sdk/ndk/27.2.12479018
     steps:
       - uses: actions/checkout@v4
 
@@ -41,17 +46,18 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # v3 默认安装已从仓库移除的遗留 "tools" 包会直接失败，必须显式指定
+          packages: >-
+            platform-tools
+            platforms;android-34
+            platforms;android-35
+            build-tools;34.0.0
+            build-tools;35.0.0
+            ndk;27.2.12479018
 
-      - name: Install SDK packages & NDK
-        run: |
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-34" \
-            "platforms;android-35" \
-            "build-tools;34.0.0" \
-            "build-tools;35.0.0" \
-            "ndk;27.2.12479018"
-          sdkmanager --licenses || true
+      - name: Accept SDK licenses
+        run: yes | sdkmanager --licenses || true
 
       - name: Install frontend dependencies
         run: npm ci
@@ -60,8 +66,6 @@ jobs:
         run: npx tauri android init
 
       - name: Build APK
-        env:
-          NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/27.2.12479018
         run: npx tauri android build --apk
 
       - name: Upload APK
@@ -104,11 +108,27 @@ jobs:
 
       - name: Build unsigned .app
         run: |
-          PROJECT=$(find src-tauri/gen/apple -maxdepth 1 -name "*.xcodeproj" | head -1)
-          SCHEME=$(basename "$PROJECT" .xcodeproj)
-          echo "project=$PROJECT scheme=$SCHEME"
+          APPLE_DIR=src-tauri/gen/apple
+          WORKSPACE=$(find "$APPLE_DIR" -maxdepth 1 -name "*.xcworkspace" | head -1)
+          PROJECT=$(find "$APPLE_DIR" -maxdepth 1 -name "*.xcodeproj" | head -1)
+          # Tauri 插件经 CocoaPods 集成：存在 workspace 时必须构建 workspace，
+          # 否则 Pod 不参与构建 → 链接失败
+          if [ -n "$WORKSPACE" ]; then
+            TARGET_FLAG=(-workspace "$WORKSPACE")
+            LIST_KEY=workspace
+          else
+            TARGET_FLAG=(-project "$PROJECT")
+            LIST_KEY=project
+          fi
+          # scheme 名与产品名一致（Prism），不能用工程名（prism-proxy）；
+          # 动态列出并排除 Pods/扩展/Widget 等附属 scheme，兜底取第一个
+          SCHEME=$(xcodebuild -list "${TARGET_FLAG[@]}" -json \
+            | jq -r ".[\"$LIST_KEY\"].schemes[]" \
+            | grep -viE 'extension|widget|^pods$' \
+            | head -1)
+          echo "target=${TARGET_FLAG[*]} scheme=$SCHEME"
           xcodebuild \
-            -project "$PROJECT" \
+            "${TARGET_FLAG[@]}" \
             -scheme "$SCHEME" \
             -configuration release \
             -sdk iphoneos \
