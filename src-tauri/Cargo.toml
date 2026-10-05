@@ -8,6 +8,10 @@ repository = "https://github.com/your-org/prism"
 edition = "2024"
 rust-version = "1.85"
 
+# 解决 time-macros / num_threads 在 aarch64-apple-ios 交叉编译时关于 libc::mach_task_self 编译失败的已知版本兼容性 Bug
+[patch.crates-io]
+num_threads = { git = "https://github.com/theloceye/num_threads-rs.git", branch = "main" }
+
 [build-dependencies]
 tauri-build = { version = "2.0.0", features = [] }
 
