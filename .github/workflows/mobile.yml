@@ -106,45 +106,19 @@ jobs:
       - name: Init iOS project
         run: npx tauri ios init
 
-      - name: Build unsigned .app
-        run: |
-          APPLE_DIR=src-tauri/gen/apple
-          WORKSPACE=$(find "$APPLE_DIR" -maxdepth 1 -name "*.xcworkspace" | head -1)
-          PROJECT=$(find "$APPLE_DIR" -maxdepth 1 -name "*.xcodeproj" | head -1)
-          # Tauri 插件经 CocoaPods 集成：存在 workspace 时必须构建 workspace，
-          # 否则 Pod 不参与构建 → 链接失败
-          if [ -n "$WORKSPACE" ]; then
-            TARGET_FLAG=(-workspace "$WORKSPACE")
-            LIST_KEY=workspace
-          else
-            TARGET_FLAG=(-project "$PROJECT")
-            LIST_KEY=project
-          fi
-          # scheme 名与产品名一致（Prism），不能用工程名（prism-proxy）；
-          # 动态列出并排除 Pods/扩展/Widget 等附属 scheme，兜底取第一个
-          SCHEME=$(xcodebuild -list "${TARGET_FLAG[@]}" -json \
-            | jq -r ".[\"$LIST_KEY\"].schemes[]" \
-            | grep -viE 'extension|widget|^pods$' \
-            | head -1)
-          echo "target=${TARGET_FLAG[*]} scheme=$SCHEME"
-          xcodebuild \
-            "${TARGET_FLAG[@]}" \
-            -scheme "$SCHEME" \
-            -configuration release \
-            -sdk iphoneos \
-            -derivedDataPath build/ios \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            build
+      # 官方未签名路径（CLI 2.12+）：--no-sign 先构建未签名 archive，
+      # 再直接从 archive 内的 .app 产出未签名 IPA；
+      # 不经过 exportArchive，因此无需任何证书/描述文件
+      - name: Build unsigned IPA
+        run: npx tauri ios build --no-sign
 
-      - name: Package TrollStore IPA
+      - name: Locate IPA
+        id: ipa
         run: |
-          APP=$(find build/ios/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
-          test -n "$APP"
-          mkdir Payload
-          cp -r "$APP" Payload/
-          zip -qr "Prism-0.1.0-TrollStore.ipa" Payload
+          IPA=$(find src-tauri/gen/apple -name "*.ipa" -type f | head -1)
+          test -n "$IPA"
+          echo "path=$IPA"
+          cp "$IPA" "Prism-0.1.0-TrollStore.ipa"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
