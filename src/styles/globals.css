@@ -6,3 +6,23 @@ body {
   @apply bg-surface text-gray-200 antialiased;
   font-family: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
 }
+
+/* Custom scrollbar for a more commercial app look */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1e222d;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #4a505f;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #5a6070;
+}

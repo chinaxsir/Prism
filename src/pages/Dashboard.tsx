@@ -43,6 +43,7 @@ export default function Dashboard() {
   const uptimeSecs = useCoreStore((s) => s.uptimeSecs);
   const traffic = useCoreStore((s) => s.traffic);
   const setStatus = useCoreStore((s) => s.setStatus);
+  const setMode = useCoreStore((s) => s.setMode);
   const setTrafficRate = useCoreStore((s) => s.setTrafficRate);
   const setMemoryUsage = useCoreStore((s) => s.setMemoryUsage);
   const setUptime = useCoreStore((s) => s.setUptime);
@@ -100,12 +101,12 @@ export default function Dashboard() {
     return () => clearInterval(timer);
   }, [running, setUptime]);
 
-  // 启动时与后端对齐一次状态
+  // 启动时与后端对齐一次状态（含运行模式：权威来源是后端持久化的 settings.json）
   useEffect(() => {
     getCoreStatus()
-      .then((dto) => {
-        const data = dto as { status: typeof status; uptimeSecs: number };
+      .then((data) => {
         setStatus(data.status);
+        setMode(data.mode);
         setUptime(data.uptimeSecs);
       })
       .catch(() => undefined);
@@ -140,14 +141,10 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         <button
           onClick={toggle}
-          className={`rounded-xl p-5 flex flex-col items-start justify-between h-28 transition-all ${
-            running
-              ? "bg-latency-bad/15 hover:bg-latency-bad/25"
-              : "bg-accent/15 hover:bg-accent/25"
-          }`}
+          className={`rounded-xl p-5 flex flex-col items-start justify-between h-28 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-ring ${running ? "bg-latency-bad/20 hover:bg-latency-bad/30" : "bg-accent/20 hover:bg-accent/30"}`}
         >
-          <Power size={20} className={running ? "text-latency-bad" : "text-accent"} />
-          <span className="text-lg font-semibold">
+          <Power size={24} className={running ? "text-latency-bad" : "text-accent"} />
+          <span className="text-xl font-bold">
             {running ? "停止内核" : "启动内核"}
           </span>
         </button>
@@ -172,20 +169,20 @@ export default function Dashboard() {
       {/* 内核下载进度 / 启动错误提示 */}
       {(download || errorMsg) && (
         <div
-          className={`rounded-xl p-4 text-sm ${
+          className={`rounded-xl p-4 text-sm shadow-md ${
             errorMsg
-              ? "bg-latency-bad/10 text-red-300 border border-red-500/20"
-              : "bg-accent/10 text-accent border border-accent/20"
+              ? "bg-latency-bad/20 text-red-300 border border-red-500/30"
+              : "bg-accent/20 text-accent border border-accent/30"
           }`}
         >
           {errorMsg ? (
             <div>
               <div className="font-semibold mb-1">操作失败</div>
-              <div className="text-xs break-all">{errorMsg}</div>
+              <div className="text-xs break-all text-red-200">{errorMsg}</div>
             </div>
           ) : download ? (
             <div>
-              <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center justify-between mb-2 text-gray-100">
                 <span>{download.message}</span>
                 {download.percent > 0 && (
                   <span className="text-xs tabular-nums">{download.percent}%</span>
@@ -225,20 +222,20 @@ export default function Dashboard() {
       </div>
 
       {/* 流量曲线图 */}
-      <div className="bg-surface-card rounded-xl p-5">
-        <h2 className="text-base font-semibold mb-4">实时流量（最近 60 秒）</h2>
+      <div className="bg-surface-card rounded-xl p-5 shadow-md">
+        <h2 className="text-lg font-semibold mb-4 text-gray-100">实时流量（最近 60 秒）</h2>
         <ResponsiveContainer width="100%" height={280}>
           <LineChart data={traffic} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
             <XAxis
               dataKey="time"
-              stroke="#6b7280"
+              stroke="#9ca3af"
               fontSize={11}
               tickLine={false}
               minTickGap={48}
             />
             <YAxis
-              stroke="#6b7280"
+              stroke="#9ca3af"
               fontSize={11}
               tickLine={false}
               width={72}
@@ -246,17 +243,23 @@ export default function Dashboard() {
             />
             <Tooltip
               contentStyle={{
-                backgroundColor: "#171a23",
-                border: "1px solid rgba(255,255,255,0.1)",
+                backgroundColor: "#1E222D",
+                border: "1px solid rgba(255,255,255,0.15)",
                 borderRadius: 8,
                 fontSize: 12,
+                padding: '8px 12px',
               }}
+              labelStyle={{ color: '#E5E7EB' }}
+              itemStyle={{ color: '#E5E7EB' }}
               formatter={(value, name) => [
                 formatSpeed(Number(value)),
                 name === "down" ? "下载" : "上传",
               ]}
             />
-            <Legend formatter={(v) => (v === "down" ? "下载" : "上传")} />
+            <Legend
+              formatter={(v) => (v === "down" ? "下载" : "上传")}
+              wrapperStyle={{ paddingTop: '16px' }}
+            />
             <Line
               type="monotone"
               dataKey="down"
@@ -290,12 +293,12 @@ function StatCard({
   value: string;
 }) {
   return (
-    <div className="bg-surface-card rounded-xl p-5 h-28 flex flex-col justify-between">
+    <div className="bg-surface-card rounded-xl p-5 h-28 flex flex-col justify-between shadow-md">
       <div className="flex items-center gap-2 text-sm text-gray-400">
         {icon}
-        {label}
+        <span className="font-medium">{label}</span>
       </div>
-      <div className="text-lg font-semibold">{value}</div>
+      <div className="text-2xl font-bold text-gray-100">{value}</div>
     </div>
   );
 }

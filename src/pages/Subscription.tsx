@@ -4,6 +4,7 @@ import { RefreshCw, Rss, Trash2 } from "lucide-react";
 import {
   deleteSubscription,
   listSubscriptions,
+  toggleSubscription,
   updateSubscription,
   type SubscriptionRecord,
 } from "@/api/ipc";
@@ -79,7 +80,7 @@ export default function Subscription() {
     setAdding(true);
     try {
       await updateSubscription(trimmed);
-      toast.success("订阅已添加并更新（重启内核后生效）");
+      toast.success("订阅已添加并更新");
       setUrl("");
       await load();
     } catch (e) {
@@ -95,13 +96,24 @@ export default function Subscription() {
     setUpdatingUrl(record.url);
     try {
       await updateSubscription(record.url);
-      toast.success("订阅已更新（重启内核后生效）");
+      toast.success("订阅已更新");
       await load();
     } catch (e) {
       console.error("update subscription failed:", e);
       toast.error(String(e));
     } finally {
       setUpdatingUrl(null);
+    }
+  };
+
+  const handleToggle = async (record: SubscriptionRecord) => {
+    try {
+      await toggleSubscription(record.url, !record.enabled);
+      toast.success(record.enabled ? "订阅已停用" : "订阅已启用");
+      await load();
+    } catch (e) {
+      console.error("toggle subscription failed:", e);
+      toast.error(String(e));
     }
   };
 
@@ -171,9 +183,9 @@ export default function Subscription() {
                     <span className="truncate text-sm font-medium">
                       {displayName(record)}
                     </span>
-                    {record.active && (
+                    {record.enabled && (
                       <span className="shrink-0 rounded bg-accent/20 px-1.5 py-0.5 text-[10px] text-accent">
-                        使用中
+                        已启用
                       </span>
                     )}
                   </div>
@@ -189,6 +201,20 @@ export default function Subscription() {
                 </div>
 
                 <div className="flex shrink-0 items-center gap-2">
+                  {/* 启停开关：停用后该订阅不参与配置合并 */}
+                  <button
+                    onClick={() => handleToggle(record)}
+                    className={`relative h-5 w-9 rounded-full transition-colors ${
+                      record.enabled ? "bg-accent" : "bg-white/10"
+                    }`}
+                    title={record.enabled ? "点击停用" : "点击启用"}
+                  >
+                    <span
+                      className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
+                        record.enabled ? "translate-x-[18px]" : "translate-x-0.5"
+                      }`}
+                    />
+                  </button>
                   <button
                     onClick={() => handleUpdate(record)}
                     disabled={updatingUrl === record.url}

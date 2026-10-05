@@ -3,6 +3,11 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 /// 无边框窗口的自定义标题栏：可拖动区域 + 最小化/最大化/关闭
 export default function TitleBar() {
+  // Conditionally render the TitleBar only if running in Tauri environment
+  if (typeof window !== 'undefined' && !(window as any).__TAURI__) {
+    return null; // Don't render TitleBar if not in Tauri
+  }
+
   const appWindow = getCurrentWindow();
 
   return (

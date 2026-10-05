@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { create } from "zustand";
-import { CheckCircle2, XCircle } from "lucide-react";
+import { CheckCircle2, Info, XCircle } from "lucide-react";
 import clsx from "clsx";
 
-type ToastType = "success" | "error";
+type ToastType = "success" | "error" | "info";
 
 interface ToastItem {
   id: number;
@@ -29,10 +29,11 @@ export const useToast = create<ToastState>((set) => ({
     set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 }));
 
-/// 全局 toast API：toast.success("...") / toast.error("...")
+/// 全局 toast API：toast.success("...") / toast.error("...") / toast.info("...")
 export const toast = {
   success: (message: string) => useToast.getState().push("success", message),
   error: (message: string) => useToast.getState().push("error", message),
+  info: (message: string) => useToast.getState().push("info", message),
 };
 
 export default function ToastViewport() {
@@ -64,17 +65,24 @@ function ToastCard({ item }: { item: ToastItem }) {
   }, [dismiss, item.id]);
 
   const success = item.type === "success";
+  const info = item.type === "info";
 
   return (
     <div
       className={clsx(
         "flex items-start gap-2 rounded-lg border bg-surface-card px-4 py-3 text-sm shadow-lg transition-all duration-200",
-        success ? "border-accent/50" : "border-latency-bad/50",
+        success
+          ? "border-accent/50"
+          : info
+            ? "border-white/10"
+            : "border-latency-bad/50",
         visible ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-2"
       )}
     >
       {success ? (
         <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-accent" />
+      ) : info ? (
+        <Info size={16} className="mt-0.5 shrink-0 text-gray-400" />
       ) : (
         <XCircle size={16} className="mt-0.5 shrink-0 text-latency-bad" />
       )}

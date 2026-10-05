@@ -32,7 +32,8 @@ tokio = { version = "1.35", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 tokio-tungstenite = "0.21"
 futures-util = "0.3"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+# 移动端必须用 rustls：native-tls 在 Android 上依赖 OpenSSL，交叉编译受阻
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "http2", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
@@ -45,6 +46,8 @@ http-body-util = "0.1"
 anyhow = "1.0"
 base64 = "0.22"
 thiserror = "1.0"
+jsonwebtoken = "9"
+uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dashmap = "5.5"
@@ -73,6 +76,10 @@ windows = { version = "0.52", features = [
 ] }
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc = "0.2"
+
+# 移动端 IAP（桌面构建不编译）：前端 tauri-plugin-iap-api 经此插件发起购买
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-iap = "0.9"
 
 [features]
 default = ["custom-protocol"]

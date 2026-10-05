@@ -1,0 +1,29 @@
+[package]
+name = "prism-license-server"
+version = "0.1.0"
+edition = "2024"
+description = "Prism Pro 授权校验服务（激活码 / StoreKit / Google Play）"
+
+[[bin]]
+name = "prism-license-server"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+rusqlite = { version = "0.32", features = ["bundled"] }
+jsonwebtoken = "9"
+x509-parser = { version = "0.17", features = ["verify"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+time = { version = "0.3", features = ["serde-well-known", "formatting", "parsing", "macros"] }
+rand = "0.8"
+rsa = { version = "0.9", features = ["pem"] }
+pkcs8 = { version = "0.10", features = ["std", "pem"] }

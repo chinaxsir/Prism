@@ -7,9 +7,13 @@ export interface UserSettings {
   mixedPort: number;
   allowLan: boolean;
   systemProxy: boolean;
+  /** 运行模式（后端权威持久化；表单提交时会被后端以 set_mode 为准覆盖） */
+  mode: RunMode;
   autoStart: boolean;
-  /** Pro 高级功能已解锁（仅移动端展示激活入口；桌面端恒免费全功能） */
+  /** 历史占位字段，真实授权以 pro store 为准 */
   proUnlocked: boolean;
+  /** 授权服务地址（为空使用内置默认） */
+  licenseServerUrl?: string | null;
 }
 
 interface TrafficPoint {
@@ -52,6 +56,7 @@ export const useCoreStore = create<CoreState>((set, get) => ({
     mixedPort: 2080,
     allowLan: false,
     systemProxy: true,
+    mode: "systemProxy",
     autoStart: false,
     proUnlocked: false,
   },

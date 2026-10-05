@@ -6,9 +6,9 @@ export default {
     extend: {
       colors: {
         surface: {
-          DEFAULT: "#0f1117",
-          card: "#171a23",
-          hover: "#1f2330",
+          DEFAULT: "#12141A",
+          card: "#1E222D",
+          hover: "#252936",
         },
         accent: {
           DEFAULT: "#6366f1",
@@ -19,6 +19,7 @@ export default {
           medium: "#eab308",
           bad: "#ef4444",
         },
+        ring: "#6366f1",
       },
     },
   },

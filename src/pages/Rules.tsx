@@ -1,9 +1,15 @@
 import { useEffect, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { ArrowDown, ArrowUp, Plus, RefreshCw, Trash2 } from "lucide-react";
 
-import { getRules } from "@/api/ipc";
+import {
+  getCustomRules,
+  getProxyGroups,
+  getRules,
+  saveCustomRules,
+} from "@/api/ipc";
 import ProGate from "@/components/ProGate";
 import Spinner from "@/components/ui/Spinner";
+import { toast } from "@/components/ui/Toast";
 import { Feature } from "@/pro/gating";
 
 interface Rule {
@@ -13,12 +19,47 @@ interface Rule {
   outbound?: string;
 }
 
+const RULE_TYPES = [
+  "DOMAIN",
+  "DOMAIN-SUFFIX",
+  "DOMAIN-KEYWORD",
+  "IP-CIDR",
+  "GEOIP",
+  "GEOSITE",
+];
+
 export default function Rules() {
   const [rules, setRules] = useState<Rule[]>([]);
   const [loading, setLoading] = useState(false);
 
+  // 自定义规则编辑器状态
+  const [custom, setCustom] = useState<string[]>([]);
+  const [kind, setKind] = useState("DOMAIN-SUFFIX");
+  const [payload, setPayload] = useState("");
+  const [policy, setPolicy] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [policyOptions, setPolicyOptions] = useState<string[]>([
+    "direct",
+    "block",
+  ]);
+
   useEffect(() => {
     loadRules();
+    getCustomRules()
+      .then((r) => setCustom(r ?? []))
+      .catch((e) => console.error("load custom rules failed:", e));
+    // 策略候选：内置 + 内核全部出站（内核未启动时仅内置项）
+    getProxyGroups()
+      .then((resp) => {
+        const map =
+          (resp as { proxies?: Record<string, { name: string }> }).proxies ??
+          {};
+        const names = Object.values(map)
+          .map((p) => p.name)
+          .filter((n) => n && n !== "GLOBAL");
+        setPolicyOptions(["direct", "block", ...names]);
+      })
+      .catch(() => undefined);
   }, []);
 
   const loadRules = async () => {
@@ -32,6 +73,49 @@ export default function Rules() {
       setLoading(false);
     }
   };
+
+  /// 每次修改即整体保存；内核运行中后端自动重启生效
+  const persist = async (next: string[]) => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      await saveCustomRules(next);
+      setCustom(next);
+      toast.success("自定义规则已保存");
+      loadRules();
+    } catch (e) {
+      console.error("save custom rules failed:", e);
+      toast.error(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleAdd = () => {
+    const p = payload.trim();
+    if (!p) {
+      toast.error("请输入规则内容（域名 / IP / 关键词）");
+      return;
+    }
+    const line = `${kind},${p},${policy.trim() || "direct"}`;
+    if (custom.includes(line)) {
+      toast.error("规则已存在");
+      return;
+    }
+    setPayload("");
+    persist([...custom, line]);
+  };
+
+  const move = (index: number, delta: number) => {
+    const target = index + delta;
+    if (target < 0 || target >= custom.length) return;
+    const next = [...custom];
+    [next[index], next[target]] = [next[target], next[index]];
+    persist(next);
+  };
+
+  const removeAt = (index: number) =>
+    persist(custom.filter((_, i) => i !== index));
 
   const ruleTypeClass = (type: string) => {
     const colors: Record<string, string> = {
@@ -52,11 +136,115 @@ export default function Rules() {
       <h1 className="text-2xl font-bold">规则</h1>
 
       <ProGate feature={Feature.Rules}>
-        {/* 规则列表 */}
+        {/* 自定义规则编辑器 */}
+        <div className="bg-surface-card rounded-xl p-5 mb-6">
+          <h2 className="text-base font-semibold mb-1">
+            自定义规则（{custom.length} 条）
+          </h2>
+          <p className="text-xs text-gray-500 mb-4">
+            自上而下优先匹配，全部排在订阅规则之前
+          </p>
+
+          <div className="flex flex-col gap-2 md:flex-row">
+            <select
+              value={kind}
+              onChange={(e) => setKind(e.target.value)}
+              className="rounded-lg bg-surface-hover border border-white/5 px-3 py-2 text-sm outline-none focus:border-accent"
+            >
+              {RULE_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+            <input
+              value={payload}
+              onChange={(e) => setPayload(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+              placeholder="规则内容，如 google.com 或 1.2.3.0/24"
+              className="flex-1 rounded-lg bg-surface-hover border border-white/5 px-3 py-2 text-sm outline-none focus:border-accent"
+            />
+            <input
+              value={policy}
+              onChange={(e) => setPolicy(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+              list="rule-policy-options"
+              placeholder="策略（默认 direct）"
+              className="md:w-56 rounded-lg bg-surface-hover border border-white/5 px-3 py-2 text-sm outline-none focus:border-accent"
+            />
+            <datalist id="rule-policy-options">
+              {policyOptions.map((n) => (
+                <option key={n} value={n} />
+              ))}
+            </datalist>
+            <button
+              onClick={handleAdd}
+              disabled={saving}
+              className="flex items-center justify-center gap-1.5 rounded-lg bg-accent px-4 py-2 text-sm hover:bg-accent-hover disabled:opacity-50"
+            >
+              <Plus size={15} />
+              添加
+            </button>
+          </div>
+
+          {custom.length > 0 && (
+            <div className="mt-4 space-y-1.5 max-h-72 overflow-y-auto pr-1">
+              {custom.map((line, index) => {
+                const parts = line.split(",").map((s) => s.trim());
+                return (
+                  <div
+                    key={`${line}-${index}`}
+                    className="flex items-center gap-3 p-2.5 rounded-lg bg-surface-hover"
+                  >
+                    <span className="w-6 text-right text-[11px] text-gray-600 font-mono">
+                      {index + 1}
+                    </span>
+                    <span
+                      className={`w-32 text-[11px] font-mono ${ruleTypeClass(
+                        parts[0] ?? ""
+                      )}`}
+                    >
+                      {parts[0]}
+                    </span>
+                    <span className="flex-1 text-xs font-mono truncate">
+                      {parts[1] ?? ""}
+                    </span>
+                    <span className="text-[11px] text-accent">
+                      → {parts[2] ?? "direct"}
+                    </span>
+                    <button
+                      onClick={() => move(index, -1)}
+                      disabled={saving || index === 0}
+                      className="p-1 text-gray-500 hover:text-gray-200 disabled:opacity-30"
+                    >
+                      <ArrowUp size={13} />
+                    </button>
+                    <button
+                      onClick={() => move(index, 1)}
+                      disabled={saving || index === custom.length - 1}
+                      className="p-1 text-gray-500 hover:text-gray-200 disabled:opacity-30"
+                    >
+                      <ArrowDown size={13} />
+                    </button>
+                    <button
+                      onClick={() => removeAt(index)}
+                      disabled={saving}
+                      className="p-1 text-gray-500 hover:text-latency-bad disabled:opacity-30"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* 内核生效规则（只读） */}
         <div className="bg-surface-card rounded-xl p-5">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-base font-semibold">
-              当前规则（{rules.length} 条，自上而下优先匹配）
+              生效规则（{rules.length} 条，含自定义与订阅）
             </h2>
             <button
               onClick={loadRules}

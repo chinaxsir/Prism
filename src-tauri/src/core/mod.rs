@@ -11,6 +11,7 @@ pub mod config_builder;
 pub mod events;
 pub mod kernel;
 pub mod kernel_download;
+pub mod license;
 pub mod state;
 pub mod store;
 pub mod tun;

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Download, Lock, ShieldAlert } from "lucide-react";
+import { Check, Download, Lock, ShieldAlert, Sparkles } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 
 import {
@@ -12,11 +12,30 @@ import {
   setMode,
   type KernelDownloadProgress,
   type KernelInfo,
+  type EntitlementState,
 } from "@/api/ipc";
 import type { RunMode, UserSettings } from "@/stores/core";
+import { useCoreStore } from "@/stores/core";
 import { ActivateProModal } from "@/components/ProGate";
-import { isMobile } from "@/pro/gating";
 import { useProStore } from "@/stores/pro";
+import { toast } from "@/components/ui/Toast";
+
+const STATUS_META: Record<
+  EntitlementState,
+  { label: string; dot: string }
+> = {
+  active: { label: "已激活", dot: "bg-latency-good" },
+  grace: { label: "离线宽限中", dot: "bg-yellow-400" },
+  expired: { label: "已过期", dot: "bg-latency-bad" },
+  revoked: { label: "已吊销", dot: "bg-latency-bad" },
+  inactive: { label: "未授权", dot: "bg-gray-500" },
+};
+
+/** Unix 秒 → YYYY-MM-DD（本地时区） */
+function fmtDate(secs: number | null): string {
+  if (!secs) return "—";
+  return new Date(secs * 1000).toLocaleDateString();
+}
 
 const MODES: { key: RunMode; title: string; desc: string }[] = [
   {
@@ -38,18 +57,25 @@ const MODES: { key: RunMode; title: string; desc: string }[] = [
 
 export default function Settings() {
   const [mode, setRunMode] = useState<RunMode>("systemProxy");
+  const [modeBusy, setModeBusy] = useState(false);
   const [form, setForm] = useState<UserSettings>({
     mixedPort: 2080,
     allowLan: false,
     systemProxy: true,
+    mode: "systemProxy",
     autoStart: false,
     proUnlocked: false,
+    licenseServerUrl: null,
   });
   const [saved, setSaved] = useState(false);
   const [showActivate, setShowActivate] = useState(false);
   const proUnlocked = useProStore((s) => s.unlocked);
-  // TUN 为 Pro 功能（仅移动端门控，桌面端全免费）
-  const tunGated = isMobile() && !proUnlocked;
+  const entitlement = useProStore((s) => s.entitlement);
+  const proBusy = useProStore((s) => s.busy);
+  const refreshPro = useProStore((s) => s.refresh);
+  const deactivatePro = useProStore((s) => s.deactivate);
+  // TUN 为 Pro 功能（全平台门控）
+  const tunGated = !proUnlocked;
 
   // 内核信息与下载状态
   const [kernelInfo, setKernelInfo] = useState<KernelInfo | null>(null);
@@ -61,9 +87,9 @@ export default function Settings() {
       .then((s) => setForm(s))
       .catch((e) => console.error(e));
     getCoreStatus()
-      .then((dto) => {
-        const data = dto as { mode?: RunMode };
-        if (data.mode) setRunMode(data.mode);
+      .then((data) => {
+        setRunMode(data.mode);
+        useCoreStore.getState().setMode(data.mode);
       })
       .catch(() => undefined);
     getKernelInfo()
@@ -106,14 +132,27 @@ export default function Settings() {
     setSaved(false);
   };
 
-  const chooseMode = (m: RunMode) => {
+  const chooseMode = async (m: RunMode) => {
     if (m === "tun" && tunGated) {
       setShowActivate(true);
       return;
     }
+    if (modeBusy || m === mode) return;
     setRunMode(m);
-    setMode(m).catch((e) => console.error(e));
+    useCoreStore.getState().setMode(m);
     setSaved(false);
+    // 内核运行中切换模式会重建配置并重启内核，等待完成后重新对齐状态
+    setModeBusy(true);
+    try {
+      await setMode(m);
+      const data = await getCoreStatus();
+      useCoreStore.getState().setStatus(data.status);
+      useCoreStore.getState().setMode(data.mode);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setModeBusy(false);
+    }
   };
 
   const handleSave = async () => {
@@ -137,7 +176,8 @@ export default function Settings() {
             <button
               key={m.key}
               onClick={() => chooseMode(m.key)}
-              className={`text-left p-4 rounded-lg border transition-all ${
+              disabled={modeBusy}
+              className={`text-left p-4 rounded-lg border transition-all disabled:opacity-60 ${
                 mode === m.key
                   ? "border-accent bg-accent/10"
                   : "border-white/5 hover:border-white/15"
@@ -155,6 +195,11 @@ export default function Settings() {
             </button>
           ))}
         </div>
+        {modeBusy && (
+          <div className="mt-3 text-xs text-gray-400">
+            正在切换模式（内核运行中将自动重启生效）…
+          </div>
+        )}
 
         {mode === "tun" && (
           <div className="mt-4 flex items-start gap-2 p-3 rounded-lg bg-yellow-500/10 text-yellow-400 text-xs">
@@ -163,6 +208,83 @@ export default function Settings() {
             “以管理员身份运行”（macOS/Linux 使用 sudo 启动）。
           </div>
         )}
+      </section>
+
+      {/* Pro 授权 */}
+      <section className="bg-surface-card rounded-xl p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold flex items-center gap-2">
+            <Sparkles size={16} className="text-accent" />
+            Prism Pro 授权
+          </h2>
+          <span className="flex items-center gap-1.5 text-xs text-gray-400">
+            <span
+              className={`inline-block w-2 h-2 rounded-full ${STATUS_META[entitlement.status].dot}`}
+            />
+            {STATUS_META[entitlement.status].label}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-2 gap-y-2 text-xs text-gray-400 mb-4">
+          <span>授权类型</span>
+          <span className="text-gray-200">
+            {entitlement.kind === "lifetime"
+              ? "终身买断"
+              : entitlement.kind === "subscription"
+                ? "订阅"
+                : "—"}
+          </span>
+          <span>到期时间</span>
+          <span className="text-gray-200">{fmtDate(entitlement.expiresAt)}</span>
+          <span>上次校验</span>
+          <span className="text-gray-200">
+            {fmtDate(entitlement.lastVerifiedAt)}
+          </span>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => setShowActivate(true)}
+            className="px-4 py-2 rounded-lg bg-accent hover:bg-accent-hover transition-colors text-sm"
+          >
+            {proUnlocked ? "管理授权" : "激活 Pro"}
+          </button>
+          <button
+            onClick={refreshPro}
+            disabled={proBusy}
+            className="px-4 py-2 rounded-lg bg-surface-hover hover:bg-white/10 transition-colors text-sm disabled:opacity-50"
+          >
+            立即校验
+          </button>
+          {proUnlocked && (
+            <button
+              onClick={() => {
+                if (window.confirm("确定移除本机授权？移除后 Pro 功能将锁定。")) {
+                  deactivatePro()
+                    .then(() => toast.info("授权已移除"))
+                    .catch((e) => toast.error(String(e)));
+                }
+              }}
+              className="px-4 py-2 rounded-lg bg-surface-hover hover:bg-latency-bad/20 transition-colors text-sm text-gray-400 hover:text-latency-bad"
+            >
+              移除授权
+            </button>
+          )}
+        </div>
+
+        {/* 授权服务地址（自建部署/联调用；留空使用内置默认） */}
+        <div className="mt-4 pt-4 border-t border-white/5">
+          <label className="block text-xs text-gray-500 mb-1.5">
+            授权服务地址（留空使用默认；修改后点击下方「保存设置」）
+          </label>
+          <input
+            type="text"
+            value={form.licenseServerUrl ?? ""}
+            onChange={(e) => patch({ licenseServerUrl: e.target.value || null })}
+            placeholder="https://license.example.com"
+            className="w-full px-3 py-1.5 rounded-lg bg-surface-hover border border-white/5 focus:border-accent outline-none text-sm font-mono"
+          />
+        </div>
       </section>
 
       {/* 入站设置 */}

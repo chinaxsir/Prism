@@ -1,36 +1,85 @@
 import { create } from "zustand";
 
-import { activatePro, getSettings } from "@/api/ipc";
+import {
+  activatePro,
+  deactivatePro,
+  getEntitlement,
+  refreshEntitlement,
+  type Entitlement,
+} from "@/api/ipc";
+
+const INACTIVE: Entitlement = {
+  status: "inactive",
+  kind: null,
+  expiresAt: null,
+  source: null,
+  lastVerifiedAt: 0,
+};
+
+/** 可使用 Pro：active（联网有效）或 grace（离线宽限） */
+const unlockedOf = (e: Entitlement) =>
+  e.status === "active" || e.status === "grace";
 
 interface ProState {
+  entitlement: Entitlement;
+  /** 首次状态拉取完成（避免启动瞬间误弹 Pro 窗） */
+  ready: boolean;
   unlocked: boolean;
-  /** App 启动时从设置中读取 proUnlocked */
+  busy: boolean;
+  error: string | null;
+
   init: () => Promise<void>;
-  /** 激活 Pro，成功返回 true 并置 unlocked */
+  setEntitlement: (e: Entitlement) => void;
   activate: (code: string) => Promise<boolean>;
+  refresh: () => Promise<void>;
+  deactivate: () => Promise<void>;
 }
 
 export const useProStore = create<ProState>((set) => ({
+  entitlement: INACTIVE,
+  ready: false,
   unlocked: false,
+  busy: false,
+  error: null,
 
   init: async () => {
     try {
-      const settings = await getSettings();
-      set({ unlocked: settings.proUnlocked });
-    } catch (e) {
-      console.error("init pro state failed:", e);
+      const e = await getEntitlement();
+      set({ entitlement: e, unlocked: unlockedOf(e), ready: true });
+    } catch (err) {
+      console.error("get entitlement failed:", err);
+      set({ ready: true });
     }
   },
 
+  setEntitlement: (e) =>
+    set({ entitlement: e, unlocked: unlockedOf(e), error: null }),
+
   activate: async (code) => {
-    // TODO(商业化)：替换为真实内购（StoreKit / Google Play Billing）
+    set({ busy: true, error: null });
     try {
-      const ok = await activatePro(code);
-      if (ok) set({ unlocked: true });
-      return ok;
-    } catch (e) {
-      console.error("activate pro failed:", e);
+      const e = await activatePro(code);
+      set({ entitlement: e, unlocked: unlockedOf(e), busy: false });
+      return unlockedOf(e);
+    } catch (err) {
+      const message = typeof err === "string" ? err : "激活失败";
+      set({ busy: false, error: message });
       return false;
     }
+  },
+
+  refresh: async () => {
+    set({ busy: true, error: null });
+    try {
+      const e = await refreshEntitlement();
+      set({ entitlement: e, unlocked: unlockedOf(e), busy: false });
+    } catch (err) {
+      set({ busy: false, error: String(err) });
+    }
+  },
+
+  deactivate: async () => {
+    const e = await deactivatePro();
+    set({ entitlement: e, unlocked: unlockedOf(e), error: null });
   },
 }));

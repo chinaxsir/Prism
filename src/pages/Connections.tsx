@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { Pause, Play, Trash2 } from "lucide-react";
+import { Pause, Play, Trash2, X, XCircle } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 
+import {
+  closeAllConnections,
+  closeConnection,
+} from "@/api/ipc";
 import { formatBytes } from "@/utils/format";
 import ProGate from "@/components/ProGate";
+import { toast } from "@/components/ui/Toast";
 import { Feature } from "@/pro/gating";
 
 interface ConnRow {
@@ -131,6 +136,29 @@ export default function Connections() {
     return r.network === filter;
   });
 
+  /// 关闭单条：成功后乐观移除该行；失败时下一 tick 会重新出现
+  const handleClose = async (id: string) => {
+    try {
+      await closeConnection(id);
+      setRows((prev) => prev.filter((r) => r.id !== id));
+    } catch (e) {
+      console.error("close connection failed:", e);
+      toast.error(String(e));
+    }
+  };
+
+  /// 关闭内核全部连接
+  const handleCloseAll = async () => {
+    try {
+      await closeAllConnections();
+      setRows((prev) => prev.map((r) => ({ ...r, active: false })));
+      toast.success("已关闭全部连接");
+    } catch (e) {
+      console.error("close all connections failed:", e);
+      toast.error(String(e));
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -147,9 +175,16 @@ export default function Connections() {
             {paused ? <Play size={16} /> : <Pause size={16} />}
           </button>
           <button
+            onClick={handleCloseAll}
+            className="p-2 rounded-lg bg-surface-card hover:bg-surface-hover transition-colors"
+            title="全部关闭（断开内核当前所有连接）"
+          >
+            <XCircle size={16} />
+          </button>
+          <button
             onClick={() => setRows([])}
             className="p-2 rounded-lg bg-surface-card hover:bg-surface-hover transition-colors"
-            title="清空"
+            title="清空列表"
           >
             <Trash2 size={16} />
           </button>
@@ -176,7 +211,7 @@ export default function Connections() {
 
       {/* 连接表格 */}
       <div className="bg-surface-card rounded-xl overflow-hidden overflow-x-auto">
-        <table className="w-full text-sm min-w-[720px]">
+        <table className="w-full text-sm min-w-[800px]">
           <thead>
             <tr className="text-left text-xs text-gray-500 border-b border-white/5">
               <th className="px-4 py-3 font-medium">状态</th>
@@ -187,12 +222,13 @@ export default function Connections() {
               <th className="px-4 py-3 font-medium">命中规则</th>
               <th className="px-4 py-3 font-medium">出站节点</th>
               <th className="px-4 py-3 font-medium text-right">流量 ↑/↓</th>
+              <th className="px-4 py-3 font-medium text-right">操作</th>
             </tr>
           </thead>
           <tbody>
             {visibleRows.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-4 py-10 text-center text-gray-500">
+                <td colSpan={9} className="px-4 py-10 text-center text-gray-500">
                   {paused ? "已暂停接收连接事件" : "暂无连接记录（内核未启动或无流量）"}
                 </td>
               </tr>
@@ -224,6 +260,19 @@ export default function Connections() {
                   <td className="px-4 py-2.5 text-xs text-accent">{r.outbound}</td>
                   <td className="px-4 py-2.5 text-xs text-gray-400 text-right font-mono">
                     {formatBytes(r.upload)} / {formatBytes(r.download)}
+                  </td>
+                  <td className="px-4 py-2.5 text-right">
+                    {r.active ? (
+                      <button
+                        onClick={() => handleClose(r.id)}
+                        className="p-1.5 rounded-md text-gray-500 hover:text-latency-bad hover:bg-surface-hover transition-colors"
+                        title="关闭此连接"
+                      >
+                        <X size={14} />
+                      </button>
+                    ) : (
+                      <span className="text-gray-700 text-xs">—</span>
+                    )}
                   </td>
                 </tr>
               ))

@@ -182,6 +182,36 @@ impl KernelHandle {
     }
 }
 
+/// 静态校验待应用的配置：sing-box check -c <path>。
+/// 重启前调用——校验失败时旧内核保留，网络不中断。
+pub async fn check_config(
+    binary: &std::path::Path,
+    work_dir: &std::path::Path,
+    config_path: &std::path::Path,
+) -> Result<()> {
+    let output = Command::new(binary)
+        .arg("check")
+        .arg("-c")
+        .arg(config_path)
+        // 与 spawn 一致：legacy GEOIP/GEOSITE 规则需要环境变量启用
+        .env("ENABLE_DEPRECATED_GEOIP", "true")
+        .env("ENABLE_DEPRECATED_GEOSITE", "true")
+        .current_dir(work_dir)
+        .output()
+        .await
+        .context("failed to run sing-box check")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // 只保留末尾 800 字符，避免前端 toast 被刷屏
+        let chars: Vec<char> = stderr.chars().collect();
+        let skip = chars.len().saturating_sub(800);
+        let tail: String = chars[skip..].iter().collect();
+        anyhow::bail!("新配置校验未通过，已保留当前内核：\n{}", tail.trim());
+    }
+    Ok(())
+}
+
 /// 生成随机 clash_api secret（本地环回用途，基于时间+pid 两次哈希拼成 32 hex）
 pub fn generate_secret() -> String {
     fn hash_seed(seed: u64) -> u64 {
@@ -414,5 +444,32 @@ impl KernelApi {
             .await?
             .json::<serde_json::Value>()
             .await?)
+    }
+
+    /// 关闭单条连接：DELETE /connections/{id}
+    /// （sing-box 连接 id 为十六进制字符串，可直接拼路径）
+    pub async fn close_connection(&self, id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .delete(format!("{}/connections/{}", self.base, id))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("close connection failed: HTTP {}", resp.status());
+        }
+        Ok(())
+    }
+
+    /// 关闭全部连接：DELETE /connections
+    pub async fn close_all_connections(&self) -> Result<()> {
+        let resp = self
+            .client
+            .delete(format!("{}/connections", self.base))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("close all connections failed: HTTP {}", resp.status());
+        }
+        Ok(())
     }
 }

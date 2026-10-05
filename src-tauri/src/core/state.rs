@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +35,12 @@ pub enum RunMode {
     RuleOnly,
 }
 
+impl Default for RunMode {
+    fn default() -> Self {
+        Self::SystemProxy
+    }
+}
+
 /// 用户设置（可由设置页修改，持久化到 settings.json）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,11 +51,17 @@ pub struct UserSettings {
     pub allow_lan: bool,
     /// 启动时设置系统代理（SystemProxy 模式下生效）
     pub system_proxy: bool,
+    /// 运行模式（由 set_mode 持久化，重启应用后恢复；save_settings 表单携带的旧值会被忽略）
+    #[serde(default)]
+    pub mode: RunMode,
     /// 开机自启动
     pub auto_start: bool,
-    /// Pro 高级功能已解锁（仅移动端展示激活入口；桌面端恒为免费全功能）
+    /// Pro 高级功能已解锁（历史占位字段；真实授权状态以 license 模块为准）
     #[serde(default)]
     pub pro_unlocked: bool,
+    /// 授权服务地址（为空使用编译期默认；便于自建部署/联调切换）
+    #[serde(default)]
+    pub license_server_url: Option<String>,
 }
 
 impl Default for UserSettings {
@@ -57,14 +70,18 @@ impl Default for UserSettings {
             mixed_port: 2080,
             allow_lan: false,
             system_proxy: true,
+            mode: RunMode::SystemProxy,
             auto_start: false,
             pro_unlocked: false,
+            license_server_url: None,
         }
     }
 }
 
 /// 跨 IPC 共享的全局状态
 pub struct AppState {
+    /// 应用句柄：状态流转后广播 core://status，前端无需轮询即可对齐
+    pub app_handle: AppHandle,
     /// 应用数据目录（config.json / profile / 内核 / 持久化配置）
     pub data_dir: PathBuf,
     pub status: RwLock<CoreStatus>,
@@ -81,16 +98,24 @@ pub struct AppState {
     pub api_secret: RwLock<String>,
     /// 已探测到的内核版本（用于设置页展示）
     pub kernel_version: RwLock<Option<String>>,
+    /// 主选择组：route.final 链上最深的 selector。
+    /// 节点页默认落在该组（GLOBAL 等虚拟组不在路由链路中，选择无效），
+    /// 内核启动后自动对该组测速并切换至延迟最低的可用节点。
+    pub main_selector: RwLock<Option<String>>,
+    /// 当前 Pro 授权状态（启动时由 license 缓存恢复；后台校验后刷新）
+    pub entitlement: RwLock<super::license::EntitlementStatus>,
 }
 
 impl AppState {
-    /// 创建状态并从 data_dir/settings.json 恢复用户设置
-    pub fn new(data_dir: PathBuf) -> Self {
+    /// 创建状态并从 data_dir/settings.json 恢复用户设置（含运行模式）
+    pub fn new(data_dir: PathBuf, app_handle: AppHandle) -> Self {
         let settings = super::store::load_settings(&data_dir);
+        let mode = settings.mode;
         Self {
-            data_dir,
+            app_handle,
+            data_dir: data_dir.clone(),
             status: RwLock::new(CoreStatus::Stopped),
-            mode: RwLock::new(RunMode::SystemProxy),
+            mode: RwLock::new(mode),
             settings: RwLock::new(settings),
             started_at: RwLock::new(None),
             kernel_handle: RwLock::new(None),
@@ -98,6 +123,8 @@ impl AppState {
             api_addr: RwLock::new(super::kernel::PREFERRED_API_ADDR.to_string()),
             api_secret: RwLock::new(String::new()),
             kernel_version: RwLock::new(None),
+            main_selector: RwLock::new(None),
+            entitlement: RwLock::new(super::license::cached_entitlement(&data_dir)),
         }
     }
 
@@ -118,10 +145,9 @@ impl AppState {
         self.data_dir.join("kernel")
     }
 
-    /// 带合法性校验的状态流转
+    /// 带合法性校验的状态流转；成功后广播 core://status 供前端对齐
     pub fn transition(&self, next: CoreStatus) -> anyhow::Result<()> {
-        let mut status = self.status.write();
-        let current = *status;
+        let current = *self.status.read();
         let valid = matches!(
             (current, next),
             (CoreStatus::Stopped, CoreStatus::Starting)
@@ -137,9 +163,30 @@ impl AppState {
         if !valid {
             anyhow::bail!("invalid state transition: {:?} -> {:?}", current, next);
         }
-        *status = next;
+        *self.status.write() = next;
         tracing::info!("core state: {:?} -> {:?}", current, next);
+
+        // 广播在锁外执行；失败（无监听者）忽略
+        let _ = self.app_handle.emit("core://status", self.status_payload());
         Ok(())
+    }
+
+    /// 构造状态广播载荷（字段与 get_core_status 一致）
+    fn status_payload(&self) -> serde_json::Value {
+        let status = *self.status.read();
+        let mode = *self.mode.read();
+        let main_selector = self.main_selector.read().clone();
+        let uptime_secs = self
+            .started_at
+            .read()
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0);
+        serde_json::json!({
+            "status": status,
+            "mode": mode,
+            "uptimeSecs": uptime_secs,
+            "mainSelector": main_selector,
+        })
     }
 }
 

@@ -1,14 +1,12 @@
 import { platform } from "@tauri-apps/plugin-os";
 
 export enum Feature {
-  Tun = "tun",
   MultiSubscription = "multiSubscription",
   Connections = "connections",
   Rules = "rules",
 }
 
 export const FEATURE_LABEL: Record<Feature, string> = {
-  [Feature.Tun]: "TUN 模式",
   [Feature.MultiSubscription]: "多订阅",
   [Feature.Connections]: "连接管理",
   [Feature.Rules]: "规则自定义",
@@ -17,7 +15,8 @@ export const FEATURE_LABEL: Record<Feature, string> = {
 let cachedMobile: boolean | null = null;
 
 /**
- * 是否移动端（仅 iOS/Android 收费，桌面端全免费）。
+ * 是否移动端。移动端额外提供 StoreKit / Google Play 购买入口；
+ * 桌面端通过激活码授权。授权本身全平台一致（服务端统一签发）。
  * 调试后门：URL query ?forceMobile=1 强制移动端，?forceMobile=0 强制桌面端。
  * 非 Tauri 环境（platform 调用失败）默认按桌面端处理。
  */

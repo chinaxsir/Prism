@@ -1,10 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { UserSettings } from "@/stores/core";
+import type { CoreStatus, RunMode, UserSettings } from "@/stores/core";
 
 export const startCore = () => invoke<void>("start_core");
 export const stopCore = () => invoke<void>("stop_core");
-export const getCoreStatus = () => invoke("get_core_status");
-export const setMode = (mode: string) => invoke("set_mode", { mode });
+
+export interface CoreStatusDto {
+  status: CoreStatus;
+  mode: RunMode;
+  uptimeSecs: number;
+  /** 主选择组（route.final 链上最深的 selector；内核未运行时为 null） */
+  mainSelector?: string | null;
+}
+
+export const getCoreStatus = () => invoke<CoreStatusDto>("get_core_status");
+export const setMode = (mode: RunMode) => invoke<void>("set_mode", { mode });
 
 export const urlTest = (group: string) =>
   invoke("url_test", { req: { group, url: null, timeoutMs: null } });
@@ -18,24 +27,71 @@ export interface SubscriptionRecord {
   url: string;
   updatedAt: number;
   name?: string | null;
-  /** 是否为当前生效订阅（最近更新的一条） */
-  active: boolean;
-  /** 节点数（仅活跃订阅有值） */
+  /** 是否参与配置合并 */
+  enabled: boolean;
+  /** 节点数 */
   nodeCount?: number | null;
 }
 
 export const listSubscriptions = () =>
   invoke<SubscriptionRecord[]>("list_subscriptions");
 
+export const toggleSubscription = (url: string, enabled: boolean) =>
+  invoke<void>("toggle_subscription", { url, enabled });
+
+export const getCustomRules = () => invoke<string[]>("get_custom_rules");
+
+export const saveCustomRules = (rules: string[]) =>
+  invoke<void>("save_custom_rules", { rules });
+
 export const deleteSubscription = (url: string) =>
   invoke<boolean>("delete_subscription", { url });
 
-/** 激活 Pro（占位校验：PRISM-XXXX-XXXX-XXXX 格式即通过） */
+/** 授权类型 */
+export type EntitlementKind = "lifetime" | "subscription";
+/** 授权来源 */
+export type EntitlementSource = "code" | "apple" | "google";
+/** 授权状态 */
+export type EntitlementState =
+  | "inactive"
+  | "active"
+  | "grace"
+  | "expired"
+  | "revoked";
+
+/** 授权状态快照 */
+export interface Entitlement {
+  status: EntitlementState;
+  kind: EntitlementKind | null;
+  expiresAt: number | null;
+  source: EntitlementSource | null;
+  lastVerifiedAt: number;
+}
+
 export const activatePro = (code: string) =>
-  invoke<boolean>("activate_pro", { code });
+  invoke<Entitlement>("activate_pro", { code });
+export const getEntitlement = () =>
+  invoke<Entitlement>("get_entitlement");
+export const refreshEntitlement = () =>
+  invoke<Entitlement>("refresh_entitlement");
+export const deactivatePro = () =>
+  invoke<Entitlement>("deactivate_pro");
+export const submitReceipt = (
+  store: "apple" | "google",
+  receipt: unknown,
+) => invoke<Entitlement>("submit_receipt", { store, receipt });
+
+/** 授权状态变更事件 */
+export const PRO_STATUS_EVENT = "pro://status";
 
 export const getConnections = () => invoke("get_connections");
 export const getTrafficStats = () => invoke("get_traffic_stats");
+
+export const closeConnection = (id: string) =>
+  invoke<void>("close_connection", { id });
+
+export const closeAllConnections = () =>
+  invoke<void>("close_all_connections");
 export const getRules = () => invoke("get_rules");
 export const getProxyGroups = () => invoke("get_proxy_groups");
 

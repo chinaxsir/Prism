@@ -5,7 +5,7 @@ pub mod plugins;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tracing_subscriber::EnvFilter;
 
 /// 显示并聚焦主窗口（托盘左键 / 菜单“显示主窗口”）
@@ -36,13 +36,18 @@ pub fn run() {
         .unwrap_or_else(|_| EnvFilter::new("info,want=off,mio=off,polling=off"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_os::init())
-        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_process::init());
+    // 移动端 IAP（StoreKit2 / Google Play Billing），桌面不编译
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let builder = builder.plugin(tauri_plugin_iap::init());
+
+    let app = builder
         // 注意：日志统一走 tracing-subscriber（见 run() 开头），
         // 它已注册全局 log facade，再注册 tauri-plugin-log 会导致
         // “attempted to set a logger after the logging system was already initialized” panic
@@ -50,7 +55,22 @@ pub fn run() {
             // 数据目录：settings.json / subscriptions.json / kernel/（config.json 等）
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir).ok();
-            app.manage(core::state::AppState::new(data_dir));
+            app.manage(core::state::AppState::new(data_dir.clone(), app.handle().clone()));
+
+            // 启动后台联网校验授权：结果写回内存并广播；失败（离线）不阻塞启动
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let state = handle.state::<core::state::AppState>();
+                let settings = state.settings.read().clone();
+                match core::license::verify_remote(&data_dir, &settings).await {
+                    Ok(next) => {
+                        tracing::info!("license verified: {}", next.status);
+                        *state.entitlement.write() = next.clone();
+                        let _ = handle.emit("pro://status", &next);
+                    }
+                    Err(e) => tracing::warn!("license verify failed: {e}"),
+                }
+            });
 
             // 系统托盘：左键单击显示主窗口；菜单提供 显示/退出
             let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
@@ -97,9 +117,18 @@ pub fn run() {
             ipc::commands::select_proxy,
             ipc::commands::update_subscription,
             ipc::commands::list_subscriptions,
+            ipc::commands::toggle_subscription,
             ipc::commands::delete_subscription,
+            ipc::commands::get_custom_rules,
+            ipc::commands::save_custom_rules,
             ipc::commands::activate_pro,
+            ipc::commands::get_entitlement,
+            ipc::commands::refresh_entitlement,
+            ipc::commands::deactivate_pro,
+            ipc::commands::submit_receipt,
             ipc::commands::get_connections,
+            ipc::commands::close_connection,
+            ipc::commands::close_all_connections,
             ipc::commands::get_traffic_stats,
             ipc::commands::get_rules,
             ipc::commands::get_proxy_groups,

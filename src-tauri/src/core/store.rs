@@ -22,6 +22,46 @@ pub struct SubscriptionRecord {
     /// 可选备注名
     #[serde(default)]
     pub name: Option<String>,
+    /// 是否参与配置合并（多订阅模型；旧记录缺省视为启用）
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+/// 通用原子写入：先写 .tmp 再 rename（调用方负责父目录存在）
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let tmp = path.with_extension(
+        path.extension()
+            .map(|e| format!("{}.tmp", e.to_string_lossy()))
+            .unwrap_or_else(|| "tmp".into()),
+    );
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// 订阅内容落盘路径：data_dir/profiles/{url哈希}.yaml（由 URL 确定性派生）
+pub fn profile_path(data_dir: &Path, url: &str) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut h);
+    data_dir
+        .join("profiles")
+        .join(format!("{:016x}.yaml", h.finish()))
+}
+
+/// proxy-provider 节点落盘路径：data_dir/providers/{subURL哈希}_{provider名哈希}.yaml
+pub fn provider_path(data_dir: &Path, sub_url: &str, provider_name: &str) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    sub_url.hash(&mut h);
+    provider_name.hash(&mut h);
+    data_dir
+        .join("providers")
+        .join(format!("{:016x}.yaml", h.finish()))
 }
 
 fn settings_path(data_dir: &Path) -> PathBuf {
@@ -30,6 +70,32 @@ fn settings_path(data_dir: &Path) -> PathBuf {
 
 fn subscriptions_path(data_dir: &Path) -> PathBuf {
     data_dir.join("subscriptions.json")
+}
+
+fn custom_rules_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("custom_rules.json")
+}
+
+/// 读取自定义规则（Clash 行格式，顺序即优先级）；损坏/缺失回退空列表
+pub fn load_custom_rules(data_dir: &Path) -> Vec<String> {
+    match std::fs::read(custom_rules_path(data_dir)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!("custom_rules.json 解析失败：{e}");
+            Vec::new()
+        }),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 原子写入自定义规则
+pub fn save_custom_rules(data_dir: &Path, rules: &[String]) -> anyhow::Result<()> {
+    std::fs::create_dir_all(data_dir).ok();
+    let path = custom_rules_path(data_dir);
+    let tmp = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(rules)?;
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
 }
 
 /// 读取用户设置；任何错误（不存在/损坏）都回退默认值
@@ -80,7 +146,7 @@ fn write_subscriptions(data_dir: &Path, records: &[SubscriptionRecord]) -> anyho
     Ok(())
 }
 
-/// 记录一次订阅更新（同 URL 覆盖时间戳，当前只保留最近一条）
+/// 记录一次订阅更新（同 URL 覆盖时间戳；多订阅模型，保留全部记录）
 pub fn upsert_subscription(data_dir: &Path, url: &str) -> anyhow::Result<()> {
     let mut records = load_subscriptions(data_dir);
     let now = unix_now();
@@ -88,15 +154,29 @@ pub fn upsert_subscription(data_dir: &Path, url: &str) -> anyhow::Result<()> {
     if let Some(existing) = records.iter_mut().find(|r| r.url == url) {
         existing.updated_at = now;
     } else {
-        // 单订阅模型：新地址替换旧记录
-        records.clear();
         records.push(SubscriptionRecord {
             url: url.to_string(),
             updated_at: now,
             name: None,
+            enabled: true,
         });
     }
     write_subscriptions(data_dir, &records)
+}
+
+/// 设置订阅启用状态；返回是否存在该记录
+pub fn set_subscription_enabled(
+    data_dir: &Path,
+    url: &str,
+    enabled: bool,
+) -> anyhow::Result<bool> {
+    let mut records = load_subscriptions(data_dir);
+    let Some(record) = records.iter_mut().find(|r| r.url == url) else {
+        return Ok(false);
+    };
+    record.enabled = enabled;
+    write_subscriptions(data_dir, &records)?;
+    Ok(true)
 }
 
 /// 删除一条订阅记录（按 URL 匹配），返回是否有记录被移除

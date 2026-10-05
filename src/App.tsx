@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
+import { listen } from "@tauri-apps/api/event";
 import Sidebar from "@/components/Sidebar";
 import TitleBar from "@/components/TitleBar";
 import BottomNav from "@/components/BottomNav";
@@ -10,15 +11,46 @@ import Subscription from "@/pages/Subscription";
 import Rules from "@/pages/Rules";
 import Connections from "@/pages/Connections";
 import Settings from "@/pages/Settings";
+import { useCoreStore, type CoreStatus, type RunMode } from "@/stores/core";
 import { useProStore } from "@/stores/pro";
+import type { Entitlement } from "@/api/ipc";
 
 export default function App() {
   const initPro = useProStore((s) => s.init);
 
-  // 启动时读取 Pro 解锁状态（proUnlocked 持久化于设置）
+  // 启动时读取授权状态（命令层从 license 缓存恢复）
   useEffect(() => {
     initPro();
   }, [initPro]);
+
+  // 授权状态广播（启动后台校验 / 激活 / 解绑后，Rust 侧推送）
+  useEffect(() => {
+    const unlisten = listen<Entitlement>("pro://status", (event) => {
+      useProStore.getState().setEntitlement(event.payload);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // 监听内核状态广播：订阅增删改/设置变更触发的 restart_core
+  // 对前端透明，重启成功或失败转 Error 都能即时对齐，无需轮询
+  useEffect(() => {
+    const unlisten = listen<{
+      status: CoreStatus;
+      mode: RunMode;
+      uptimeSecs: number;
+    }>("core://status", (event) => {
+      const { status, mode, uptimeSecs } = event.payload;
+      const store = useCoreStore.getState();
+      store.setStatus(status);
+      store.setMode(mode);
+      store.setUptime(uptimeSecs);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   return (
     <div className="flex flex-col h-screen bg-surface text-gray-200 overflow-hidden">

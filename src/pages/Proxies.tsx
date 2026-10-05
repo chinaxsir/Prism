@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Zap } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
 
-import { getProxyGroups, selectProxy, urlTest } from "@/api/ipc";
+import { getCoreStatus, getProxyGroups, selectProxy, urlTest } from "@/api/ipc";
 import clsx from "clsx";
 
 interface DelaySample {
@@ -34,12 +35,28 @@ export default function Proxies() {
   const [testing, setTesting] = useState(false);
   /// 上一轮组测速中失败（未出现在结果 map）的节点，展示为「超时」
   const [failed, setFailed] = useState<Set<string>>(new Set());
+  /// 主选择组（route.final 链上最深的 selector）：默认落在此 tab，选择才真实生效
+  const [mainSelector, setMainSelector] = useState("");
 
   useEffect(() => {
-    loadProxies();
+    // 先取主选择组再加载节点，保证默认 tab 落在流量实际经过的选择组
+    getCoreStatus()
+      .then((d) => {
+        const ms = d.mainSelector ?? "";
+        setMainSelector(ms);
+        loadProxies(ms);
+      })
+      .catch(() => loadProxies());
+
+    // 内核启动/模式切换后的自动选点完成时刷新
+    const un = listen("proxies://changed", () => loadProxies());
+    return () => {
+      un.then((fn) => fn());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const loadProxies = async () => {
+  const loadProxies = async (preferred?: string) => {
     try {
       const resp = (await getProxyGroups()) as {
         proxies?: Record<string, ProxyEntry>;
@@ -47,13 +64,19 @@ export default function Proxies() {
       const map = resp.proxies ?? {};
       setProxiesMap(map);
 
-      const groupList = Object.values(map).filter((g) =>
-        GROUP_TYPES.includes(g.type)
+      // GLOBAL 是内核自动生成的虚拟组，不在路由链路中：在其中选节点不会生效，直接隐藏
+      const groupList = Object.values(map).filter(
+        (g) => GROUP_TYPES.includes(g.type) && g.name !== "GLOBAL"
       );
       setGroups(groupList);
 
-      setActiveGroup((prev) =>
-        prev && map[prev] ? prev : groupList[0]?.name ?? ""
+      setActiveGroup(
+        (prev) =>
+          (prev && map[prev] && prev) ||
+          (preferred && map[preferred] && preferred) ||
+          (mainSelector && map[mainSelector] && mainSelector) ||
+          groupList[0]?.name ||
+          ""
       );
     } catch (e) {
       console.error("load proxies failed:", e);
