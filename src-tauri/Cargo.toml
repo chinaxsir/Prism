@@ -8,9 +8,12 @@ repository = "https://github.com/your-org/prism"
 edition = "2024"
 rust-version = "1.85"
 
-# 解决 time-macros / num_threads 在 aarch64-apple-ios 交叉编译时关于 libc::mach_task_self 编译失败的已知版本兼容性 Bug
+# 修复 time/num_threads 在 aarch64-apple-ios 交叉编译时报错：
+# num_threads 0.1.7 的 apple.rs 调用了 libc::mach_task_self()，
+# 但 libc >= 0.2.155 在 iOS 目标上移除了该符号导出。
+# 采用本地 vendored 副本，通过 extern "C" 手动声明该系统符号解决。
 [patch.crates-io]
-num_threads = { git = "https://github.com/theloceye/num_threads-rs.git", branch = "main" }
+num_threads = { path = "vendor/num_threads" }
 
 [build-dependencies]
 tauri-build = { version = "2.0.0", features = [] }

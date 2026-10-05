@@ -1,0 +1,13 @@
+[package]
+name = "num_threads"
+version = "0.1.7"
+authors = ["Jacob Pratt <open-source@jhpratt.dev>"]
+description = "A minimal library that determines the number of running threads for the current process."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jhpratt/num_threads"
+edition = "2018"
+
+[dependencies]
+
+[target."cfg(any(target_os = \"macos\", target_os = \"ios\", target_os = \"freebsd\"))".dependencies.libc]
+version = "0.2.107"
