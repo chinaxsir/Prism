@@ -65,8 +65,9 @@ jobs:
       - name: Init Android project
         run: npx tauri android init
 
+      # 开启详细日志，以便定位移动端编译具体报错
       - name: Build APK
-        run: npx tauri android build --apk
+        run: npx tauri android build --apk --verbose
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -110,7 +111,7 @@ jobs:
       # 再直接从 archive 内的 .app 产出未签名 IPA；
       # 不经过 exportArchive，因此无需任何证书/描述文件
       - name: Build unsigned IPA
-        run: npx tauri ios build --no-sign
+        run: npx tauri ios build --no-sign --verbose
 
       - name: Locate IPA
         id: ipa
