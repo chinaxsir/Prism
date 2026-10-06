@@ -14,6 +14,10 @@ fn main() {
         for fw in ["Security", "Foundation", "CoreFoundation", "SystemConfiguration"] {
             println!("cargo:rustc-link-lib=framework={fw}");
         }
+        // Go c-archive iOS 运行时还依赖 libresolv（res_9_ninit/nclose/nsearch）与 libz
+        for lib in ["resolv", "z"] {
+            println!("cargo:rustc-link-lib={lib}");
+        }
         println!(
             "cargo:rerun-if-changed={}",
             dir.join("libprismkernel.a").display()
