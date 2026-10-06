@@ -109,6 +109,22 @@ jobs:
       - name: Init Android project
         run: npx tauri android init
 
+      # tauri android init 只放置模板自带图标，不会把 src-tauri/icons/android
+      # 同步进 gen 工程；这里用定制的满幅海军蓝图标覆盖 mipmap/values/anydpi
+      - name: Sync Android launcher icons
+        run: |
+          set -e
+          RES=src-tauri/gen/android/app/src/main/res
+          test -d "$RES"
+          cp -rfv src-tauri/icons/android/. "$RES"/ | tail -20
+          echo "--- ic_launcher_background ---"
+          cat "$RES/values/ic_launcher_background.xml"
+
+      # Pre-build 直接跑 cargo，tauri::generate_context! 需要 frontendDist(../dist)
+      # 已存在；先执行与 tauri build 相同的 beforeBuildCommand
+      - name: Build frontend
+        run: npm run build
+
       # Gradle rust 插件会把 cargo 详细输出重定向到文件，失败时控制台只见
       # "Process 'command 'npm'' finished with non-zero exit value 1"。
       # 先用 cargo 直接构建全部目标（与 Tauri 调用等价：--lib --release）：
@@ -215,6 +231,19 @@ jobs:
       - name: Init iOS project
         run: npx tauri ios init
 
+      # tauri ios init 只放置模板自带 Tauri 图标，不会把 src-tauri/icons/ios
+      # 同步进 gen 工程；init 完成后把暂存区图标覆盖进 AppIcon.appiconset
+      # （文件名与模板 Contents.json 一一对应）
+      - name: Sync iOS app icons
+        shell: bash
+        run: |
+          set -e
+          ICONSET=$(find src-tauri/gen/apple -type d -name AppIcon.appiconset | head -1)
+          test -n "$ICONSET"
+          echo "appiconset: $ICONSET"
+          cp -fv src-tauri/icons/ios/*.png "$ICONSET"/
+          echo "icons synced: $(ls "$ICONSET"/*.png | wc -l | tr -d ' ')"
+
       # 官方未签名路径（CLI 2.12+）：--no-sign 先构建未签名 archive，
       # 再直接从 archive 内的 .app 产出未签名 IPA；
       # 不经过 exportArchive，因此无需任何证书/描述文件
@@ -235,7 +264,68 @@ jobs:
           EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
           echo "app: $APP  exec: $EXEC"
 
-          # 收集 .app 内全部 Mach-O（主二进制 / Frameworks / 插件）
+          echo "--- Frameworks as shipped by tauri --no-sign ---"
+          ls -1 "$APP/Frameworks" 2>/dev/null || echo "(empty)"
+
+          # 补齐 Swift 运行时（修复 dyld "Library not loaded:
+          # @rpath/libswiftCore.dylib" 启动闪退，崩溃类型 DYLD/Library missing）。
+          # IAP 等 Swift 插件被静态链接进主二进制，主二进制以 @rpath 引用
+          # libswiftCore 等十余个运行时；但 --no-sign 的 archive 以
+          # CODE_SIGNING_ALLOWED=NO 执行，Xcode 的 "Embed Swift Standard
+          # Libraries" 阶段不拷贝这些库（仅 back-deploy 的 libswift_Concurrency
+          # 由链接器单独放入），而 iOS 的 @rpath 回退路径也不含系统
+          # /usr/lib/swift，于是 dyld 在执行任何代码前中止进程。
+          # 从 Xcode toolchain 按 otool 依赖闭包把缺失的 dylib 补进 Frameworks
+          # （swift-5.0/iphoneos 即 Xcode 正常嵌入 IPA 的同一来源）。
+          TOOL_ROOT="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
+          SWIFT_INDEX=$(mktemp -d)
+          for d in "$TOOL_ROOT/swift-5.0/iphoneos" "$TOOL_ROOT/swift/iphoneos"; do
+            if [ -d "$d" ]; then
+              find "$d" \( -type f -o -type l \) -name "libswift*.dylib" | while IFS= read -r f; do
+                b="$(basename "$f")"
+                if [ ! -e "$SWIFT_INDEX/$b" ]; then cp -RL "$f" "$SWIFT_INDEX/$b"; fi
+              done
+            fi
+          done
+          echo "toolchain swift dylibs indexed: $(ls "$SWIFT_INDEX" | wc -l | tr -d ' ')"
+
+          NEED=$(mktemp)
+          # 一轮扫描：主二进制 + Frameworks 内全部 libswift dylib；
+          # 返回 0=本轮新补了库（需再扫一轮求传递闭包），1=闭包已完整
+          embed_round() {
+            {
+              otool -L "$APP/$EXEC" 2>/dev/null || true
+              find "$APP/Frameworks" -type f -name "libswift*.dylib" -exec otool -L {} \; 2>/dev/null || true
+            } | grep -oE 'libswift[A-Za-z0-9_.]*\.dylib' | sort -u > "$NEED"
+            added=0
+            while IFS= read -r lib; do
+              if [ ! -e "$APP/Frameworks/$lib" ]; then
+                if [ -e "$SWIFT_INDEX/$lib" ]; then
+                  cp -RL "$SWIFT_INDEX/$lib" "$APP/Frameworks/$lib"
+                  echo "embedded: $lib"
+                  added=1
+                else
+                  echo "::warning::Swift runtime missing from toolchain index: $lib"
+                fi
+              fi
+            done < "$NEED"
+            [ $added -eq 1 ]
+          }
+          for i in 1 2 3 4 5 6; do
+            if ! embed_round; then
+              echo "swift closure complete after $((i-1)) extra round(s)"
+              break
+            fi
+          done
+
+          echo "--- Frameworks after swift embed ---"
+          ls -1 "$APP/Frameworks"
+          if [ ! -f "$APP/Frameworks/libswiftCore.dylib" ]; then
+            echo "::error::libswiftCore.dylib still missing after embed step"
+            exit 1
+          fi
+
+          # 收集 .app 内全部 Mach-O（主二进制 / Frameworks / 插件；含刚补入的 dylib）
           # 用临时文件列表而非 mapfile：macOS 自带 bash 3.2 没有 mapfile
           LIST=$(mktemp)
           find "$APP" -type f | while IFS= read -r f; do
@@ -245,12 +335,11 @@ jobs:
 
           # --no-sign 的主二进制不带任何 entitlements；TrollStore 安装时会注入
           # 含 get-task-allow 的 fallback entitlements（模拟 Xcode 签名），
-          # iOS 16+ 因此要求开启“开发者模式”，未开启时 amfid 直接杀进程（闪退、
-          # 且系统分析里不生成崩溃日志）。
+          # iOS 16+ 因此要求开启“开发者模式”，未开启时 amfid 拒绝执行。
           # 主二进制预签一份不含任何受限 entitlement 的 ad-hoc 签名；
-          # 其余 Mach-O（framework / appex）一律无 entitlements ad-hoc 重签，
-          # 防止任何二进制残留 get-task-allow。TrollStore 安装时仍会用
-          # CoreTrust 漏洞重签整个 app，但不再要求开发者模式，装完即开。
+          # 其余 Mach-O（含刚补入的 Swift dylib）一律无 entitlements ad-hoc 重签。
+          # TrollStore 安装时仍会用 CoreTrust 漏洞重签整个 app，但不再要求
+          # 开发者模式，装完即开。
           while IFS= read -r bin; do
             if [ "$bin" = "$APP/$EXEC" ]; then
               codesign --force --sign - \
@@ -279,6 +368,23 @@ jobs:
             exit 1
           fi
           echo "no restricted entitlements; Developer Mode not required"
+
+          # 硬校验：所有 Mach-O 引用的 libswift*.dylib 必须都在 Frameworks 中，
+          # 防止漏补导致设备上重演 DYLD Library missing 闪退
+          missing=0
+          while IFS= read -r bin; do
+            for lib in $(otool -L "$bin" 2>/dev/null | grep -oE 'libswift[A-Za-z0-9_.]*\.dylib' | sort -u); do
+              if [ ! -f "$APP/Frameworks/$lib" ]; then
+                echo "::error file=${bin#$PWD/}::$lib required but not embedded"
+                missing=1
+              fi
+            done
+          done < "$LIST"
+          if [ "$missing" -ne 0 ]; then
+            echo "Swift runtime libraries missing; aborting"
+            exit 1
+          fi
+          echo "all referenced Swift runtime libraries are embedded"
 
           OUT="$PWD/Prism-0.1.0-TrollStore.ipa"
           rm -f "$OUT"
