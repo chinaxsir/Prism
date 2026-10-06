@@ -12,7 +12,6 @@ import { ActivateProModal } from "@/components/ProGate";
 import EmptyState from "@/components/ui/EmptyState";
 import Spinner from "@/components/ui/Spinner";
 import { toast } from "@/components/ui/Toast";
-import { isMobile } from "@/pro/gating";
 import { useProStore } from "@/stores/pro";
 
 /// updatedAt 兼容秒/毫秒时间戳，输出相对时间
@@ -72,8 +71,8 @@ export default function Subscription() {
       toast.error("请输入有效的 http/https 订阅链接");
       return;
     }
-    // 免费版仅支持单订阅：第二条起需要 Pro（仅移动端门控）
-    if (isMobile() && !unlocked && subs.length >= 1) {
+    // 免费版仅支持单订阅：第二条起需要 Pro（全平台门控）
+    if (!unlocked && subs.length >= 1) {
       setShowActivate(true);
       return;
     }
