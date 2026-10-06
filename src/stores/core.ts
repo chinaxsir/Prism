@@ -11,8 +11,6 @@ export interface UserSettings {
   /** 运行模式（后端权威持久化；表单提交时会被后端以 set_mode 为准覆盖） */
   mode: RunMode;
   autoStart: boolean;
-  /** 历史占位字段，真实授权以 pro store 为准 */
-  proUnlocked: boolean;
   /** 出站模式（规则/全局/直连） */
   outboundMode?: OutboundMode;
   /** 启用 IPv6 */
@@ -65,7 +63,6 @@ export const useCoreStore = create<CoreState>((set, get) => ({
     systemProxy: true,
     mode: "systemProxy",
     autoStart: false,
-    proUnlocked: false,
   },
 
   setStatus: (status) => set({ status }),

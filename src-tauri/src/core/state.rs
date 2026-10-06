@@ -74,9 +74,6 @@ pub struct UserSettings {
     pub mode: RunMode,
     /// 开机自启动
     pub auto_start: bool,
-    /// Pro 高级功能已解锁（历史占位字段；真实授权状态以 license 模块为准）
-    #[serde(default)]
-    pub pro_unlocked: bool,
     /// 出站模式（规则/全局/直连）
     #[serde(default)]
     pub outbound_mode: OutboundMode,
@@ -99,7 +96,6 @@ impl Default for UserSettings {
             system_proxy: true,
             mode: RunMode::SystemProxy,
             auto_start: false,
-            pro_unlocked: false,
             outbound_mode: OutboundMode::Rule,
             ipv6: false,
             block_quic: false,

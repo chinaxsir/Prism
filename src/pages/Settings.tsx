@@ -82,7 +82,6 @@ export default function Settings() {
     systemProxy: true,
     mode: "systemProxy",
     autoStart: false,
-    proUnlocked: false,
     outboundMode: "rule",
     ipv6: false,
     blockQuic: false,
