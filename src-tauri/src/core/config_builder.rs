@@ -16,7 +16,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::state::{RunMode, UserSettings};
+use super::state::{OutboundMode, RunMode, UserSettings};
 
 const DEFAULT_TEST_URL: &str = "http://www.gstatic.com/generate_204";
 const TUN_TAG: &str = "tun-in";
@@ -339,6 +339,7 @@ pub fn build(
     }
 
     // ---- 逐订阅产出出站/组/规则 ----
+    let mut node_tags: Vec<String> = Vec::new();
     for parsed in &parsed_list {
         let ParsedProfile {
             name: sub_name,
@@ -354,19 +355,23 @@ pub fn build(
 
         // 订阅自身节点
         for node in &profile.proxies {
-            emit_node(&mut outbounds, &mut known_tags, &mut warnings, node, &apply, &mut total_nodes);
+            if let Some(t) = emit_node(&mut outbounds, &mut known_tags, &mut warnings, node, &apply, &mut total_nodes) {
+                node_tags.push(t);
+            }
         }
         // provider 节点
         for nodes in provider_nodes.values() {
             for node in nodes {
-                emit_node(
+                if let Some(t) = emit_node(
                     &mut outbounds,
                     &mut known_tags,
                     &mut warnings,
                     node,
                     &apply,
                     &mut total_nodes,
-                );
+                ) {
+                    node_tags.push(t);
+                }
             }
         }
 
@@ -417,9 +422,40 @@ pub fn build(
     }
 
     // 未显式 MATCH：优先全部订阅中的首个策略组，否则 direct
-    let final_tag = final_tag
+    let rule_final = final_tag
         .or(first_group_tag)
         .unwrap_or_else(|| "direct".into());
+
+    // 出站模式：规则=按订阅 MATCH 分流；全局=所有流量进 GLOBAL 选择组；直连=全部 direct
+    let final_tag = match settings.outbound_mode {
+        OutboundMode::Rule => rule_final,
+        OutboundMode::Direct => "direct".to_string(),
+        OutboundMode::Global => {
+            if node_tags.is_empty() {
+                warnings.push("全局模式需要至少一个节点，当前订阅无节点，回退为规则模式".into());
+                rule_final
+            } else {
+                let mut members = node_tags.clone();
+                members.push("direct".to_string());
+                let default = node_tags[0].clone();
+                outbounds.push(json!({
+                    "type": "selector",
+                    "tag": "GLOBAL",
+                    "outbounds": members,
+                    "default": default,
+                }));
+                "GLOBAL".to_string()
+            }
+        }
+    };
+
+    // 阻止 QUIC：UDP/443 直接拦截，强制浏览器回退 TCP（规则链最前，优先级最高）
+    if settings.block_quic {
+        route_rules.insert(
+            0,
+            json!({ "network": "udp", "port": 443, "outbound": "block" }),
+        );
+    }
 
     // 校验策略组引用，剔除悬空目标
     // 注意：必须用 get_mut 探测，直接 outbound["outbounds"] 可变索引会给
@@ -448,7 +484,7 @@ pub fn build(
     })];
 
     if mode == RunMode::Tun {
-        inbounds.push(json!({
+        let mut tun = json!({
             "type": "tun",
             "tag": TUN_TAG,
             "interface_name": "prism-tun",
@@ -457,13 +493,19 @@ pub fn build(
             "auto_route": true,
             "strict_route": true,
             "stack": "gvisor",
-        }));
+        });
+        // IPv6 开启时 TUN 同时接管 v6 流量（关闭时 DNS 层已 ipv4_only，双保险）
+        if settings.ipv6 {
+            tun["inet6_address"] = json!("fdfe:dcba:9876::1/126");
+        }
+        inbounds.push(tun);
     }
 
     // 5. DNS（1.11 legacy 格式：servers 用 address；1.12 的 type/server 尚未支持）
     // dns-remote 用 DoH 直连：UDP 53 的 8.8.8.8 在国内会被污染，
     // 非 .cn 后缀的国内域名（如 baidu.com）若被解析到假 IP，direct 出站也会 TLS 握手失败。
     // geosite cn 覆盖国内域名（含 .com），".cn" 后缀规则仅作兜底。
+    // IPv6 关闭时 ipv4_only：不返回 AAAA，避免 TUN/代理链路下的 v6 泄漏与连接失败。
     let dns = json!({
         "servers": [
             { "tag": "dns-remote", "address": "https://1.1.1.1/dns-query", "detour": "direct" },
@@ -474,7 +516,7 @@ pub fn build(
             { "domain_suffix": [".cn"], "server": "dns-local" }
         ],
         "final": "dns-remote",
-        "strategy": "prefer_ipv4"
+        "strategy": if settings.ipv6 { "prefer_ipv4" } else { "ipv4_only" }
     });
 
     // 6. clash_api（驱动前端实时数据；地址动态选择，secret 随机生成）
@@ -520,7 +562,8 @@ pub fn build(
 
 // ---------------- 构建小助手 ----------------
 
-/// 转换并登记一个节点出站；apply 决定最终 tag（含冲突改名）
+/// 转换并登记一个节点出站；apply 决定最终 tag（含冲突改名）。
+/// 成功发射时返回最终 tag（用于 GLOBAL 组收集全部节点）。
 fn emit_node(
     outbounds: &mut Vec<Value>,
     known_tags: &mut HashSet<String>,
@@ -528,11 +571,11 @@ fn emit_node(
     node: &ClashNode,
     apply: &dyn Fn(&str) -> String,
     total_nodes: &mut usize,
-) {
+) -> Option<String> {
     let tag = apply(&node.name);
     if !known_tags.insert(tag.clone()) {
         warnings.push(format!("节点/组标签重复，已跳过：{}", tag));
-        return;
+        return None;
     }
     match node_to_outbound(node) {
         Some((mut outbound, note)) => {
@@ -542,11 +585,15 @@ fn emit_node(
             }
             outbounds.push(outbound);
             *total_nodes += 1;
+            Some(tag)
         }
-        None => warnings.push(format!(
-            "不支持的节点类型，已跳过 '{}' ({})",
-            node.name, node.kind
-        )),
+        None => {
+            warnings.push(format!(
+                "不支持的节点类型，已跳过 '{}' ({})",
+                node.name, node.kind
+            ));
+            None
+        }
     }
 }
 

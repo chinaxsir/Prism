@@ -10,6 +10,7 @@ import Proxies from "@/pages/Proxies";
 import Subscription from "@/pages/Subscription";
 import Rules from "@/pages/Rules";
 import Connections from "@/pages/Connections";
+import Analytics from "@/pages/Analytics";
 import Settings from "@/pages/Settings";
 import { useCoreStore, type CoreStatus, type RunMode } from "@/stores/core";
 import { useProStore } from "@/stores/pro";
@@ -65,6 +66,7 @@ export default function App() {
             <Route path="/subscription" element={<Subscription />} />
             <Route path="/rules" element={<Rules />} />
             <Route path="/connections" element={<Connections />} />
+            <Route path="/analytics" element={<Analytics />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>

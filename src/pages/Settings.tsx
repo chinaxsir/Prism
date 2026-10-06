@@ -14,7 +14,7 @@ import {
   type KernelInfo,
   type EntitlementState,
 } from "@/api/ipc";
-import type { RunMode, UserSettings } from "@/stores/core";
+import type { OutboundMode, RunMode, UserSettings } from "@/stores/core";
 import { useCoreStore } from "@/stores/core";
 import { ActivateProModal } from "@/components/ProGate";
 import { useProStore } from "@/stores/pro";
@@ -55,6 +55,24 @@ const MODES: { key: RunMode; title: string; desc: string }[] = [
   },
 ];
 
+const OUTBOUND_MODES: { key: OutboundMode; title: string; desc: string }[] = [
+  {
+    key: "rule",
+    title: "规则",
+    desc: "按订阅与自定义规则分流（默认）",
+  },
+  {
+    key: "global",
+    title: "全局",
+    desc: "全部流量走 GLOBAL 组所选节点",
+  },
+  {
+    key: "direct",
+    title: "直连",
+    desc: "全部流量直连，不走任何节点",
+  },
+];
+
 export default function Settings() {
   const [mode, setRunMode] = useState<RunMode>("systemProxy");
   const [modeBusy, setModeBusy] = useState(false);
@@ -66,6 +84,10 @@ export default function Settings() {
     autoStart: false,
     proUnlocked: false,
     licenseServerUrl: null,
+    outboundMode: "rule",
+    ipv6: false,
+    blockQuic: false,
+    closeConnectionsOnSwitch: false,
   });
   const [saved, setSaved] = useState(false);
   const [showActivate, setShowActivate] = useState(false);
@@ -325,6 +347,55 @@ export default function Settings() {
           desc="登录系统后自动启动 Prism"
           checked={form.autoStart}
           onChange={(v) => patch({ autoStart: v })}
+        />
+      </section>
+
+      {/* 高级 */}
+      <section className="bg-surface-card rounded-xl p-5">
+        <h2 className="text-base font-semibold mb-4">高级</h2>
+
+        <div className="py-3 border-b border-white/5">
+          <div className="text-sm mb-1">出站模式</div>
+          <div className="text-xs text-gray-500 mb-3">
+            流量最终走向；保存后内核自动重启生效
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            {OUTBOUND_MODES.map((m) => (
+              <button
+                key={m.key}
+                onClick={() => patch({ outboundMode: m.key })}
+                className={`text-left p-3 rounded-lg border transition-all ${
+                  (form.outboundMode ?? "rule") === m.key
+                    ? "border-accent bg-accent/10"
+                    : "border-white/5 hover:border-white/15"
+                }`}
+              >
+                <div className="font-medium text-sm mb-0.5">{m.title}</div>
+                <div className="text-[11px] text-gray-500 leading-snug">
+                  {m.desc}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <ToggleRow
+          title="IPv6"
+          desc="开启后 DNS 返回 AAAA 记录且 TUN 接管 v6 流量；关闭可避免 v6 泄漏"
+          checked={form.ipv6 ?? false}
+          onChange={(v) => patch({ ipv6: v })}
+        />
+        <ToggleRow
+          title="阻止 QUIC"
+          desc="拦截 UDP/443，强制浏览器回退 TCP（避免 QUIC 绕过分流）"
+          checked={form.blockQuic ?? false}
+          onChange={(v) => patch({ blockQuic: v })}
+        />
+        <ToggleRow
+          title="切换策略时关闭连接"
+          desc="手动切换节点后断开现有连接，新策略立即生效"
+          checked={form.closeConnectionsOnSwitch ?? false}
+          onChange={(v) => patch({ closeConnectionsOnSwitch: v })}
         />
       </section>
 

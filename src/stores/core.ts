@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 export type CoreStatus = "stopped" | "starting" | "running" | "stopping" | "error";
 export type RunMode = "systemProxy" | "tun" | "ruleOnly";
+export type OutboundMode = "rule" | "global" | "direct";
 
 export interface UserSettings {
   mixedPort: number;
@@ -14,6 +15,14 @@ export interface UserSettings {
   proUnlocked: boolean;
   /** 授权服务地址（为空使用内置默认） */
   licenseServerUrl?: string | null;
+  /** 出站模式（规则/全局/直连） */
+  outboundMode?: OutboundMode;
+  /** 启用 IPv6 */
+  ipv6?: boolean;
+  /** 阻止 QUIC（UDP/443） */
+  blockQuic?: boolean;
+  /** 切换策略后关闭现有连接 */
+  closeConnectionsOnSwitch?: boolean;
 }
 
 interface TrafficPoint {

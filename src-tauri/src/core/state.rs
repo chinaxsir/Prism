@@ -41,6 +41,24 @@ impl Default for RunMode {
     }
 }
 
+/// 出站模式（流量最终走向；对应 Clash 的 rule/global/direct）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OutboundMode {
+    /// 按规则分流（默认）
+    Rule,
+    /// 全部走 GLOBAL 选择组（用户手动选节点）
+    Global,
+    /// 全部直连
+    Direct,
+}
+
+impl Default for OutboundMode {
+    fn default() -> Self {
+        Self::Rule
+    }
+}
+
 /// 用户设置（可由设置页修改，持久化到 settings.json）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +80,18 @@ pub struct UserSettings {
     /// 授权服务地址（为空使用编译期默认；便于自建部署/联调切换）
     #[serde(default)]
     pub license_server_url: Option<String>,
+    /// 出站模式（规则/全局/直连）
+    #[serde(default)]
+    pub outbound_mode: OutboundMode,
+    /// 启用 IPv6（关闭时 DNS 仅解析 A 记录，避免 TUN 下 AAAA 泄漏）
+    #[serde(default)]
+    pub ipv6: bool,
+    /// 阻止 QUIC（UDP/443），强制回退 TCP（避免 QUIC 绕过分流/审计）
+    #[serde(default)]
+    pub block_quic: bool,
+    /// 手动切换策略后关闭现有连接（让新策略立即生效）
+    #[serde(default)]
+    pub close_connections_on_switch: bool,
 }
 
 impl Default for UserSettings {
@@ -74,6 +104,10 @@ impl Default for UserSettings {
             auto_start: false,
             pro_unlocked: false,
             license_server_url: None,
+            outbound_mode: OutboundMode::Rule,
+            ipv6: false,
+            block_quic: false,
+            close_connections_on_switch: false,
         }
     }
 }

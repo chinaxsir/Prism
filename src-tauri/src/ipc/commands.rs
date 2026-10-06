@@ -555,7 +555,13 @@ pub async fn select_proxy(
         .kernel_api()
         .select_proxy(&group, &name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // 「切换策略时关闭连接」：断开后由应用按新节点重建，避免旧连接继续走旧节点
+    if state.settings.read().close_connections_on_switch {
+        let _ = state.kernel_api().close_all_connections().await;
+    }
+    Ok(())
 }
 
 /// 下载订阅并写入 profile.yaml。
@@ -1075,11 +1081,14 @@ pub async fn save_settings(
         .save_settings(settings)
         .map_err(|e| format!("保存设置失败: {e}"))?;
 
-    // 影响入站/系统代理的字段变更必须重建配置才能真实生效，
+    // 影响入站/系统代理/出站结构的字段变更必须重建配置才能真实生效，
     // 否则系统代理指向旧端口、内核监听旧端口，显示与实际脱节
     let needs_restart = prev.mixed_port != next.mixed_port
         || prev.allow_lan != next.allow_lan
-        || prev.system_proxy != next.system_proxy;
+        || prev.system_proxy != next.system_proxy
+        || prev.outbound_mode != next.outbound_mode
+        || prev.ipv6 != next.ipv6
+        || prev.block_quic != next.block_quic;
     if needs_restart && *state.status.read() == CoreStatus::Running {
         restart_core(&app, &state).await?;
     }

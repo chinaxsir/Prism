@@ -5,6 +5,7 @@ import {
   Rss,
   ListFilter,
   Activity,
+  BarChart3,
   Settings as SettingsIcon,
 } from "lucide-react";
 import clsx from "clsx";
@@ -15,6 +16,7 @@ export const navItems = [
   { to: "/subscription", icon: Rss, label: "订阅" },
   { to: "/rules", icon: ListFilter, label: "规则" },
   { to: "/connections", icon: Activity, label: "连接" },
+  { to: "/analytics", icon: BarChart3, label: "分析" },
   { to: "/settings", icon: SettingsIcon, label: "设置" },
 ];
 
