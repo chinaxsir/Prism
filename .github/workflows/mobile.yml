@@ -387,6 +387,11 @@ jobs:
             fi
           done
 
+          # swift-stdlib-tool 会给处理过的库留下 *.dylib.original 备份
+          # （实测 Core 23MB + _Concurrency 7.7MB），app 包内无用且会被
+          # 当成额外 Mach-O 签名/封包；在收集 Mach-O 列表前删掉
+          find "$APP" -name "*.dylib.original" -delete -print
+
           echo "--- Frameworks after swift embed ---"
           ls -1 "$APP/Frameworks"
           if [ ! -f "$APP/Frameworks/libswiftCore.dylib" ]; then
