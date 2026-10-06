@@ -82,6 +82,14 @@ async fn prepare_start(
 
     // TUN 提权预检：内核要创建虚拟网卡，非管理员/root 时 sing-box tun inbound
     // 必然失败，且错误表现为"15 秒未就绪"，提前给出可操作的明确错误
+    #[cfg(target_os = "ios")]
+    if mode == RunMode::Tun {
+        return Err(
+            "iOS 版暂不支持 TUN 模式（系统级 VPN 需 NetworkExtension，后续版本提供），请使用代理模式"
+                .into(),
+        );
+    }
+    #[cfg(not(target_os = "ios"))]
     if mode == RunMode::Tun && !crate::platform::has_elevated_privilege() {
         return Err(
             "TUN 模式需要管理员/root 权限：请完全退出 Prism 后以管理员身份重新运行（macOS/Linux 使用 sudo）"
@@ -100,6 +108,8 @@ async fn prepare_start(
     }
 
     // 确保内核二进制就位：缺失则首启自动下载（进度走 kernel-download://progress）
+    // iOS 内核静态链接进主程序（ios-kernel c-archive），无二进制解析/下载
+    #[cfg(not(target_os = "ios"))]
     let binary_path = match resolve_kernel_path(&work_dir) {
         Ok(path) => path,
         Err(_) => {
@@ -111,6 +121,8 @@ async fn prepare_start(
                 .map_err(|e| format!("下载后仍找不到内核: {e}"))?
         }
     };
+    #[cfg(target_os = "ios")]
+    let binary_path = std::path::PathBuf::new();
 
     // 端口预检，避免与本机其他代理内核冲突
     let listen_host = if settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" };
@@ -388,6 +400,8 @@ async fn auto_select_fastest(api: &KernelApi, group: &str) -> anyhow::Result<Opt
 /// 1. 环境变量 PRISM_KERNEL_PATH
 /// 2. 内核工作目录内 sing-box[.exe]（首启自动下载落盘位置）
 /// 3. 主程序同级目录 sing-box[.exe]
+/// （iOS 内核内嵌于主程序，无独立二进制可解析）
+#[cfg(not(target_os = "ios"))]
 pub(crate) fn resolve_kernel_path(work_dir: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     let exe_name = if cfg!(windows) {
         "sing-box.exe"
@@ -922,32 +936,57 @@ pub async fn ensure_kernel(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<KernelInfoDto, String> {
-    let work_dir = state.work_dir();
-    let path = match resolve_kernel_path(&work_dir) {
-        Ok(path) => path,
-        Err(_) => crate::core::kernel_download::ensure(&app, &work_dir)
-            .await
-            .map_err(|e| format!("内核下载失败: {e}"))?,
-    };
-
-    if let Some(version) = probe_version(&path).await {
-        *state.kernel_version.write() = Some(version);
+    #[cfg(target_os = "ios")]
+    {
+        let _ = app;
+        *state.kernel_version.write() = Some(format!("{} （内置）", crate::core::kernel::IOS_EMBEDDED_VERSION));
+        return Ok(kernel_info(&state));
     }
-    Ok(kernel_info(&state))
+    #[cfg(not(target_os = "ios"))]
+    {
+        let work_dir = state.work_dir();
+        let path = match resolve_kernel_path(&work_dir) {
+            Ok(path) => path,
+            Err(_) => crate::core::kernel_download::ensure(&app, &work_dir)
+                .await
+                .map_err(|e| format!("内核下载失败: {e}"))?,
+        };
+
+        if let Some(version) = probe_version(&path).await {
+            *state.kernel_version.write() = Some(version);
+        }
+        Ok(kernel_info(&state))
+    }
 }
 
 fn kernel_info(state: &AppState) -> KernelInfoDto {
-    match resolve_kernel_path(&state.work_dir()) {
-        Ok(path) => KernelInfoDto {
+    #[cfg(target_os = "ios")]
+    {
+        let version = state
+            .kernel_version
+            .read()
+            .clone()
+            .or_else(|| Some(format!("{} （内置）", crate::core::kernel::IOS_EMBEDDED_VERSION)));
+        KernelInfoDto {
             exists: true,
-            path: Some(path.to_string_lossy().to_string()),
-            version: state.kernel_version.read().clone(),
-        },
-        Err(_) => KernelInfoDto {
-            exists: false,
             path: None,
-            version: None,
-        },
+            version,
+        }
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        match resolve_kernel_path(&state.work_dir()) {
+            Ok(path) => KernelInfoDto {
+                exists: true,
+                path: Some(path.to_string_lossy().to_string()),
+                version: state.kernel_version.read().clone(),
+            },
+            Err(_) => KernelInfoDto {
+                exists: false,
+                path: None,
+                version: None,
+            },
+        }
     }
 }
 

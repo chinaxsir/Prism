@@ -255,6 +255,36 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -switch /Applications/Xcode.app
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      # iOS 无 sidecar：geoip/geosite 数据库作为 bundle resources 随包分发
+      # （tauri.ios.conf.json resources；内核启动时从 resource_dir 拷贝到工作目录）
+      - name: Fetch geo databases
+        run: node scripts/fetch-kernel.cjs --geo-only
+
+      # iOS 内核内嵌：sing-box 编译为 c-archive 静态库，
+      # src-tauri/build.rs 在 iOS target 下链接 libprismkernel.a，
+      # Rust 侧经 FFI 调用（src-tauri/src/core/kernel.rs ios_ffi）
+      - name: Build embedded iOS kernel
+        working-directory: src-tauri/ios-kernel
+        shell: bash
+        run: |
+          set -e
+          go mod tidy
+          SDK=$(xcrun -sdk iphoneos --show-sdk-path)
+          CC="$(xcrun -sdk iphoneos --find clang)" \
+          CGO_ENABLED=1 GOOS=ios GOARCH=arm64 \
+          CGO_CFLAGS="-isysroot $SDK -arch arm64 -miphoneos-version-min=13.0" \
+          CGO_LDFLAGS="-isysroot $SDK -arch arm64" \
+          go build -buildmode=c-archive \
+            -tags "with_gvisor,with_quic,with_grpc,with_wireguard,with_ech,with_utls,with_clash_api" \
+            -trimpath -ldflags="-s -w" \
+            -o libprismkernel.a .
+          ls -lh libprismkernel.a libprismkernel.h
+
       - name: Install frontend dependencies
         run: npm ci
 

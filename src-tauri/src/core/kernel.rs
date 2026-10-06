@@ -7,6 +7,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+#[cfg(not(target_os = "ios"))]
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -16,12 +17,67 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
+#[cfg(not(target_os = "ios"))]
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
+#[cfg(not(target_os = "ios"))]
+use tokio::process::Command;
 use tokio::task::JoinHandle;
 
 /// 首选 external-controller 地址；被占用时会退回到系统分配的随机端口
 pub const PREFERRED_API_ADDR: &str = "127.0.0.1:9090";
+
+/// iOS 内嵌内核版本（与 ios-kernel/go.mod 的 sing-box 依赖保持一致）
+#[cfg(target_os = "ios")]
+pub const IOS_EMBEDDED_VERSION: &str = "1.11.3";
+
+/// iOS 内嵌内核 FFI（sing-box c-archive，见 src-tauri/ios-kernel/main.go）。
+/// 进程内运行：无子进程、无 pid；clash_api 与桌面 sidecar 完全一致。
+#[cfg(target_os = "ios")]
+mod ios_ffi {
+    use std::ffi::{CStr, CString};
+    use std::os::raw::c_char;
+    use std::path::Path;
+
+    extern "C" {
+        fn PrismKernelStart(config_path: *const c_char, work_dir: *const c_char) -> *mut c_char;
+        fn PrismKernelCheck(config_path: *const c_char, work_dir: *const c_char) -> *mut c_char;
+        fn PrismKernelStop();
+        fn PrismKernelFree(p: *mut c_char);
+    }
+
+    pub fn start(config_path: &Path, work_dir: &Path) -> Result<(), String> {
+        let cp = CString::new(config_path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
+        let wd = CString::new(work_dir.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
+        unsafe {
+            let err = PrismKernelStart(cp.as_ptr(), wd.as_ptr());
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                PrismKernelFree(err);
+                return Err(msg);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn check(config_path: &Path, work_dir: &Path) -> Result<(), String> {
+        let cp = CString::new(config_path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
+        let wd = CString::new(work_dir.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
+        unsafe {
+            let err = PrismKernelCheck(cp.as_ptr(), wd.as_ptr());
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                PrismKernelFree(err);
+                return Err(msg);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn stop() {
+        unsafe { PrismKernelStop() }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,39 +125,50 @@ impl KernelHandle {
         // 数据库随包分发（见 scripts/fetch-kernel.cjs），这里从候选位置拷贝到工作目录
         ensure_geo_databases(&config, &app_handle);
 
-        // 3. 启动 sing-box 进程
+        // 3. 启动内核：iOS 进程内嵌（c-archive FFI），其他平台 spawn sidecar
         // ENABLE_DEPRECATED_GEOIP/GEOSITE：Clash 订阅常见 GEOIP/GEOSITE 规则，
         // 目前转换为 sing-box legacy geoip/geosite 字段；1.11 起需显式环境变量启用。
         // TODO(内核升级)：迁移到 rule_set（.srs 规则集）后移除这两个环境变量
-        let mut child = Command::new(&config.binary_path)
-            .arg("run")
-            .arg("-c")
-            .arg(&config_path)
-            .env("ENABLE_DEPRECATED_GEOIP", "true")
-            .env("ENABLE_DEPRECATED_GEOSITE", "true")
-            // 固定工作目录：sing-box 在此读写 geoip.db / geosite.db / cache.db
-            .current_dir(&config.work_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .context("failed to spawn sing-box process")?;
+        #[cfg(target_os = "ios")]
+        let (child, pid): (Option<Child>, u32) = {
+            ios_ffi::start(&config_path, &config.work_dir)
+                .map_err(|e| anyhow::anyhow!("内嵌内核启动失败: {e}"))?;
+            tracing::info!("sing-box embedded kernel started in-process");
+            (None, std::process::id())
+        };
+        #[cfg(not(target_os = "ios"))]
+        let (child, pid): (Option<Child>, u32) = {
+            let mut child = Command::new(&config.binary_path)
+                .arg("run")
+                .arg("-c")
+                .arg(&config_path)
+                .env("ENABLE_DEPRECATED_GEOIP", "true")
+                .env("ENABLE_DEPRECATED_GEOSITE", "true")
+                // 固定工作目录：sing-box 在此读写 geoip.db / geosite.db / cache.db
+                .current_dir(&config.work_dir)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .context("failed to spawn sing-box process")?;
 
-        let pid = child
-            .id()
-            .context("sing-box process exited immediately (no pid)")?;
-        tracing::info!("sing-box process started, PID: {}", pid);
-        register_kernel_pid(pid);
+            let pid = child
+                .id()
+                .context("sing-box process exited immediately (no pid)")?;
+            tracing::info!("sing-box process started, PID: {}", pid);
+            register_kernel_pid(pid);
 
-        spawn_log_pipe(
-            child.stdout.take().context("missing child stdout")?,
-            "out",
-            &log_path,
-        );
-        spawn_log_pipe(
-            child.stderr.take().context("missing child stderr")?,
-            "err",
-            &log_path,
-        );
+            spawn_log_pipe(
+                child.stdout.take().context("missing child stdout")?,
+                "out",
+                &log_path,
+            );
+            spawn_log_pipe(
+                child.stderr.take().context("missing child stderr")?,
+                "err",
+                &log_path,
+            );
+            (Some(child), pid)
+        };
 
         // 4. 轮询 API 直到就绪（最长 15 秒）
         let api = KernelApi::new(&config.api_addr, &config.api_secret);
@@ -118,10 +185,17 @@ impl KernelHandle {
         }
 
         if !ready {
-            // 启动失败则回收子进程并落盘错误上下文，避免残留孤儿进程
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            clear_kernel_pid(pid);
+            // 启动失败则回收内核并落盘错误上下文，避免残留
+            #[cfg(target_os = "ios")]
+            ios_ffi::stop();
+            #[cfg(not(target_os = "ios"))]
+            {
+                if let Some(mut c) = child {
+                    let _ = c.start_kill();
+                    let _ = c.wait().await;
+                }
+                clear_kernel_pid(pid);
+            }
             let tail = read_log_tail(&log_path);
             anyhow::bail!(
                 "sing-box 在 15 秒内未就绪，请查看内核日志 {} ；末尾输出：{}",
@@ -139,7 +213,7 @@ impl KernelHandle {
 
         Ok(Self {
             config,
-            child: Mutex::new(Some(child)),
+            child: Mutex::new(child),
             pid,
             stream_tasks: Mutex::new(stream_tasks),
         })
@@ -176,6 +250,9 @@ impl KernelHandle {
             }
         }
 
+        #[cfg(target_os = "ios")]
+        ios_ffi::stop();
+
         clear_kernel_pid(self.pid);
         tracing::info!("sing-box process {} stopped", self.pid);
         Ok(())
@@ -184,30 +261,40 @@ impl KernelHandle {
 
 /// 静态校验待应用的配置：sing-box check -c <path>。
 /// 重启前调用——校验失败时旧内核保留，网络不中断。
+/// iOS 上无法 spawn 子进程，改为调用内嵌 FFI 的 PrismKernelCheck（解析+构建后关闭）。
 pub async fn check_config(
     binary: &std::path::Path,
     work_dir: &std::path::Path,
     config_path: &std::path::Path,
 ) -> Result<()> {
-    let output = Command::new(binary)
-        .arg("check")
-        .arg("-c")
-        .arg(config_path)
-        // 与 spawn 一致：legacy GEOIP/GEOSITE 规则需要环境变量启用
-        .env("ENABLE_DEPRECATED_GEOIP", "true")
-        .env("ENABLE_DEPRECATED_GEOSITE", "true")
-        .current_dir(work_dir)
-        .output()
-        .await
-        .context("failed to run sing-box check")?;
+    #[cfg(target_os = "ios")]
+    {
+        let _ = binary;
+        ios_ffi::check(config_path, work_dir)
+            .map_err(|e| anyhow::anyhow!("新配置校验未通过，已保留当前内核：\n{}", e))?;
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let output = Command::new(binary)
+            .arg("check")
+            .arg("-c")
+            .arg(config_path)
+            // 与 spawn 一致：legacy GEOIP/GEOSITE 规则需要环境变量启用
+            .env("ENABLE_DEPRECATED_GEOIP", "true")
+            .env("ENABLE_DEPRECATED_GEOSITE", "true")
+            .current_dir(work_dir)
+            .output()
+            .await
+            .context("failed to run sing-box check")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // 只保留末尾 800 字符，避免前端 toast 被刷屏
-        let chars: Vec<char> = stderr.chars().collect();
-        let skip = chars.len().saturating_sub(800);
-        let tail: String = chars[skip..].iter().collect();
-        anyhow::bail!("新配置校验未通过，已保留当前内核：\n{}", tail.trim());
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // 只保留末尾 800 字符，避免前端 toast 被刷屏
+            let chars: Vec<char> = stderr.chars().collect();
+            let skip = chars.len().saturating_sub(800);
+            let tail: String = chars[skip..].iter().collect();
+            anyhow::bail!("新配置校验未通过，已保留当前内核：\n{}", tail.trim());
+        }
     }
     Ok(())
 }
@@ -224,16 +311,25 @@ pub fn generate_secret() -> String {
     format!("{:016x}{:016x}", hash_seed(1), hash_seed(2))
 }
 
-/// 执行 `<binary> version` 并提取版本号（sing-box 输出 JSON）
+/// 执行 `<binary> version` 并提取版本号（sing-box 输出 JSON）。
+/// iOS 无二进制可执行，直接返回内嵌内核版本。
 pub async fn probe_version(binary: &std::path::Path) -> Option<String> {
-    let output = Command::new(binary).arg("version").output().await.ok()?;
-    if !output.status.success() {
-        return None;
+    #[cfg(target_os = "ios")]
+    {
+        let _ = binary;
+        return Some(format!("{} （内置）", IOS_EMBEDDED_VERSION));
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str::<serde_json::Value>(text.trim())
-        .ok()
-        .and_then(|v| v.get("version").and_then(|x| x.as_str().map(str::to_string)))
+    #[cfg(not(target_os = "ios"))]
+    {
+        let output = Command::new(binary).arg("version").output().await.ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        serde_json::from_str::<serde_json::Value>(text.trim())
+            .ok()
+            .and_then(|v| v.get("version").and_then(|x| x.as_str().map(str::to_string)))
+    }
 }
 
 /// 读取内核日志末尾最多 2KB，用于启动失败提示
@@ -286,6 +382,8 @@ fn ensure_geo_databases(config: &KernelConfig, app_handle: &AppHandle) {
 }
 
 /// 将子进程的一条输出管道按行写入 kernel.log，同时转发到 tracing
+/// （iOS 内核进程内运行，日志由 Go 侧直接写文件，无管道可接）
+#[cfg(not(target_os = "ios"))]
 fn spawn_log_pipe<R>(reader: R, tag: &'static str, log_path: &std::path::Path)
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -308,6 +406,7 @@ where
 }
 
 /// 简易 UTC 时间戳（不引入 chrono 依赖，仅用于内核日志排障）
+#[cfg(not(target_os = "ios"))]
 fn chrono_like_timestamp() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -326,6 +425,7 @@ fn pid_store() -> &'static Mutex<Option<u32>> {
     KERNEL_PID.get_or_init(|| Mutex::new(None))
 }
 
+#[cfg(not(target_os = "ios"))]
 fn register_kernel_pid(pid: u32) {
     *pid_store().lock() = Some(pid);
 }

@@ -3,7 +3,8 @@
  * 下载 sing-box 内核并放置为 Tauri sidecar（src-tauri/binaries/，已 gitignore）。
  * 打包后随安装包分发，终端用户无需联网下载内核。
  *
- * 用法: node scripts/fetch-kernel.cjs [--force]
+ * 用法: node scripts/fetch-kernel.cjs [--force] [--geo-only]
+ *   --geo-only  只下载 geoip/geosite 数据库（iOS 内嵌内核场景，无需 sidecar）
  */
 
 const fs = require("node:fs");
@@ -140,14 +141,18 @@ function findBinary(dir, exeSuffix) {
 
 async function main() {
   const force = process.argv.includes("--force");
-  const [triplet, asset] = targetInfo();
-  const exeSuffix = triplet.includes("windows") ? ".exe" : "";
-  const target = path.join(OUT_DIR, `sing-box-${triplet}${exeSuffix}`);
+  const geoOnly = process.argv.includes("--geo-only");
 
   fs.mkdirSync(OUT_DIR, { recursive: true });
 
   // 数据库与内核独立获取：内核已存在时也要保证数据库就位
   await ensureGeoDbs(force);
+
+  if (geoOnly) return;
+
+  const [triplet, asset] = targetInfo();
+  const exeSuffix = triplet.includes("windows") ? ".exe" : "";
+  const target = path.join(OUT_DIR, `sing-box-${triplet}${exeSuffix}`);
 
   if (!force && fs.existsSync(target)) {
     console.log(`[fetch-kernel] 已存在，跳过: ${path.relative(ROOT, target)}（--force 可重新下载）`);
