@@ -22,7 +22,7 @@ command = "worker-build --release"
 binding = "DB"
 database_name = "prism_license"
 # wrangler d1 create 后替换；本地开发会自动用本地 D1
-database_id = "REPLACE_AFTER_CREATE"
+database_id = "ca0531fe-8eec-434e-b84e-ceb6533b112d"
 migrations_dir = "migrations"
 
 [vars]
