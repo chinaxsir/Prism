@@ -193,6 +193,36 @@ jobs:
       - name: Build APK
         run: npx tauri android build --apk --verbose
 
+      # release 未配置 signingConfig，Gradle 产出 *-unsigned.apk，无法安装。
+      # CI 内生成一把自签证书（仅用于内测分发，不可上架），zipalign 后
+      # 用 apksigner 签名；覆盖删除 unsigned 产物，artifact 只留可安装的 APK
+      - name: Sign APK
+        shell: bash
+        run: |
+          set -e
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* 2>/dev/null | sort -V | tail -1)
+          echo "build-tools: $BT"
+          test -x "$BT/apksigner"
+
+          KS="$HOME/.android/prism-ci.keystore"
+          mkdir -p "$HOME/.android"
+          keytool -genkeypair -keystore "$KS" -storepass android -keypass android \
+            -alias prism -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Prism, OU=Mobile, O=Prism, L=NA, ST=NA, C=CN"
+
+          find src-tauri/gen/android/app/build/outputs/apk -name "*-unsigned.apk" -type f \
+            | while IFS= read -r apk; do
+              ALIGNED="${apk%-unsigned.apk}-aligned.apk"
+              SIGNED="${apk%-unsigned.apk}.apk"
+              "$BT/zipalign" -p -f 4 "$apk" "$ALIGNED"
+              "$BT/apksigner" sign --ks "$KS" \
+                --ks-pass pass:android --key-pass pass:android \
+                --ks-key-alias prism --out "$SIGNED" "$ALIGNED"
+              rm -f "$apk" "$ALIGNED"
+              "$BT/apksigner" verify --print-certs "$SIGNED" | head -3
+              echo "signed: $SIGNED"
+            done
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -282,7 +312,6 @@ jobs:
           # 首选 Xcode 自带的 swift-stdlib-tool（Copy Swift Libraries 构建
           # 阶段调用的官方工具），让它自动定位并拷贝正确平台/版本的运行时，
           # 同时 ad-hoc 签名；失败不中断，下面的递归索引 + 闭包补齐兜底。
-          UNSIGNED=$(mktemp -d)
           if [ -x "$TOOLCHAIN_DIR/usr/bin/swift-stdlib-tool" ]; then
             SST="$TOOLCHAIN_DIR/usr/bin/swift-stdlib-tool"
           else
@@ -290,26 +319,26 @@ jobs:
           fi
           if [ -n "$SST" ]; then
             echo "using swift-stdlib-tool: $SST"
+            # 独立版 swift-stdlib-tool 不接受 builtin 版的 --toolchain /
+            # --unsigned-destination（实测 Unknown argument）；保守参数集。
+            "$SST" --help 2>&1 | head -30 || true
             set +e
             "$SST" --copy --verbose --sign - \
               --scan-executable "$APP/$EXEC" \
               --scan-folder "$APP/Frameworks" \
-              $([ -d "$APP/PlugIns" ] && echo "--scan-folder $APP/PlugIns") \
               --platform iphoneos \
-              --toolchain "$TOOLCHAIN_DIR" \
-              --destination "$APP/Frameworks" \
-              --unsigned-destination "$UNSIGNED"
+              --destination "$APP/Frameworks"
             echo "swift-stdlib-tool exit: $?"
             set -e
           else
             echo "::warning::swift-stdlib-tool not found"
           fi
 
-          # 递归索引所有 iphoneos 的 Swift 运行时来源。不同 Xcode 版本布局
-          # 不同：除 swift-5.0/iphoneos 外，还有 swift-5.x/iphoneos 版本目录
-          # （OSLog/XPC/UniformTypeIdentifiers/DataDetection 等就在其中）以及
-          # iPhoneOS.platform 下的目录。只取路径含 iphoneos 的（天然排除
-          # macosx / iphonesimulator）；back-deployment 目录优先于当前版目录。
+          # 递归索引所有 iphoneos 的 back-deployment Swift 运行时
+          # （swift-5.0/iphoneos 等）。注意：OSLog/XPC/UniformTypeIdentifiers/
+          # DataDetection 等在工具链里没有 iphoneos dylib——它们是设备系统
+          # 内置库（dyld shared cache 的 /usr/lib/swift），正常 app 从不
+          # 嵌入，靠主二进制的 LC_RPATH /usr/lib/swift 解析（见下方补 rpath）。
           SWIFT_INDEX=$(mktemp -d)
           ROOTS=$(mktemp)
           {
@@ -373,6 +402,21 @@ jobs:
           done > "$LIST"
           echo "mach-o count: $(wc -l < "$LIST" | tr -d ' ')"
 
+          # 关键修复：主二进制由 rustc/cc 链接（Swift 代码以静态库并入），
+          # 缺少 swift 驱动默认注入的 -rpath /usr/lib/swift。实测旧包
+          # LC_RPATH 只有 @executable_path/Frameworks，于是 Frameworks 内
+          # libswift_Concurrency.dylib 以 @rpath 引用 libswiftCore 时无法
+          # 回退到系统 /usr/lib/swift，dyld 启动即中止（正是 5 份 .ips 里的
+          # "Library not loaded: @rpath/libswiftCore.dylib"）。
+          # 必须在重签之前修改（install_name_tool 会使旧签名失效）。
+          if otool -l "$APP/$EXEC" | grep -A2 LC_RPATH | grep -q "/usr/lib/swift"; then
+            echo "LC_RPATH /usr/lib/swift already present"
+          else
+            install_name_tool -add_rpath /usr/lib/swift "$APP/$EXEC"
+            echo "added LC_RPATH /usr/lib/swift to main executable"
+            otool -l "$APP/$EXEC" | grep -A2 LC_RPATH
+          fi
+
           # --no-sign 的主二进制不带任何 entitlements；TrollStore 安装时会注入
           # 含 get-task-allow 的 fallback entitlements（模拟 Xcode 签名），
           # iOS 16+ 因此要求开启“开发者模式”，未开启时 amfid 拒绝执行。
@@ -409,25 +453,51 @@ jobs:
           fi
           echo "no restricted entitlements; Developer Mode not required"
 
-          # 硬校验：所有 Mach-O 引用的 libswift*.dylib 必须都在 Frameworks 中，
-          # 防止漏补导致设备上重演 DYLD Library missing 闪退
-          missing=0
+          # 硬校验：每个 @rpath/libswift* 引用必须二选一——
+          #  a) 已嵌入 Frameworks（back-deployment 兼容库）；
+          #  b) 是 SDK 声明的系统库（iPhoneOS.sdk/usr/lib/swift 下有 stub，
+          #     运行时由设备 dyld shared cache 提供），且主二进制具备
+          #     LC_RPATH /usr/lib/swift 才能解析到。
+          # 绝对路径 /usr/lib/swift/... 的直接依赖不经 rpath，系统直接解析。
+          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          SYS_SWIFT="$SDK_PATH/usr/lib/swift"
+          echo "sdk swift stub dir: $SYS_SWIFT ($(ls -1 "$SYS_SWIFT" 2>/dev/null | wc -l | tr -d ' ') entries)"
+          if otool -l "$APP/$EXEC" | grep -A2 LC_RPATH | grep -q "/usr/lib/swift"; then
+            HAVE_SYS_RPATH=1
+          else
+            HAVE_SYS_RPATH=0
+            echo "::error::main executable is missing LC_RPATH /usr/lib/swift"
+          fi
+          unresolved=0
           while IFS= read -r bin; do
-            for lib in $(otool -L "$bin" 2>/dev/null | grep -oE 'libswift[A-Za-z0-9_.]*\.dylib' | sort -u); do
-              if [ ! -f "$APP/Frameworks/$lib" ]; then
-                echo "::error file=${bin#$PWD/}::$lib required but not embedded"
-                missing=1
-              fi
-            done
+            otool -L "$bin" 2>/dev/null \
+              | grep -oE '@rpath/libswift[A-Za-z0-9_.]*\.dylib' | sort -u \
+              | while IFS= read -r ref; do
+                  lib="${ref#@rpath/}"
+                  if [ -f "$APP/Frameworks/$lib" ]; then
+                    continue
+                  fi
+                  if ls "$SYS_SWIFT/${lib%.dylib}.tbd" "$SYS_SWIFT/$lib" \
+                       >/dev/null 2>&1; then
+                    if [ "$HAVE_SYS_RPATH" -eq 1 ]; then
+                      echo "system-provided swift lib: $lib"
+                    else
+                      echo "::error file=${bin#$PWD/}::$lib is system-only but /usr/lib/swift rpath missing"
+                      exit 1
+                    fi
+                  else
+                    echo "::error file=${bin#$PWD/}::$lib neither embedded nor found as SDK system stub"
+                    exit 1
+                  fi
+                done || unresolved=1
           done < "$LIST"
-          if [ "$missing" -ne 0 ]; then
-            echo "--- diagnostic: locate missing libs anywhere under DEVELOPER ---"
-            find "$DEVELOPER_DIR_X" -name "libswift*.dylib" -path '*iphoneos*' \
-              -not -path '*iphonesimulator*' 2>/dev/null | sort
-            echo "Swift runtime libraries missing; aborting"
+          if [ "$unresolved" -ne 0 ] || [ "$HAVE_SYS_RPATH" -ne 1 ]; then
+            echo "--- diagnostic: $SYS_SWIFT listing (swift entries) ---"
+            ls -1 "$SYS_SWIFT" 2>/dev/null | grep -i swift | head -60 || true
+            echo "Swift runtime resolution unverified; aborting"
             exit 1
           fi
-          echo "all referenced Swift runtime libraries are embedded"
+          echo "all referenced Swift runtime libraries resolve (embedded or system)"
 
           OUT="$PWD/Prism-0.1.0-TrollStore.ipa"
           rm -f "$OUT"
