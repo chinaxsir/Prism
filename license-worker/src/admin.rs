@@ -5,7 +5,7 @@ use serde::Deserialize;
 use worker::{Request, Response};
 
 use crate::context::AppCtx;
-use crate::models::ApiError;
+use crate::models::{ApiError, valid_email};
 use crate::randutil;
 
 const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // 去除 I/O/0/1
@@ -43,6 +43,8 @@ struct IssueBody {
     duration_days: Option<i64>,
     max_devices: Option<i64>,
     note: Option<String>,
+    /// 预绑定邮箱（可选）
+    email: Option<String>,
     count: Option<i64>,
 }
 
@@ -72,12 +74,30 @@ pub async fn issue(mut req: Request, app: AppCtx) -> Result<Response, ApiError> 
     };
     let max_devices = body.max_devices.unwrap_or(3).clamp(1, 100);
     let count = body.count.unwrap_or(1).clamp(1, 100);
+    let email = body
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase);
+    if let Some(e) = &email
+        && !valid_email(e)
+    {
+        return Err(ApiError::plain(400, "邮箱格式无效"));
+    }
 
     let mut codes: Vec<String> = Vec::new();
     for _ in 0..count {
         let code = generate_code();
         app.db
-            .insert_code(&code, &kind, duration, max_devices, body.note.as_deref())
+            .insert_code(
+                &code,
+                &kind,
+                duration,
+                max_devices,
+                body.note.as_deref(),
+                email.as_deref(),
+            )
             .await
             .map_err(ApiError::internal)?;
         codes.push(code);
@@ -116,6 +136,8 @@ struct UpdateBody {
     status: Option<String>,
     /// 缺省=不改；null=清空备注
     note: Option<Option<String>>,
+    /// 缺省=不改；""=解绑；其余=改绑
+    email: Option<String>,
 }
 
 /// PATCH /admin/codes/:code —— 编辑设备上限 / 订阅时长 / 延期 / 停用恢复 / 备注
@@ -140,6 +162,15 @@ pub async fn update(mut req: Request, code: String, app: AppCtx) -> Result<Respo
     if body.extend_days.is_some_and(|d| d <= 0) {
         return Err(ApiError::plain(400, "extendDays 必须大于 0"));
     }
+    // None=不改；Some("")=解绑；Some(v)=改绑（update_code 内统一小写）
+    let email = body.email.as_deref().map(str::trim);
+    if let Some(e) = email
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase)
+        && !valid_email(&e)
+    {
+        return Err(ApiError::plain(400, "邮箱格式无效"));
+    }
     // 时长类修改仅订阅码允许
     if body.duration_days.is_some() || body.extend_days.is_some() {
         let Some(rec) = app.db.get_code(&code).await.map_err(ApiError::internal)? else {
@@ -161,6 +192,7 @@ pub async fn update(mut req: Request, code: String, app: AppCtx) -> Result<Respo
             body.note
                 .as_ref()
                 .map(|o| o.as_deref()),
+            email,
         )
         .await
         .map_err(ApiError::internal)?;

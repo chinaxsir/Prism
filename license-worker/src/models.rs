@@ -15,7 +15,24 @@ pub struct DeviceInfo {
 #[derive(Deserialize)]
 pub struct ActivateReq {
     pub code: String,
+    /// 邮箱+授权码模式：激活必填，首次激活绑定，此后必须一致
+    pub email: String,
     pub device: DeviceInfo,
+}
+
+/// 简单邮箱格式校验（本地与后台共用）
+pub fn valid_email(e: &str) -> bool {
+    let Some((local, domain)) = e.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.is_empty()
+        && !domain.contains('@')
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !domain.contains("..")
+        && e.len() <= 254
 }
 
 #[derive(Deserialize)]

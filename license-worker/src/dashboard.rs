@@ -74,6 +74,7 @@ details{margin-top:6px}summary{cursor:pointer;color:var(--acc);font-size:12px}
         <input id="cm" type="number" placeholder="设备数" value="3" style="width:80px">
         <input id="cn" type="number" placeholder="数量" value="1" style="width:70px">
         <input id="cnote" placeholder="备注" style="width:140px">
+        <input id="cemail" placeholder="绑定邮箱(可选)" style="width:170px">
         <button class="primary" onclick="issue()">批量生成</button>
       </div>
       <div id="issued">
@@ -89,13 +90,13 @@ details{margin-top:6px}summary{cursor:pointer;color:var(--acc);font-size:12px}
     </div>
     <div class="card">
       <div class="row" style="margin-bottom:10px">
-        <input id="fq" placeholder="搜索激活码 / 备注" style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter')loadCodes()">
+        <input id="fq" placeholder="搜索激活码 / 邮箱 / 备注" style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter')loadCodes()">
         <select id="fs"><option value="">全部状态</option><option value="active">在用</option><option value="revoked">已停用</option></select>
         <button onclick="loadCodes()">搜索</button>
         <button class="mini" onclick="exportFiltered('csv')">导出 CSV</button>
         <button class="mini" onclick="exportFiltered('txt')">导出 TXT</button>
       </div>
-      <table><thead><tr><th>激活码</th><th>类型</th><th>状态</th><th>设备</th><th>创建/到期</th><th>备注</th><th>操作</th></tr></thead><tbody id="codes"></tbody></table>
+      <table><thead><tr><th>激活码</th><th>类型</th><th>状态</th><th>设备</th><th>邮箱</th><th>创建/到期</th><th>备注</th><th>操作</th></tr></thead><tbody id="codes"></tbody></table>
     </div>
   </div>
 
@@ -151,6 +152,7 @@ async function loadCodes(){
     <td>${kindText(c)}</td>
     <td class="${c.status==='active'?'ok':'bad'}">${c.status==='active'?'在用':'已停用'}</td>
     <td>${c.devices}/${c.maxDevices}</td>
+    <td class="mut">${c.email||'-'}</td>
     <td class="mut">${ts(c.createdAt)}</td><td class="mut">${c.note||''}</td>
     <td><details ontoggle="if(this.open)devices('${c.code}')"><summary>管理</summary>
       <div class="editbox">
@@ -159,13 +161,14 @@ async function loadCodes(){
         ${c.kind==='subscription'?`<div class="row">总天数 <input id="d-${c.code}" type="number" value="${c.durationDays||365}" style="width:90px">
           延期 <input id="e-${c.code}" type="number" placeholder="+天" style="width:80px">
           <button class="mini primary" onclick="extendCode('${c.code}')">延期/改期</button></div>`:''}
+        <div class="row">邮箱 <input id="em-${c.code}" value="${c.email||''}" placeholder="改绑/清空=解绑" style="width:170px"></div>
         <div class="row">备注 <input id="n-${c.code}" value="${(c.note||'').replace(/"/g,'&quot;')}" style="width:150px">
           ${c.status==='active'
             ?`<button class="mini danger" onclick="setStatus('${c.code}','revoked')">停用</button>`
             :`<button class="mini ok" onclick="setStatus('${c.code}','active')">恢复</button>`}
           <button class="mini danger" onclick="delCode('${c.code}')">删除</button></div>
       </div>
-      <div id="dev-${c.code}" style="margin-top:6px"></div></details></td></tr>`).join('')||'<tr><td colspan="7" class="mut">暂无</td></tr>';}
+      <div id="dev-${c.code}" style="margin-top:6px"></div></details></td></tr>`).join('')||'<tr><td colspan="8" class="mut">暂无</td></tr>';}
 
 async function devices(code){const list=await api(`/admin/codes/${code}/devices`);
   const el=document.getElementById('dev-'+code);
@@ -174,22 +177,23 @@ async function devices(code){const list=await api(`/admin/codes/${code}/devices`
     <td><button class="mini danger" onclick="unbind('${code}','${d.deviceId}')">远程注销</button>
     <button class="mini danger" onclick="banDev('${d.deviceId}')">拉黑</button></td></tr>`).join('')+'</table>';}
 
-async function issue(){const body={kind:$('#ck').value,maxDevices:+$('#cm').value||3,count:Math.min(+$('#cn').value||1,100),note:$('#cnote').value||null};
+async function issue(){const body={kind:$('#ck').value,maxDevices:+$('#cm').value||3,count:Math.min(+$('#cn').value||1,100),note:$('#cnote').value||null,email:$('#cemail').value.trim()||null};
+  if(body.email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email))return toast('邮箱格式无效',false);
   if(!body.count)return toast('数量无效',false);
   if(body.kind==='subscription'){if(!+$('#cd').value)return toast('订阅码需填写天数',false);body.durationDays=+$('#cd').value;}
   try{const r=await api('/admin/codes',{method:'POST',body});lastIssued=r.codes;
     $('#issued').style.display='';$('#issued-title').textContent=`已生成 ${r.codes.length} 个：`;
     $('#issued-list').textContent=r.codes.join('\n');toast('生成成功');loadCodes();}catch(e){toast(e.message,false)}}
-function issuedRows(){return(lastIssued||[]).map(c=>[c,$('#ck').value,$('#ck').value==='subscription'?$('#cd').value:'',$('#cm').value,'active',$('#cnote').value||'',Math.floor(Date.now()/1000)]);}
-function toCsv(rows){return['code,kind,durationDays,maxDevices,status,note,createdAt'].join(',')+'\n'+rows.map(r=>r.map(csvCell).join(',')).join('\n');}
+function issuedRows(){return(lastIssued||[]).map(c=>[c,$('#ck').value,$('#ck').value==='subscription'?$('#cd').value:'',$('#cm').value,'active',$('#cnote').value||'',$('#cemail').value.trim()||'',Math.floor(Date.now()/1000)]);}
+function toCsv(rows){return['code,kind,durationDays,maxDevices,status,note,email,createdAt'].join(',')+'\n'+rows.map(r=>r.map(csvCell).join(',')).join('\n');}
 function copyIssued(){navigator.clipboard.writeText(lastIssued.join('\n')).then(()=>toast('已复制'),()=>toast('复制失败',false));}
 function downloadIssued(fmt){if(!lastIssued)return;download(`prism-codes-${Date.now()}.${fmt}`,fmt==='csv'?toCsv(issuedRows()):lastIssued.join('\n'));}
 function exportFiltered(fmt){if(!lastCodes.length)return toast('没有可导出的数据',false);
-  const rows=lastCodes.map(c=>[c.code,c.kind,c.durationDays||'',c.maxDevices,c.status,c.note||'',c.createdAt]);
+  const rows=lastCodes.map(c=>[c.code,c.kind,c.durationDays||'',c.maxDevices,c.status,c.note||'',c.email||'',c.createdAt]);
   download(`prism-codes.${fmt}`,fmt==='csv'?toCsv(rows):lastCodes.map(c=>c.code).join('\n'));}
 
 async function patchCode(code,body){try{await api(`/admin/codes/${code}`,{method:'PATCH',body});toast('已保存');loadCodes();}catch(e){toast(e.message,false)}}
-function saveEdit(c){const body={maxDevices:+document.getElementById('m-'+c).value||undefined,note:document.getElementById('n-'+c).value||null};if(!body.maxDevices)return toast('设备上限无效',false);patchCode(c,body);}
+function saveEdit(c){const body={maxDevices:+document.getElementById('m-'+c).value||undefined,note:document.getElementById('n-'+c).value||null,email:document.getElementById('em-'+c).value.trim()};if(!body.maxDevices)return toast('设备上限无效',false);patchCode(c,body);}
 async function extendCode(c){
   const total=+document.getElementById('d-'+c).value;const add=+document.getElementById('e-'+c).value;
   const body={};if(add>0)body.extendDays=add;else if(total>0)body.durationDays=total;else return toast('填写总天数或延期天数',false);

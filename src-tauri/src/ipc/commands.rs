@@ -903,15 +903,16 @@ fn apply_entitlement(state: &State<'_, AppState>, next: EntitlementStatus) {
     let _ = state.app_handle.emit("pro://status", &next);
 }
 
-/// 激活码激活（联网校验；服务端签名后本地缓存授权）
+/// 激活码激活（邮箱+授权码；联网校验；服务端签名后本地缓存授权）
 #[tauri::command]
 pub async fn activate_pro(
     code: String,
+    email: String,
     state: State<'_, AppState>,
 ) -> Result<EntitlementStatus, String> {
     let data_dir = state.data_dir.clone();
     let settings = state.settings.read().clone();
-    let next = crate::core::license::activate(&data_dir, &settings, &code)
+    let next = crate::core::license::activate(&data_dir, &settings, &code, &email)
         .await
         .map_err(|e| e.to_string())?;
     apply_entitlement(&state, next.clone());

@@ -23,6 +23,7 @@ export function ActivateProModal({
   const activate = useProStore((s) => s.activate);
   const error = useProStore((s) => s.error);
   const [code, setCode] = useState("");
+  const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [products, setProducts] = useState<Product[]>([]);
   const mobile = isMobile();
@@ -36,18 +37,21 @@ export function ActivateProModal({
 
   if (!open) return null;
 
-  // 激活码激活
+  const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+
+  // 激活码激活（邮箱+授权码）
   const submitCode = async () => {
-    if (busy || !code.trim()) return;
+    if (busy || !code.trim() || !emailOk) return;
     setBusy(true);
-    const ok = await activate(code.trim());
+    const ok = await activate(code.trim(), email.trim());
     setBusy(false);
     if (ok) {
       toast.success("Pro 已激活，高级功能全部解锁");
       setCode("");
+      setEmail("");
       onClose();
     } else {
-      toast.error(error ?? "激活失败，请检查激活码");
+      toast.error(error ?? "激活失败，请检查邮箱与激活码");
     }
   };
 
@@ -137,8 +141,21 @@ export function ActivateProModal({
           </div>
         )}
 
-        {/* 激活码 */}
+        {/* 邮箱 + 激活码 */}
         <div className="space-y-3">
+          <div className="space-y-1">
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
+              autoComplete="email"
+              className="w-full rounded-lg border border-white/5 bg-surface-hover px-4 py-2 text-sm outline-none focus:border-accent"
+            />
+            {email.trim() && !emailOk && (
+              <p className="text-xs text-red-400">邮箱格式不正确</p>
+            )}
+          </div>
           <input
             type="text"
             value={code}
@@ -146,6 +163,9 @@ export function ActivateProModal({
             placeholder="PRISM-XXXX-XXXX-XXXX"
             className="w-full rounded-lg border border-white/5 bg-surface-hover px-4 py-2 font-mono text-sm outline-none focus:border-accent"
           />
+          <p className="text-xs text-gray-500">
+            首次激活将绑定邮箱，之后请使用同一邮箱激活或换机
+          </p>
           <div className="flex justify-end gap-2">
             <button
               onClick={onClose}
@@ -155,7 +175,7 @@ export function ActivateProModal({
             </button>
             <button
               onClick={submitCode}
-              disabled={busy || !code.trim()}
+              disabled={busy || !code.trim() || !emailOk}
               className="flex items-center gap-1 rounded-lg bg-accent px-5 py-2 text-sm transition-colors hover:bg-accent-hover disabled:opacity-50"
             >
               {busy && <Loader2 size={14} className="animate-spin" />}

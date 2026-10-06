@@ -133,8 +133,6 @@ export default function Rules() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold">规则</h1>
-
       <ProGate feature={Feature.Rules}>
         {/* 自定义规则编辑器 */}
         <div className="bg-surface-card rounded-xl p-5 mb-6">

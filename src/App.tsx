@@ -6,15 +6,13 @@ import TitleBar from "@/components/TitleBar";
 import BottomNav from "@/components/BottomNav";
 import ToastViewport from "@/components/ui/Toast";
 import Dashboard from "@/pages/Dashboard";
-import Proxies from "@/pages/Proxies";
 import Subscription from "@/pages/Subscription";
-import Rules from "@/pages/Rules";
-import Connections from "@/pages/Connections";
 import Analytics from "@/pages/Analytics";
 import Settings from "@/pages/Settings";
 import { useCoreStore, type CoreStatus, type RunMode } from "@/stores/core";
 import { useProStore } from "@/stores/pro";
 import type { Entitlement } from "@/api/ipc";
+import ProxiesHub from "@/pages/ProxiesHub";
 
 export default function App() {
   const initPro = useProStore((s) => s.init);
@@ -62,10 +60,10 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="/proxies" element={<Proxies />} />
+            <Route path="/proxies" element={<ProxiesHub />} />
             <Route path="/subscription" element={<Subscription />} />
-            <Route path="/rules" element={<Rules />} />
-            <Route path="/connections" element={<Connections />} />
+            <Route path="/rules" element={<Navigate to="/proxies?tab=rules" replace />} />
+            <Route path="/connections" element={<Navigate to="/proxies?tab=connections" replace />} />
             <Route path="/analytics" element={<Analytics />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>

@@ -145,8 +145,6 @@ export default function Proxies() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold">节点</h1>
-
       {/* 策略组标签页 */}
       <div className="flex flex-wrap items-center gap-2">
         {groups.map((g) => (

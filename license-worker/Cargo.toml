@@ -1,7 +1,7 @@
 [package]
 name = "prism-license-worker"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Prism Pro 授权校验服务（Cloudflare Workers + D1，激活码 / StoreKit / Google Play）"
 
 [lib]

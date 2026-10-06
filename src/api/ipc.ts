@@ -68,8 +68,8 @@ export interface Entitlement {
   lastVerifiedAt: number;
 }
 
-export const activatePro = (code: string) =>
-  invoke<Entitlement>("activate_pro", { code });
+export const activatePro = (code: string, email: string) =>
+  invoke<Entitlement>("activate_pro", { code, email });
 export const getEntitlement = () =>
   invoke<Entitlement>("get_entitlement");
 export const refreshEntitlement = () =>

@@ -257,18 +257,38 @@ async fn error_message(resp: reqwest::Response) -> String {
 
 // ---------------- 业务操作 ----------------
 
-/// 激活码激活
+/// 邮箱格式校验（与服务端规则一致）
+fn valid_email(e: &str) -> bool {
+    let Some((local, domain)) = e.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.is_empty()
+        && !domain.contains('@')
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !domain.contains("..")
+        && e.len() <= 254
+}
+
+/// 激活码激活（邮箱+授权码模式：首次激活绑定邮箱，之后必须一致）
 pub async fn activate(
     data_dir: &Path,
     settings: &UserSettings,
     code: &str,
+    email: &str,
 ) -> Result<EntitlementStatus> {
+    let email = email.trim().to_lowercase();
+    if !valid_email(&email) {
+        bail!("请输入有效的邮箱地址");
+    }
     let base = server_base(settings);
     let device = load_device(data_dir)?;
 
     let resp = post_with_fallback(
         &format!("{base}/api/v1/activate"),
-        &serde_json::json!({ "code": code.trim(), "device": device }),
+        &serde_json::json!({ "code": code.trim(), "email": email, "device": device }),
     )
     .await?;
     if !resp.status().is_success() {

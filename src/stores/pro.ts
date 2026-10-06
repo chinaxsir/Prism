@@ -30,7 +30,7 @@ interface ProState {
 
   init: () => Promise<void>;
   setEntitlement: (e: Entitlement) => void;
-  activate: (code: string) => Promise<boolean>;
+  activate: (code: string, email: string) => Promise<boolean>;
   refresh: () => Promise<void>;
   deactivate: () => Promise<void>;
 }
@@ -55,10 +55,10 @@ export const useProStore = create<ProState>((set) => ({
   setEntitlement: (e) =>
     set({ entitlement: e, unlocked: unlockedOf(e), error: null }),
 
-  activate: async (code) => {
+  activate: async (code, email) => {
     set({ busy: true, error: null });
     try {
-      const e = await activatePro(code);
+      const e = await activatePro(code, email);
       set({ entitlement: e, unlocked: unlockedOf(e), busy: false });
       return unlockedOf(e);
     } catch (err) {

@@ -9,7 +9,7 @@ use crate::db::now_secs;
 use crate::google::PlayClient;
 use crate::models::{
     ActivateReq, ApiError, AppleReceiptReq, DeviceInfo, EntitlementDto, GoogleReceiptReq,
-    LicenseResponse, VerifyReq,
+    LicenseResponse, VerifyReq, valid_email,
 };
 use crate::randutil;
 use crate::tokens::{LicenseClaims, verify_license};
@@ -70,6 +70,11 @@ pub async fn activate(mut req: Request, app: AppCtx) -> Result<Response, ApiErro
     let body: ActivateReq = parse_json(&mut req).await?;
     validate_device(&body.device)?;
     let code_raw = body.code.trim().to_uppercase();
+    // 邮箱+授权码模式：统一小写比较
+    let email = body.email.trim().to_lowercase();
+    if !valid_email(&email) {
+        return Err(ApiError::bad("请输入有效的邮箱地址"));
+    }
 
     // 黑名单设备直接拒绝（在查码之前，避免泄露码状态）
     if app
@@ -91,6 +96,23 @@ pub async fn activate(mut req: Request, app: AppCtx) -> Result<Response, ApiErro
     };
     if record.status != "active" {
         return Err(ApiError::forbidden("code_revoked", "激活码已被吊销"));
+    }
+
+    // 邮箱绑定：首次激活锚定；此后激活/换设备必须使用同一邮箱
+    match record.email.as_deref() {
+        None => {
+            app.db
+                .bind_email(&code_raw, &email)
+                .await
+                .map_err(ApiError::internal)?;
+        }
+        Some(bound) if bound != email => {
+            return Err(ApiError::forbidden(
+                "email_mismatch",
+                "该激活码已绑定其他邮箱，请使用绑定邮箱激活",
+            ));
+        }
+        _ => {}
     }
 
     // 订阅：首次激活锚定时间，后续按 anchor + duration 判定

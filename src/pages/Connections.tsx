@@ -162,7 +162,6 @@ export default function Connections() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">连接</h1>
         <div className="flex items-center gap-3">
           <span className="text-sm text-gray-400">
             ↑ {formatBytes(totals.up)} / ↓ {formatBytes(totals.down)}

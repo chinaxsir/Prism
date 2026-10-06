@@ -31,6 +31,8 @@ pub struct CodeRecord {
     pub max_devices: i64,
     pub status: String,
     pub anchor: Option<i64>,
+    /// 邮箱绑定（首次激活锚定）
+    pub email: Option<String>,
     #[allow(dead_code)]
     pub note: Option<String>,
     pub created_at: i64,
@@ -57,6 +59,7 @@ pub struct CodeSummary {
     pub max_devices: i64,
     pub status: String,
     pub note: Option<String>,
+    pub email: Option<String>,
     pub anchor: Option<i64>,
     pub created_at: i64,
     pub devices: i64,
@@ -129,7 +132,7 @@ impl Db {
     pub async fn get_code(&self, code: &str) -> Result<Option<CodeRecord>, String> {
         self.d1
             .prepare(
-                "SELECT code,kind,duration_days,max_devices,status,anchor,note,created_at
+                "SELECT code,kind,duration_days,max_devices,status,anchor,email,note,created_at
                  FROM codes WHERE code = ?1",
             )
             .bind(&[js(code)])
@@ -144,6 +147,18 @@ impl Db {
         self.d1
             .prepare("UPDATE codes SET anchor = ?1 WHERE code = ?2 AND anchor IS NULL")
             .bind(&[js(anchor), js(code)])
+            .map_err(|e| e.to_string())?
+            .run()
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// 绑定邮箱（仅首次，后续激活由调用方校验一致性）
+    pub async fn bind_email(&self, code: &str, email: &str) -> Result<(), String> {
+        self.d1
+            .prepare("UPDATE codes SET email = ?1 WHERE code = ?2 AND email IS NULL")
+            .bind(&[js(email), js(code)])
             .map_err(|e| e.to_string())?
             .run()
             .await
@@ -335,11 +350,12 @@ impl Db {
         duration_days: Option<i64>,
         max_devices: i64,
         note: Option<&str>,
+        email: Option<&str>,
     ) -> Result<(), String> {
         self.d1
             .prepare(
-                "INSERT INTO codes(code,kind,duration_days,max_devices,status,note,created_at)
-                 VALUES (?1,?2,?3,?4,'active',?5,?6)",
+                "INSERT INTO codes(code,kind,duration_days,max_devices,status,note,email,created_at)
+                 VALUES (?1,?2,?3,?4,'active',?5,?6,?7)",
             )
             .bind(&[
                 js(code),
@@ -347,6 +363,7 @@ impl Db {
                 js(duration_days),
                 js(max_devices),
                 js(note),
+                js(email),
                 js(now_secs()),
             ])
             .map_err(|e| e.to_string())?
@@ -367,11 +384,11 @@ impl Db {
             .prepare(
                 "SELECT c.code AS code,c.kind AS kind,c.duration_days AS durationDays,
                         c.max_devices AS maxDevices,c.status AS status,c.note AS note,
-                        c.anchor AS anchor,c.created_at AS createdAt,
+                        c.email AS email,c.anchor AS anchor,c.created_at AS createdAt,
                         (SELECT COUNT(*) FROM code_devices d WHERE d.code=c.code) AS devices
                  FROM codes c
                  WHERE (?1 IS NULL OR c.status = ?1)
-                   AND (?2 IS NULL OR c.code LIKE ?2 OR c.note LIKE ?2)
+                   AND (?2 IS NULL OR c.code LIKE ?2 OR c.note LIKE ?2 OR c.email LIKE ?2)
                  ORDER BY c.created_at DESC",
             )
             .bind(&[js(status), js(like.as_deref())])
@@ -385,6 +402,7 @@ impl Db {
     /// 管理端更新激活码（任一字段为 None 表示不修改）。
     /// - `extend_days`：订阅码在现有 duration_days 上顺延（不受 duration_days 参数影响）
     /// - `note`：双 Option，None=不改；Some(None)=清空
+    /// - `email`：None=不改；Some("")=解绑；Some(v)=改绑
     /// 返回 false 表示码不存在
     #[allow(clippy::too_many_arguments)]
     pub async fn update_code(
@@ -395,6 +413,7 @@ impl Db {
         extend_days: Option<i64>,
         status: Option<&str>,
         note: Option<Option<&str>>,
+        email: Option<&str>,
     ) -> Result<bool, String> {
         let Some(mut rec) = self.get_code(code).await? else {
             return Ok(false);
@@ -416,9 +435,14 @@ impl Db {
             Some(None) => None,
             Some(Some(v)) => Some(v.to_string()),
         };
+        let new_email: Option<String> = match email {
+            None => rec.email.clone(),
+            Some("") => None,
+            Some(v) => Some(v.trim().to_lowercase()),
+        };
         self.d1
             .prepare(
-                "UPDATE codes SET max_devices=?2,duration_days=?3,status=?4,note=?5
+                "UPDATE codes SET max_devices=?2,duration_days=?3,status=?4,note=?5,email=?6
                  WHERE code=?1",
             )
             .bind(&[
@@ -427,6 +451,7 @@ impl Db {
                 js(rec.duration_days),
                 js(rec.status),
                 js(new_note.as_deref()),
+                js(new_email.as_deref()),
             ])
             .map_err(|e| e.to_string())?
             .run()
