@@ -482,7 +482,8 @@ jobs:
           fi
           echo "all referenced Swift runtime libraries resolve (system-first rpath)"
 
-          OUT="$PWD/Prism-0.1.0-TrollStore.ipa"
+          APP_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          OUT="$PWD/Prism-$APP_VERSION-TrollStore.ipa"
           rm -f "$OUT"
           (cd "$WORK" && zip -qry "$OUT" Payload)
           echo "path=$OUT" >> "$GITHUB_OUTPUT"
@@ -491,5 +492,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Prism-TrollStore-ipa
-          path: Prism-0.1.0-TrollStore.ipa
+          path: Prism-*-TrollStore.ipa
           if-no-files-found: error
