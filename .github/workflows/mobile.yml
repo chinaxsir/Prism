@@ -297,130 +297,63 @@ jobs:
           echo "--- Frameworks as shipped by tauri --no-sign ---"
           ls -1 "$APP/Frameworks" 2>/dev/null || echo "(empty)"
 
-          # 补齐 Swift 运行时（修复 dyld "Library not loaded:
-          # @rpath/libswiftCore.dylib" 启动闪退，崩溃类型 DYLD/Library missing）。
-          # IAP 等 Swift 插件被静态链接进主二进制，主二进制以 @rpath 引用
-          # libswiftCore 等十余个运行时；但 --no-sign 的 archive 以
-          # CODE_SIGNING_ALLOWED=NO 执行，Xcode 的 "Embed Swift Standard
-          # Libraries" 阶段不拷贝这些库（仅 back-deploy 的 libswift_Concurrency
-          # 由链接器单独放入），而 iOS 的 @rpath 回退路径也不含系统
-          # /usr/lib/swift，于是 dyld 在执行任何代码前中止进程。
-          DEVELOPER_DIR_X="$(xcode-select -p)"
-          TOOLCHAIN_DIR="$DEVELOPER_DIR_X/Toolchains/XcodeDefault.xctoolchain"
-          TOOL_ROOT="$TOOLCHAIN_DIR/usr/lib"
-
-          # 首选 Xcode 自带的 swift-stdlib-tool（Copy Swift Libraries 构建
-          # 阶段调用的官方工具），让它自动定位并拷贝正确平台/版本的运行时，
-          # 同时 ad-hoc 签名；失败不中断，下面的递归索引 + 闭包补齐兜底。
-          if [ -x "$TOOLCHAIN_DIR/usr/bin/swift-stdlib-tool" ]; then
-            SST="$TOOLCHAIN_DIR/usr/bin/swift-stdlib-tool"
-          else
-            SST=$(xcrun --sdk iphoneos --find swift-stdlib-tool 2>/dev/null || true)
-          fi
-          if [ -n "$SST" ]; then
-            echo "using swift-stdlib-tool: $SST"
-            # 独立版 swift-stdlib-tool 不接受 builtin 版的 --toolchain /
-            # --unsigned-destination（实测 Unknown argument）；保守参数集。
-            "$SST" --help 2>&1 | head -30 || true
-            set +e
-            "$SST" --copy --verbose --sign - \
-              --scan-executable "$APP/$EXEC" \
-              --scan-folder "$APP/Frameworks" \
-              --platform iphoneos \
-              --destination "$APP/Frameworks"
-            echo "swift-stdlib-tool exit: $?"
-            set -e
-          else
-            echo "::warning::swift-stdlib-tool not found"
-          fi
-
-          # 递归索引所有 iphoneos 的 back-deployment Swift 运行时
-          # （swift-5.0/iphoneos 等）。注意：OSLog/XPC/UniformTypeIdentifiers/
-          # DataDetection 等在工具链里没有 iphoneos dylib——它们是设备系统
-          # 内置库（dyld shared cache 的 /usr/lib/swift），正常 app 从不
-          # 嵌入，靠主二进制的 LC_RPATH /usr/lib/swift 解析（见下方补 rpath）。
-          SWIFT_INDEX=$(mktemp -d)
-          ROOTS=$(mktemp)
-          {
-            ls -d "$TOOL_ROOT"/swift-5.*/iphoneos 2>/dev/null | sort -V
-            [ -d "$TOOL_ROOT/swift/iphoneos" ] && echo "$TOOL_ROOT/swift/iphoneos"
-            find "$DEVELOPER_DIR_X/Platforms/iPhoneOS.platform" \
-              -type d -name iphoneos -path '*swift*' 2>/dev/null
-          } | sort -u > "$ROOTS"
-          echo "--- swift runtime source roots ---"
-          cat "$ROOTS"
-          while IFS= read -r d; do
-            [ -d "$d" ] || continue
-            find "$d" \( -type f -o -type l \) -name "libswift*.dylib" | while IFS= read -r f; do
-              b="$(basename "$f")"
-              if [ ! -e "$SWIFT_INDEX/$b" ]; then cp -RL "$f" "$SWIFT_INDEX/$b"; fi
-            done
-          done < "$ROOTS"
-          echo "toolchain swift dylibs indexed: $(ls "$SWIFT_INDEX" | wc -l | tr -d ' ')"
-
-          NEED=$(mktemp)
-          # 一轮扫描：主二进制 + Frameworks 内全部 libswift dylib；
-          # 返回 0=本轮新补了库（需再扫一轮求传递闭包），1=闭包已完整
-          embed_round() {
-            {
-              otool -L "$APP/$EXEC" 2>/dev/null || true
-              find "$APP/Frameworks" -type f -name "libswift*.dylib" -exec otool -L {} \; 2>/dev/null || true
-            } | grep -oE 'libswift[A-Za-z0-9_.]*\.dylib' | sort -u > "$NEED"
-            added=0
-            while IFS= read -r lib; do
-              if [ ! -e "$APP/Frameworks/$lib" ]; then
-                if [ -e "$SWIFT_INDEX/$lib" ]; then
-                  cp -RL "$SWIFT_INDEX/$lib" "$APP/Frameworks/$lib"
-                  echo "embedded: $lib"
-                  added=1
-                else
-                  echo "::warning::Swift runtime missing from toolchain index: $lib"
-                fi
-              fi
-            done < "$NEED"
-            [ $added -eq 1 ]
-          }
-          for i in 1 2 3 4 5 6; do
-            if ! embed_round; then
-              echo "swift closure complete after $((i-1)) extra round(s)"
-              break
-            fi
-          done
-
-          # swift-stdlib-tool 会给处理过的库留下 *.dylib.original 备份
-          # （实测 Core 23MB + _Concurrency 7.7MB），app 包内无用且会被
-          # 当成额外 Mach-O 签名/封包；在收集 Mach-O 列表前删掉
+          # Swift 运行时解析（修复两轮闪退的最终方案，均由真机 .ips +
+          # 工具链实证确认）：
+          #
+          # 主二进制（Swift 静态库经 rustc/cc 链接）对 15 个 Swift 库的
+          # 引用是绝对路径 /usr/lib/swift/...（系统 dyld shared cache
+          # 直接提供，iOS 12.2 起 ABI 稳定），唯独 libswift_Concurrency
+          # 是 @rpath 引用——它只在 iOS 15+ 进入系统，Xcode 链接器已正确
+          # 把 back-deploy 副本放进 Frameworks（供 iOS 13/14 使用）。
+          #
+          # 真正缺失的是 swift 驱动默认注入、rustc 没带的 LC_RPATH
+          # /usr/lib/swift，且它必须排在 @executable_path/Frameworks
+          # 【之前】：新系统上 dyld 先命中系统库（back-deploy 版 Core 的
+          # checkVersion() 内置
+          # "This copy of libswiftCore.dylib requires an OS version prior
+          # to X.Y"，在 iOS 16.5 命中嵌入副本会立即 abort——这正是第三轮
+          # .ips 的 EXC_CRASH checkVersion）；老系统（<15）系统目录查无
+          # _Concurrency，再回退 Frameworks 嵌入副本，其 @rpath 依赖的
+          # Core 在 /usr/lib/swift 又能找到（12.2+ 系统自带）。
+          #
+          # 因此【不得】再额外嵌入 Core 等库：archive 自带的
+          # _Concurrency 是唯一需要保留的嵌入 Swift 库。
           find "$APP" -name "*.dylib.original" -delete -print
-
-          echo "--- Frameworks after swift embed ---"
-          ls -1 "$APP/Frameworks"
-          if [ ! -f "$APP/Frameworks/libswiftCore.dylib" ]; then
-            echo "::error::libswiftCore.dylib still missing after embed step"
+          find "$APP/Frameworks" -maxdepth 1 -type f -name "libswift*.dylib" \
+            ! -name "libswift_Concurrency.dylib" -delete -print
+          if [ ! -f "$APP/Frameworks/libswift_Concurrency.dylib" ]; then
+            echo "::error::archive did not contain back-deploy libswift_Concurrency.dylib"
             exit 1
           fi
+          echo "--- Frameworks swift libs (expect only _Concurrency) ---"
+          ls -1 "$APP/Frameworks"/libswift*.dylib
 
-          # 收集 .app 内全部 Mach-O（主二进制 / Frameworks / 插件；含刚补入的 dylib）
+          # 重排 LC_RPATH：全部删除后按 /usr/lib/swift 优先重建，
+          # 必须在重签之前修改（install_name_tool 会使旧签名失效）。
+          RPATHS_RAW=$(mktemp)
+          otool -l "$APP/$EXEC" | awk '
+            /cmd LC_RPATH/ { want=1; next }
+            want && /path / { sub(/^ *path /,""); sub(/ \(offset [0-9]+\).*/,""); print; want=0 }
+          ' > "$RPATHS_RAW"
+          echo "--- rpaths before rewrite ---"; cat "$RPATHS_RAW"
+          while IFS= read -r rp; do
+            install_name_tool -delete_rpath "$rp" "$APP/$EXEC"
+          done < "$RPATHS_RAW"
+          install_name_tool -add_rpath /usr/lib/swift "$APP/$EXEC"
+          while IFS= read -r rp; do
+            [ "$rp" = "/usr/lib/swift" ] && continue
+            install_name_tool -add_rpath "$rp" "$APP/$EXEC"
+          done < "$RPATHS_RAW"
+          echo "--- rpaths after rewrite ---"
+          otool -l "$APP/$EXEC" | grep -A2 LC_RPATH | grep path
+
+          # 收集 .app 内全部 Mach-O（主二进制 / Frameworks / 插件）
           # 用临时文件列表而非 mapfile：macOS 自带 bash 3.2 没有 mapfile
           LIST=$(mktemp)
           find "$APP" -type f | while IFS= read -r f; do
             if file "$f" | grep -q "Mach-O"; then echo "$f"; fi
           done > "$LIST"
           echo "mach-o count: $(wc -l < "$LIST" | tr -d ' ')"
-
-          # 关键修复：主二进制由 rustc/cc 链接（Swift 代码以静态库并入），
-          # 缺少 swift 驱动默认注入的 -rpath /usr/lib/swift。实测旧包
-          # LC_RPATH 只有 @executable_path/Frameworks，于是 Frameworks 内
-          # libswift_Concurrency.dylib 以 @rpath 引用 libswiftCore 时无法
-          # 回退到系统 /usr/lib/swift，dyld 启动即中止（正是 5 份 .ips 里的
-          # "Library not loaded: @rpath/libswiftCore.dylib"）。
-          # 必须在重签之前修改（install_name_tool 会使旧签名失效）。
-          if otool -l "$APP/$EXEC" | grep -A2 LC_RPATH | grep -q "/usr/lib/swift"; then
-            echo "LC_RPATH /usr/lib/swift already present"
-          else
-            install_name_tool -add_rpath /usr/lib/swift "$APP/$EXEC"
-            echo "added LC_RPATH /usr/lib/swift to main executable"
-            otool -l "$APP/$EXEC" | grep -A2 LC_RPATH
-          fi
 
           # --no-sign 的主二进制不带任何 entitlements；TrollStore 安装时会注入
           # 含 get-task-allow 的 fallback entitlements（模拟 Xcode 签名），
@@ -458,21 +391,25 @@ jobs:
           fi
           echo "no restricted entitlements; Developer Mode not required"
 
-          # 硬校验：每个 @rpath/libswift* 引用必须二选一——
-          #  a) 已嵌入 Frameworks（back-deployment 兼容库）；
-          #  b) 是 SDK 声明的系统库（iPhoneOS.sdk/usr/lib/swift 下有 stub，
-          #     运行时由设备 dyld shared cache 提供），且主二进制具备
-          #     LC_RPATH /usr/lib/swift 才能解析到。
-          # 绝对路径 /usr/lib/swift/... 的直接依赖不经 rpath，系统直接解析。
+          # 硬校验 1：/usr/lib/swift 必须是【第一条】LC_RPATH，
+          # 否则 iOS 16.5 会先加载 back-deploy 嵌入副本触发 checkVersion abort
+          FIRST_RPATH=$(otool -l "$APP/$EXEC" | awk '
+            /cmd LC_RPATH/ { want=1; next }
+            want && /path / { sub(/^ *path /,""); sub(/ \(offset [0-9]+\).*/,""); print; exit }
+          ')
+          echo "first LC_RPATH: $FIRST_RPATH"
+          if [ "$FIRST_RPATH" != "/usr/lib/swift" ]; then
+            echo "::error::first LC_RPATH must be /usr/lib/swift (got '$FIRST_RPATH')"
+            exit 1
+          fi
+
+          # 硬校验 2：每个 @rpath/libswift* 引用必须——
+          #  a) 命中嵌入（仅允许 Xcode archive 自带的 _Concurrency）；或
+          #  b) 命中 SDK 系统 stub（iPhoneOS.sdk/usr/lib/swift，运行时由
+          #     dyld shared cache 提供，第一条 rpath 保证优先于嵌入副本）。
           SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
           SYS_SWIFT="$SDK_PATH/usr/lib/swift"
           echo "sdk swift stub dir: $SYS_SWIFT ($(ls -1 "$SYS_SWIFT" 2>/dev/null | wc -l | tr -d ' ') entries)"
-          if otool -l "$APP/$EXEC" | grep -A2 LC_RPATH | grep -q "/usr/lib/swift"; then
-            HAVE_SYS_RPATH=1
-          else
-            HAVE_SYS_RPATH=0
-            echo "::error::main executable is missing LC_RPATH /usr/lib/swift"
-          fi
           unresolved=0
           while IFS= read -r bin; do
             otool -L "$bin" 2>/dev/null \
@@ -480,29 +417,23 @@ jobs:
               | while IFS= read -r ref; do
                   lib="${ref#@rpath/}"
                   if [ -f "$APP/Frameworks/$lib" ]; then
+                    echo "embedded (old-OS fallback): $lib"
                     continue
                   fi
                   if ls "$SYS_SWIFT/${lib%.dylib}.tbd" "$SYS_SWIFT/$lib" \
                        >/dev/null 2>&1; then
-                    if [ "$HAVE_SYS_RPATH" -eq 1 ]; then
-                      echo "system-provided swift lib: $lib"
-                    else
-                      echo "::error file=${bin#$PWD/}::$lib is system-only but /usr/lib/swift rpath missing"
-                      exit 1
-                    fi
+                    echo "system-provided swift lib: $lib"
                   else
                     echo "::error file=${bin#$PWD/}::$lib neither embedded nor found as SDK system stub"
                     exit 1
                   fi
                 done || unresolved=1
           done < "$LIST"
-          if [ "$unresolved" -ne 0 ] || [ "$HAVE_SYS_RPATH" -ne 1 ]; then
-            echo "--- diagnostic: $SYS_SWIFT listing (swift entries) ---"
-            ls -1 "$SYS_SWIFT" 2>/dev/null | grep -i swift | head -60 || true
+          if [ "$unresolved" -ne 0 ]; then
             echo "Swift runtime resolution unverified; aborting"
             exit 1
           fi
-          echo "all referenced Swift runtime libraries resolve (embedded or system)"
+          echo "all referenced Swift runtime libraries resolve (system-first rpath)"
 
           OUT="$PWD/Prism-0.1.0-TrollStore.ipa"
           rm -f "$OUT"
