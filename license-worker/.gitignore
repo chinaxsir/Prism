@@ -1,0 +1,6 @@
+/target
+/build
+/dist-dry
+/.wrangler
+/node_modules
+/.dev.vars

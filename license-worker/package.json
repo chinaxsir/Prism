@@ -1,0 +1,17 @@
+{
+  "name": "prism-license-worker",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Prism 授权服务 Cloudflare Worker（workers-rs + D1）",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "d1:create": "wrangler d1 create prism_license",
+    "d1:apply:local": "wrangler d1 migrations apply prism_license --local",
+    "d1:apply:remote": "wrangler d1 migrations apply prism_license --remote",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}

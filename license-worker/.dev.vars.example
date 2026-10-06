@@ -1,0 +1,6 @@
+# 复制为 .dev.vars 供 `wrangler dev` 本地使用；.dev.vars 已 gitignore
+PRISM_LICENSE_ADMIN_KEY=dev-admin-key-change-me
+# PKCS#8 PEM 私钥原文（多行直接粘贴，wrangler 支持 dotenv 多行）
+LICENSE_RSA_PEM="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+# 可选：Google Play 服务账号 JSON 原文（单行转义）
+PRISM_GOOGLE_SA_JSON=

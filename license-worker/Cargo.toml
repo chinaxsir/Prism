@@ -1,0 +1,29 @@
+[package]
+name = "prism-license-worker"
+version = "0.1.0"
+edition = "2021"
+description = "Prism Pro 授权校验服务（Cloudflare Workers + D1，激活码 / StoreKit / Google Play）"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+worker = { version = "0.8", features = ["d1"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Crypto"] }
+base64 = "0.22"
+sha2 = { version = "0.10", features = ["oid"] }
+rsa = { version = "0.9", features = ["pem"] }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+p384 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+# 只用解析能力（from_der / SPKI 提取），证书链验签自己用 RustCrypto 做，避免 ring
+x509-parser = { version = "0.17", default-features = false }
+rand_core = "0.6"
+# rsa/rand 0.8 链路间接依赖；wasm32-unknown-unknown 必须开 js（走 WebCrypto）
+getrandom = { version = "0.2", features = ["js"] }
+time = { version = "0.3", features = ["parsing", "formatting", "macros"] }
+url = "2"

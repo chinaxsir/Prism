@@ -1,0 +1,35 @@
+# Prism 授权服务 Cloudflare Workers 部署配置
+# 前置：
+#   1. rustup target add wasm32-unknown-unknown
+#   2. cargo install worker-build
+#   3. npm i -g wrangler   （或在本目录 npm i）
+#   4. wrangler d1 create prism_license  → 把返回的 database_id 填到下面
+#   5. wrangler d1 migrations apply prism_license --remote
+#   6. 设置机密（不入仓库）：
+#      wrangler secret put PRISM_LICENSE_ADMIN_KEY
+#      wrangler secret put LICENSE_RSA_PEM          # 与旧服务同一把 PKCS#8 PEM，保持已激活用户不失效
+#      wrangler secret put PRISM_GOOGLE_SA_JSON     # 可选：Google Play 服务账号 JSON 原文
+#   7. wrangler deploy
+
+name = "prism-license"
+main = "build/worker/shim.mjs"
+compatibility_date = "2025-10-01"
+
+[build]
+command = "worker-build --release"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "prism_license"
+# wrangler d1 create 后替换；本地开发会自动用本地 D1
+database_id = "REPLACE_AFTER_CREATE"
+migrations_dir = "migrations"
+
+[vars]
+PRISM_APPLE_BUNDLE_ID = ""
+# 逗号分隔，例如：com.prism.pro.monthly,com.prism.pro.yearly
+PRISM_APPLE_SUBSCRIPTION_PRODUCTS = ""
+PRISM_APPLE_LIFETIME_PRODUCTS = ""
+PRISM_GOOGLE_PACKAGE = ""
+PRISM_GOOGLE_SUBSCRIPTION_PRODUCTS = ""
+PRISM_GOOGLE_LIFETIME_PRODUCTS = ""
