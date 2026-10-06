@@ -67,13 +67,16 @@ jobs:
 
       # Gradle rust 插件会把 cargo 详细输出重定向到文件，失败时控制台只见
       # "Process 'command 'npm'' finished with non-zero exit value 1"。
-      # 先用 cargo 直接构建全部目标（与 Tauri 调用等价：--lib --release），
-      # 让真实编译/链接错误完整打印到 CI 日志，同时预热 cargo 缓存。
+      # 先用 cargo 直接构建全部目标（与 Tauri 调用等价：--lib --release）：
+      # - 错误行转成 workflow error annotation（check-runs API 可读）
+      # - 完整日志在失败时作为 artifact 上传
+      # 同时预热 cargo 缓存。
       - name: Pre-build Rust for all Android targets
-        working-directory: src-tauri
+        id: prebuild
+        shell: bash
         run: |
-          set -euo pipefail
           BIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          failed=0
 
           build() {
             triple="$1"
@@ -83,15 +86,48 @@ jobs:
             export "CXX_${upper}"="$BIN/$cc_name"
             export "AR_${upper}"="$BIN/llvm-ar"
             export "CARGO_TARGET_${upper}_LINKER"="$BIN/$cc_name"
+
+            logf="src-tauri/cargo-${triple}.log"
             echo "::group::cargo build $triple"
-            cargo build --lib --release --target "$triple"
+            set +e
+            cargo build --manifest-path src-tauri/Cargo.toml --lib --release --target "$triple" 2>&1 | tee "$logf"
+            rc=${PIPESTATUS[0]}
+            set -e
             echo "::endgroup::"
+
+            if [ "$rc" -ne 0 ]; then
+              failed=1
+              # 提取关键错误行为注解（每行一个，限制 40 行）
+              grep -E 'error(\[E[0-9]+\])?[: ]|undefined (symbol|reference)|ld(\.lld)?: error|cannot find -l|note: .*' "$logf" \
+                | head -40 | while IFS= read -r line; do
+                  safe="$(printf '%s' "$line" | tr -d '\r' | sed 's/::/: :/g' | cut -c1-500)"
+                  echo "::error file=src-tauri,title=cargo ${triple}::${safe}"
+                done
+              true
+            fi
           }
 
+          set +e
           build aarch64-linux-android    aarch64-linux-android24-clang
           build armv7-linux-androideabi  armv7a-linux-androideabi24-clang
           build i686-linux-android       i686-linux-android24-clang
           build x86_64-linux-android     x86_64-linux-android24-clang
+
+          if [ "$failed" -ne 0 ]; then
+            echo "prebuild-failed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload pre-build logs
+        if: steps.prebuild.outputs.prebuild-failed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-prebuild-logs
+          path: src-tauri/cargo-*.log
+          if-no-files-found: warn
+
+      - name: Assert pre-build result
+        if: steps.prebuild.outputs.prebuild-failed == 'true'
+        run: echo "Android cargo pre-build failed; see annotations / log artifact" && exit 1
 
       # 开启详细日志，以便定位移动端编译具体报错
       - name: Build APK
