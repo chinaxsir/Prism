@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- TrollStore 安装时会从主二进制提取本文件作为 entitlements。
+	     绝不能包含 get-task-allow / task_for_pid-allow / com.apple.private.cs.debugger
+	     等受限键，否则 iOS 16+ 会要求开启“开发者模式”（未开启即闪退）。
+	     TrollStore 会自动补 com.apple.private.security.container-required，
+	     并用 CoreTrust 漏洞重新签名整个 app。 -->
+	<key>application-identifier</key>
+	<string>TROLLTROLL.com.prism.proxy</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>TROLLTROLL</string>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>TROLLTROLL.com.prism.proxy</string>
+	</array>
+</dict>
+</plist>

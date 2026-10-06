@@ -59,6 +59,50 @@ jobs:
       - name: Accept SDK licenses
         run: yes | sdkmanager --licenses || true
 
+      # Pre-build 步骤里 export 的 CC_* 只在该步骤的 shell 内有效（GitHub Actions
+      # 步骤间不保留 shell 环境变量），而 Build APK 时是 Gradle 在全新进程里调
+      # cargo：ring 等带 C 源码的 crate 会重新执行 build script，cc-rs 探测
+      # 不到 NDK r23+ 已移除的无 API 级别后缀 aarch64-linux-android-clang
+      # （ring 的 rerun-if-env 指纹从“已设置”变“未设置”也会触发重编译）。
+      # 写入 CARGO_HOME/config.toml 后对任意 cwd 的 cargo 调用都生效。
+      - name: Configure cargo NDK toolchain globally
+        shell: bash
+        run: |
+          BIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CFG="${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          mkdir -p "$(dirname "$CFG")"
+          if grep -q "prism-android-ndk" "$CFG" 2>/dev/null; then
+            echo "NDK toolchain already configured"
+            exit 0
+          fi
+          cat >> "$CFG" <<EOF
+
+          # prism-android-ndk
+          [target.aarch64-linux-android]
+          linker = "$BIN/aarch64-linux-android24-clang"
+          [target.armv7-linux-androideabi]
+          linker = "$BIN/armv7a-linux-androideabi24-clang"
+          [target.i686-linux-android]
+          linker = "$BIN/i686-linux-android24-clang"
+          [target.x86_64-linux-android]
+          linker = "$BIN/x86_64-linux-android24-clang"
+
+          [env]
+          CC_aarch64_linux_android = "$BIN/aarch64-linux-android24-clang"
+          CXX_aarch64_linux_android = "$BIN/aarch64-linux-android24-clang++"
+          AR_aarch64_linux_android = "$BIN/llvm-ar"
+          CC_armv7_linux_androideabi = "$BIN/armv7a-linux-androideabi24-clang"
+          CXX_armv7_linux_androideabi = "$BIN/armv7a-linux-androideabi24-clang++"
+          AR_armv7_linux_androideabi = "$BIN/llvm-ar"
+          CC_i686_linux_android = "$BIN/i686-linux-android24-clang"
+          CXX_i686_linux_android = "$BIN/i686-linux-android24-clang++"
+          AR_i686_linux_android = "$BIN/llvm-ar"
+          CC_x86_64_linux_android = "$BIN/x86_64-linux-android24-clang"
+          CXX_x86_64_linux_android = "$BIN/x86_64-linux-android24-clang++"
+          AR_x86_64_linux_android = "$BIN/llvm-ar"
+          EOF
+          cat "$CFG"
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -177,13 +221,69 @@ jobs:
       - name: Build unsigned IPA
         run: npx tauri ios build --no-sign --verbose
 
-      - name: Locate IPA
+      - name: Prepare TrollStore IPA
         id: ipa
         run: |
+          set -e
           IPA=$(find src-tauri/gen/apple -name "*.ipa" -type f | head -1)
           test -n "$IPA"
-          echo "path=$IPA"
-          cp "$IPA" "Prism-0.1.0-TrollStore.ipa"
+          echo "built ipa: $IPA"
+
+          WORK=$(mktemp -d)
+          unzip -q "$IPA" -d "$WORK"
+          APP=$(find "$WORK/Payload" -maxdepth 1 -name "*.app" -type d | head -1)
+          EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
+          echo "app: $APP  exec: $EXEC"
+
+          # 收集 .app 内全部 Mach-O（主二进制 / Frameworks / 插件）
+          # 用临时文件列表而非 mapfile：macOS 自带 bash 3.2 没有 mapfile
+          LIST=$(mktemp)
+          find "$APP" -type f | while IFS= read -r f; do
+            if file "$f" | grep -q "Mach-O"; then echo "$f"; fi
+          done > "$LIST"
+          echo "mach-o count: $(wc -l < "$LIST" | tr -d ' ')"
+
+          # --no-sign 的主二进制不带任何 entitlements；TrollStore 安装时会注入
+          # 含 get-task-allow 的 fallback entitlements（模拟 Xcode 签名），
+          # iOS 16+ 因此要求开启“开发者模式”，未开启时 amfid 直接杀进程（闪退、
+          # 且系统分析里不生成崩溃日志）。
+          # 主二进制预签一份不含任何受限 entitlement 的 ad-hoc 签名；
+          # 其余 Mach-O（framework / appex）一律无 entitlements ad-hoc 重签，
+          # 防止任何二进制残留 get-task-allow。TrollStore 安装时仍会用
+          # CoreTrust 漏洞重签整个 app，但不再要求开发者模式，装完即开。
+          while IFS= read -r bin; do
+            if [ "$bin" = "$APP/$EXEC" ]; then
+              codesign --force --sign - \
+                --entitlements "$PWD/src-tauri/TrollStore.entitlements.plist" \
+                "$bin"
+            else
+              codesign --force --sign - "$bin"
+            fi
+          done < "$LIST"
+
+          echo "--- main executable entitlements ---"
+          codesign -d --entitlements - "$APP/$EXEC" 2>&1 | head -40 || true
+
+          # 硬校验：任一 Mach-O 仍带受限 entitlement 就让构建失败，
+          # 避免下次 Xcode/Tauri 升级悄悄带回 get-task-allow
+          bad=0
+          while IFS= read -r bin; do
+            ents=$(codesign -d --entitlements - "$bin" 2>/dev/null || true)
+            if echo "$ents" | grep -qE 'get-task-allow|task_for_pid-allow|com\.apple\.private\.cs\.debugger|com\.apple\.system-task-ports'; then
+              echo "::error file=${bin#$PWD/}::restricted developer-mode entitlement present"
+              bad=1
+            fi
+          done < "$LIST"
+          if [ "$bad" -ne 0 ]; then
+            echo "TrollStore IPA would require Developer Mode; aborting"
+            exit 1
+          fi
+          echo "no restricted entitlements; Developer Mode not required"
+
+          OUT="$PWD/Prism-0.1.0-TrollStore.ipa"
+          rm -f "$OUT"
+          (cd "$WORK" && zip -qry "$OUT" Payload)
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
