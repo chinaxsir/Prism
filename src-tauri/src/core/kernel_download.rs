@@ -171,9 +171,11 @@ pub async fn ensure(app: &AppHandle, work_dir: &Path) -> Result<PathBuf> {
 
 /// 流式下载并按 ~250ms 节流推送百分比
 async fn download_to_file(app: &AppHandle, url: &str, dest: &Path) -> Result<()> {
-    // no_proxy：内核运行时系统代理指向本进程，经代理下载会形成自回环
+    // no_proxy：内核运行时系统代理指向本进程，经代理下载会形成自回环；
+    // connect_timeout：黑洞地址快速失败，让多源切换尽快生效
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
+        .connect_timeout(Duration::from_secs(10))
         .no_proxy()
         .build()?;
     let resp = client.get(url).send().await?.error_for_status()?;

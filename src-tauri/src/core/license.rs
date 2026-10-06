@@ -156,13 +156,42 @@ fn server_base(_settings: &UserSettings) -> String {
     DEFAULT_SERVER.trim_end_matches('/').to_string()
 }
 
-fn http_client() -> Result<reqwest::Client> {
+fn http_builder() -> Result<reqwest::ClientBuilder> {
     Ok(reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        // 连接阶段短超时：黑洞地址快速失败，尽快进入 IPv4 重试
+        .connect_timeout(std::time::Duration::from_secs(8))
         // 不走系统代理：内核运行时系统代理指向本机，走代理会自回环；
         // 授权服务为公网 HTTPS，直连即可
-        .no_proxy()
-        .build()?)
+        .no_proxy())
+}
+
+/// 直连失败后强制 IPv4 源重试：部分网络 IPv6 出口为黑洞（AAAA 优先 +
+/// SYN 无响应），hyper 顺序尝试地址会耗尽超时。用 0.0.0.0 绑定源地址时
+/// v6 目标因地址族不匹配立即跳过，连接器秒级回退到 v4 目标。
+async fn send_with_v4_fallback(
+    make: impl Fn(&reqwest::Client) -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response> {
+    let mut last: Option<String> = None;
+    for force_v4 in [false, true] {
+        let mut b = http_builder()?;
+        if force_v4 {
+            b = b.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        }
+        match make(&b.build()?).send().await {
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                tracing::warn!("license request (force_v4={force_v4}) failed: {e}");
+                last = Some(e.to_string());
+            }
+        }
+    }
+    bail!("网络请求失败：{}（已尝试 IPv4 直连）", last.unwrap_or_default())
+}
+
+/// POST JSON 带兜底重试
+async fn post_with_fallback(url: &str, body: &Value) -> Result<reqwest::Response> {
+    send_with_v4_fallback(|c| c.post(url).json(body)).await
 }
 
 /// license 声明（仅取客户端需要的字段，与服务端 LicenseClaims 对应）
@@ -197,17 +226,11 @@ fn verify_license(license: &str, public_pem: &str) -> Result<Claims> {
 
 /// 获取（或沿用已钉取的）服务端公钥。
 /// 已钉取时不再请求；与缓存不一致属于服务端换钥，拒绝并要求联系支持。
-async fn resolve_public_key(
-    client: &reqwest::Client,
-    base: &str,
-    cached_pin: Option<&str>,
-) -> Result<String> {
+async fn resolve_public_key(base: &str, cached_pin: Option<&str>) -> Result<String> {
     if let Some(pin) = cached_pin {
         return Ok(pin.to_string());
     }
-    let body: Value = client
-        .get(format!("{base}/api/v1/public-key"))
-        .send()
+    let body: Value = send_with_v4_fallback(|c| c.get(&format!("{base}/api/v1/public-key")))
         .await?
         .json()
         .await?;
@@ -241,14 +264,13 @@ pub async fn activate(
     code: &str,
 ) -> Result<EntitlementStatus> {
     let base = server_base(settings);
-    let client = http_client()?;
     let device = load_device(data_dir)?;
 
-    let resp = client
-        .post(format!("{base}/api/v1/activate"))
-        .json(&serde_json::json!({ "code": code.trim(), "device": device }))
-        .send()
-        .await?;
+    let resp = post_with_fallback(
+        &format!("{base}/api/v1/activate"),
+        &serde_json::json!({ "code": code.trim(), "device": device }),
+    )
+    .await?;
     if !resp.status().is_success() {
         bail!(error_message(resp).await);
     }
@@ -258,7 +280,7 @@ pub async fn activate(
         .ok_or_else(|| anyhow::anyhow!("服务端未返回 license"))?;
 
     let prev_pin = load_cache(data_dir).map(|c| c.pinned_public_key);
-    let public_key = resolve_public_key(&client, &base, prev_pin.as_deref()).await?;
+    let public_key = resolve_public_key(&base, prev_pin.as_deref()).await?;
     verify_license(&license, &public_key)?;
 
     save_cache(
@@ -281,18 +303,15 @@ pub async fn verify_remote(
         return Ok(EntitlementStatus::inactive());
     };
     let base = server_base(settings);
-    let client = match http_client() {
-        Ok(c) => c,
-        Err(_) => return Ok(offline_eval(&cache.entitlement)),
-    };
 
-    let resp = client
-        .post(format!("{base}/api/v1/verify"))
-        .json(&serde_json::json!({ "license": cache.license }))
-        .send()
-        .await;
-    let Ok(resp) = resp else {
-        return Ok(offline_eval(&cache.entitlement));
+    let resp = match post_with_fallback(
+        &format!("{base}/api/v1/verify"),
+        &serde_json::json!({ "license": cache.license }),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => return Ok(offline_eval(&cache.entitlement)),
     };
 
     // 401/403：服务端明确判定凭证无效 → 清除缓存
@@ -353,7 +372,6 @@ pub async fn submit_store_receipt(
     receipt: Value,
 ) -> Result<EntitlementStatus> {
     let base = server_base(settings);
-    let client = http_client()?;
     let device = load_device(data_dir)?;
 
     let (path, body) = match store {
@@ -393,7 +411,7 @@ pub async fn submit_store_receipt(
         other => bail!("未知商店: {other}"),
     };
 
-    let resp = client.post(format!("{base}{path}")).json(&body).send().await?;
+    let resp = post_with_fallback(&format!("{base}{path}"), &body).await?;
     if !resp.status().is_success() {
         bail!(error_message(resp).await);
     }
@@ -403,7 +421,7 @@ pub async fn submit_store_receipt(
         .ok_or_else(|| anyhow::anyhow!("服务端未返回 license"))?;
 
     let prev_pin = load_cache(data_dir).map(|c| c.pinned_public_key);
-    let public_key = resolve_public_key(&client, &base, prev_pin.as_deref()).await?;
+    let public_key = resolve_public_key(&base, prev_pin.as_deref()).await?;
     verify_license(&license, &public_key)?;
 
     save_cache(

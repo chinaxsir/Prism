@@ -662,26 +662,62 @@ pub async fn update_subscription(
 
 /// 下载远程文本（订阅 / proxy-provider 共用）。
 /// 伪装为 Clash 客户端，多数机场据此返回 Clash YAML；
-/// 必须 no_proxy：内核运行时系统代理指向本进程，走代理会形成自回环
+/// 必须 no_proxy：内核运行时系统代理指向本进程，走代理会形成自回环。
+///
+/// IPv4 兜底重试：部分网络环境 IPv6 出口为黑洞（域名 AAAA 记录优先 +
+/// SYN 无响应），hyper 顺序尝试地址会耗尽超时报 "error sending request"。
+/// 第一次直连失败后改用 0.0.0.0 绑定源地址重试——v6 目标因地址族不匹配
+/// 立即跳过，连接器秒级回退到 v4 目标。
 async fn fetch_remote_text(url: &str) -> Result<String, String> {
-    let client = reqwest::Client::builder()
-        .user_agent("clash-verge/v2.0.0")
-        .timeout(std::time::Duration::from_secs(30))
-        .no_proxy()
-        .build()
-        .map_err(|e| e.to_string())?;
+    let mut last_err = String::new();
+    for force_v4 in [false, true] {
+        let mut builder = reqwest::Client::builder()
+            .user_agent("clash-verge/v2.0.0")
+            .timeout(std::time::Duration::from_secs(30))
+            // 连接阶段独立短超时：黑洞地址快速失败，尽快进入重试
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .no_proxy();
+        if force_v4 {
+            builder = builder.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        }
+        let client = builder.build().map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
 
-    let bytes = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("下载失败: {}", e))?
-        .bytes()
-        .await
-        .map_err(|e| format!("读取响应失败: {}", e))?;
+        let resp = match client.get(url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = describe_reqwest_error(&e);
+                tracing::warn!("fetch remote text (force_v4={force_v4}) failed: {last_err}");
+                continue;
+            }
+        };
+        if !resp.status().is_success() {
+            return Err(format!(
+                "下载失败：HTTP {}（订阅链接可能已失效）",
+                resp.status()
+            ));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("读取响应失败: {e}"))?;
+        return String::from_utf8(bytes.to_vec())
+            .map_err(|_| "内容不是有效 UTF-8 文本".to_string());
+    }
+    Err(format!(
+        "下载失败：{last_err}（已尝试 IPv4 直连；若机器处于受限网络请先启动内核再更新）"
+    ))
+}
 
-    String::from_utf8(bytes.to_vec())
-        .map_err(|_| "内容不是有效 UTF-8 文本".to_string())
+/// reqwest 顶层 Display 只有 "error sending request"，
+/// 链式展开到最底层原因（DNS / 连接超时 / TLS 证书等）便于用户自救
+fn describe_reqwest_error(e: &reqwest::Error) -> String {
+    let mut msg = e.to_string();
+    let mut src: Option<&dyn std::error::Error> = Some(&e);
+    while let Some(s) = src.and_then(std::error::Error::source) {
+        msg.push_str(&format!("（原因: {s}）"));
+        src = Some(s);
+    }
+    msg
 }
 
 /// 解析订阅内的 proxy-providers（仅 http），逐个下载落盘
