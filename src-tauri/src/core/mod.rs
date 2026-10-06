@@ -15,3 +15,4 @@ pub mod license;
 pub mod state;
 pub mod store;
 pub mod tun;
+pub mod uri_parser;

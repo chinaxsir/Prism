@@ -1,0 +1,643 @@
+//! 分享链接（URI）解析器：ss/ssr/vmess/vless/trojan/hysteria2/tuic → Clash 节点
+//!
+//! 机场默认订阅多为 base64 包裹的 URI 列表，本模块负责把每行链接还原成
+//! `ClashNode`（config_builder 的 Clash 结构），再合并进统一 pipeline。
+//! 语法与各客户端（Clash / Surge / sing-box 订阅转换器）的通行实现保持一致。
+
+use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use serde_json::{json, Value};
+
+/// 检测文本是否为 URI 列表订阅（含 ss:// 等分享链接行）
+pub fn is_uri_list(text: &str) -> bool {
+    text.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("ss://")
+            || l.starts_with("ssr://")
+            || l.starts_with("vmess://")
+            || l.starts_with("vless://")
+            || l.starts_with("trojan://")
+            || l.starts_with("hysteria2://")
+            || l.starts_with("hy2://")
+            || l.starts_with("tuic://")
+    })
+}
+
+/// 解析单个分享链接 → Clash 节点 JSON
+pub fn parse_line(line: &str) -> Result<Option<Value>> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return Ok(None);
+    }
+    let (scheme, rest) = line.split_once("://").context("缺少 ://")?;
+    let node = match scheme {
+        "ss" => parse_ss(rest)?,
+        "ssr" => parse_ssr(rest)?,
+        "vmess" => parse_vmess(rest)?,
+        "vless" => parse_vless(rest)?,
+        "trojan" => parse_trojan(rest)?,
+        "hysteria2" | "hy2" => parse_hysteria2(rest)?,
+        "tuic" => parse_tuic(rest)?,
+        _ => bail!("不支持的协议：{scheme}"),
+    };
+    Ok(Some(node))
+}
+
+/// 批量解析（返回 (节点列表, 无法解析的行号+原因)）
+pub fn parse_lines(text: &str) -> (Vec<Value>, Vec<String>) {
+    let mut nodes = Vec::new();
+    let mut errors = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        match parse_line(line) {
+            Ok(Some(node)) => nodes.push(node),
+            Ok(None) => {}
+            Err(e) => errors.push(format!("第 {} 行：{}", idx + 1, e)),
+        }
+    }
+    (nodes, errors)
+}
+
+// ---------------- 通用工具 ----------------
+
+/// base64 解码（先尝试标准，再尝试 URL_SAFE_NO_PAD，最后 URL_SAFE）
+fn b64_decode(s: &str) -> Result<Vec<u8>> {
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE};
+    for eng in [&STANDARD, &URL_SAFE_NO_PAD, &URL_SAFE] {
+        if let Ok(b) = eng.decode(s.trim()) {
+            return Ok(b);
+        }
+    }
+    bail!("base64 解码失败")
+}
+
+fn b64_decode_str(s: &str) -> Result<String> {
+    String::from_utf8(b64_decode(s)?).context("base64 内容不是 UTF-8")
+}
+
+/// 从 URI 提取 host:port（支持 IPv6 [..]:port）
+fn split_host_port(s: &str) -> Result<(String, u16)> {
+    if let Some(start) = s.find('[') {
+        // IPv6
+        let end = s.rfind(']').context("IPv6 缺少 ]")?;
+        let host = s[start + 1..end].to_string();
+        let port_str = s[end + 1..].strip_prefix(':').context("IPv6 缺少端口")?;
+        let port = port_str.parse::<u16>().context("端口无效")?;
+        Ok((host, port))
+    } else {
+        let (host, port) = s.rsplit_once(':').context("缺少端口")?;
+        Ok((host.to_string(), port.parse::<u16>().context("端口无效")?))
+    }
+}
+
+/// 解析 URI 尾部 #fragment 为 name（URL 解码）
+fn decode_name(frag: &str) -> String {
+    urlencoding_decode(frag).unwrap_or_else(|| frag.to_string())
+}
+
+/// 简易 URL percent-decode（处理 %20、%40 等）
+fn urlencoding_decode(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            let byte = u8::from_str_radix(&hex, 16).ok()?;
+            out.push(byte as char);
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
+}
+
+/// 解析 query string 为键值对（保留顺序）
+fn parse_query(q: &str) -> Vec<(String, String)> {
+    q.split('&')
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| {
+            let mut it = p.splitn(2, '=');
+            let k = it.next()?;
+            let v = it.next().unwrap_or_default();
+            Some((
+                urlencoding_decode(k).unwrap_or_else(|| k.to_string()),
+                urlencoding_decode(v).unwrap_or_else(|| v.to_string()),
+            ))
+        })
+        .collect()
+}
+
+// ---------------- 各协议实现 ----------------
+
+/// ss:// 三种形态：
+/// 1) SIP002：ss://base64url(method:password)@host:port[?plugin=...]#name
+/// 2) 明文 userinfo：ss://method:password@host:port#name
+/// 3) 旧版整体编码：ss://base64(method:password@host:port)#name
+fn parse_ss(rest: &str) -> Result<Value> {
+    let (payload, name) = payload_and_name(rest);
+    let (payload, query) = payload.split_once('?').unwrap_or((payload, ""));
+    let name = decode_name(name);
+
+    let (method, password, server, port) = if payload.contains('@') {
+        // SIP002 或明文 userinfo
+        let (userinfo, hostport) = payload.rsplit_once('@').context("SS 缺少 @")?;
+        let up = b64_decode_str(userinfo).unwrap_or_else(|_| userinfo.to_string());
+        let (method, password) = up.split_once(':').context("SS 缺少密码分隔符 :")?;
+        let (server, port) = split_host_port(hostport)?;
+        (method.to_string(), password.to_string(), server, port)
+    } else {
+        // 旧版：整体 base64
+        let decoded = b64_decode_str(payload)?;
+        let (userinfo, hostport) = decoded.rsplit_once('@').context("SS 缺少 @")?;
+        let (method, password) = userinfo.split_once(':').context("SS 缺少密码分隔符 :")?;
+        let (server, port) = split_host_port(hostport)?;
+        (method.to_string(), password.to_string(), server, port)
+    };
+
+    let mut node = json!({
+        "name": name,
+        "type": "ss",
+        "server": server,
+        "port": port,
+        "cipher": method,
+        "password": password,
+    });
+
+    // SIP002 plugin 参数（obfs-local / simple-obfs）
+    if !query.is_empty() {
+        let params: std::collections::HashMap<_, _> = parse_query(query).into_iter().collect();
+        if let Some(plugin) = params.get("plugin") {
+            let segs: Vec<&str> = plugin.split(';').collect();
+            let kind = segs.first().copied().unwrap_or_default();
+            if kind.contains("obfs") {
+                let mut mode = "http".to_string();
+                let mut host = String::new();
+                for seg in &segs[1..] {
+                    match *seg {
+                        "obfs=http" | "http" => mode = "http".into(),
+                        "obfs=tls" | "tls" => mode = "tls".into(),
+                        _ => {
+                            if let Some(h) = seg.strip_prefix("obfs-host=") {
+                                host = h.to_string();
+                            }
+                        }
+                    }
+                }
+                node["plugin"] = json!("obfs");
+                node["plugin-opts"] = json!({ "mode": mode, "host": host });
+            }
+        }
+    }
+
+    Ok(node)
+}
+
+/// 分离载荷与 #name（fragment 可能含 %XX 编码）
+fn payload_and_name(rest: &str) -> (&str, &str) {
+    rest.split_once('#').unwrap_or((rest, ""))
+}
+
+/// ssr://host:port:protocol:method:obfs:base64(password)/?obfsparam=base64&protoparam=base64&remarks=base64
+fn parse_ssr(rest: &str) -> Result<Value> {
+    let decoded = b64_decode_str(rest)?;
+    let (main, query) = decoded.split_once("/?").unwrap_or((decoded.as_str(), ""));
+    let parts: Vec<&str> = main.split(':').collect();
+    if parts.len() < 6 {
+        bail!("SSR 格式不完整");
+    }
+    let (server, port, protocol, method, obfs) = (
+        parts[0],
+        parts[1].parse::<u16>().context("端口无效")?,
+        parts[2],
+        parts[3],
+        parts[4],
+    );
+    // parts[5] = base64(password)
+    let password = b64_decode_str(parts[5])?;
+
+    let params: std::collections::HashMap<_, _> = parse_query(query).into_iter().collect();
+    let remarks = params
+        .get("remarks")
+        .and_then(|r| b64_decode_str(r).ok())
+        .unwrap_or_default();
+
+    Ok(json!({
+        "name": remarks,
+        "type": "ssr",
+        "server": server,
+        "port": port,
+        "cipher": method,
+        "password": password,
+        "protocol": protocol,
+        "obfs": obfs,
+        "protocol-param": params.get("protoparam").and_then(|p| b64_decode_str(p).ok()).unwrap_or_default(),
+        "obfs-param": params.get("obfsparam").and_then(|p| b64_decode_str(p).ok()).unwrap_or_default(),
+    }))
+}
+
+/// vmess://base64(JSON)（名称取 JSON 的 ps 字段，#fragment 忽略）
+fn parse_vmess(rest: &str) -> Result<Value> {
+    let (payload, _) = payload_and_name(rest);
+    let text = b64_decode_str(payload)?;
+    let j: Value = serde_json::from_str(&text).context("VMess JSON 解析失败")?;
+
+    let name = j["ps"].as_str().unwrap_or_default().to_string();
+    let server = j["add"].as_str().context("缺少 add")?.to_string();
+    let port: u16 = j["port"]
+        .as_u64()
+        .or_else(|| j["port"].as_str().and_then(|s| s.parse::<u64>().ok()))
+        .and_then(|v| u16::try_from(v).ok())
+        .context("端口无效")?;
+
+    let uuid = j["id"].as_str().unwrap_or_default().to_string();
+    // vmess 分享 JSON 的 port/aid 常为字符串，兼容数字与字符串两种
+    let alter_id = j["aid"]
+        .as_i64()
+        .or_else(|| j["aid"].as_str().and_then(|s| s.parse().ok()))
+        .unwrap_or(0);
+    let cipher = j["scy"].as_str().or_else(|| j["security"].as_str()).unwrap_or("auto").to_string();
+    let network = j["net"].as_str().unwrap_or("tcp").to_string();
+    let host = j["host"].as_str().unwrap_or_default().to_string();
+    let path = j["path"].as_str().unwrap_or_default().to_string();
+    let tls = j["tls"].as_str().unwrap_or_default().to_string();
+    let sni = j["sni"].as_str().or_else(|| j["servername"].as_str()).unwrap_or_default().to_string();
+    let alpn = j["alpn"].as_str().map(|s| {
+        s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect::<Vec<_>>()
+    });
+    let fp = j["fp"].as_str().unwrap_or_default().to_string();
+
+    let mut node = json!({
+        "name": name,
+        "type": "vmess",
+        "server": server,
+        "port": port,
+        "uuid": uuid,
+        "alter_id": alter_id,
+        "cipher": cipher,
+    });
+
+    if network != "tcp" {
+        node["network"] = json!(network);
+    }
+    match network.as_str() {
+        "ws" => {
+            let mut ws_opts = json!({});
+            if !path.is_empty() {
+                ws_opts["path"] = json!(path);
+            }
+            if !host.is_empty() {
+                ws_opts["headers"] = json!({ "Host": host });
+            }
+            node["ws-opts"] = ws_opts;
+        }
+        "grpc" => {
+            node["grpc-opts"] = json!({ "grpc-service-name": host.clone() });
+        }
+        "http" | "h2" => {
+            // http / h2 通过 http-opts / h2-opts 补齐
+            let key = if network == "http" { "http-opts" } else { "h2-opts" };
+            let mut opts = json!({});
+            if !path.is_empty() {
+                opts["path"] = if network == "http" { json!([path]) } else { json!(path) };
+            }
+            if !host.is_empty() {
+                if network == "http" {
+                    opts["headers"] = json!({ "Host": [host] });
+                } else {
+                    opts["host"] = json!([host]);
+                }
+            }
+            node[key] = opts;
+        }
+        _ => {}
+    }
+
+    if tls == "tls" {
+        node["tls"] = json!(true);
+        if !sni.is_empty() {
+            node["sni"] = json!(sni);
+        }
+        if let Some(al) = alpn {
+            node["alpn"] = json!(al);
+        }
+        if !fp.is_empty() {
+            node["client-fingerprint"] = json!(fp);
+        }
+    }
+
+    Ok(node)
+}
+
+/// vless://uuid@host:port?security=...&type=...&...#name
+fn parse_vless(rest: &str) -> Result<Value> {
+    let (addr_query, name) = rest.split_once('#').unwrap_or((rest, ""));
+    let (addr, query) = addr_query.split_once('?').unwrap_or((addr_query, ""));
+    let (uuid, hostport) = addr.rsplit_once('@').context("缺少 @")?;
+    let (server, port) = split_host_port(hostport)?;
+    let name = decode_name(name);
+
+    let params: std::collections::HashMap<_, _> = parse_query(query).into_iter().collect();
+    let security = params.get("security").cloned().unwrap_or_else(|| "none".into());
+    let network = params.get("type").cloned().unwrap_or_else(|| "tcp".into());
+    let sni = params.get("sni").cloned().or_else(|| params.get("peer").cloned()).unwrap_or_default();
+    let fp = params.get("fp").cloned().unwrap_or_default();
+    let flow = params.get("flow").cloned().unwrap_or_default();
+    let public_key = params.get("pbk").cloned().unwrap_or_default();
+    let short_id = params.get("sid").cloned().unwrap_or_default();
+    let alpn = params.get("alpn").cloned().unwrap_or_default();
+    let path = params.get("path").cloned().unwrap_or_default();
+    let host = params.get("host").cloned().unwrap_or_default();
+    let service_name = params.get("serviceName").cloned().unwrap_or_default();
+
+    let mut node = json!({
+        "name": name,
+        "type": "vless",
+        "server": server,
+        "port": port,
+        "uuid": uuid,
+    });
+
+    if network != "tcp" {
+        node["network"] = json!(network);
+    }
+    match network.as_str() {
+        "ws" => {
+            let mut ws = json!({});
+            if !path.is_empty() {
+                ws["path"] = json!(path);
+            }
+            if !host.is_empty() {
+                ws["headers"] = json!({ "Host": host });
+            }
+            node["ws-opts"] = ws;
+        }
+        "grpc" => {
+            node["grpc-opts"] = json!({ "grpc-service-name": service_name });
+        }
+        _ => {}
+    }
+
+    if !flow.is_empty() {
+        node["flow"] = json!(flow);
+    }
+    if security == "tls" || security == "reality" {
+        node["tls"] = json!(true);
+        if !sni.is_empty() {
+            node["sni"] = json!(sni);
+        }
+        if !fp.is_empty() {
+            node["client-fingerprint"] = json!(fp);
+        }
+        if !alpn.is_empty() {
+            node["alpn"] = json!(alpn.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>());
+        }
+    }
+    if security == "reality" && !public_key.is_empty() {
+        node["reality-opts"] = json!({ "public-key": public_key, "short-id": short_id });
+    }
+
+    Ok(node)
+}
+
+/// trojan://password@host:port?...#name
+fn parse_trojan(rest: &str) -> Result<Value> {
+    let (addr_query, name) = rest.split_once('#').unwrap_or((rest, ""));
+    let (addr, query) = addr_query.split_once('?').unwrap_or((addr_query, ""));
+    let (password, hostport) = addr.rsplit_once('@').context("缺少 @")?;
+    let (server, port) = split_host_port(hostport)?;
+    let name = decode_name(name);
+
+    let params: std::collections::HashMap<_, _> = parse_query(query).into_iter().collect();
+    let sni = params.get("sni").cloned().or_else(|| params.get("peer").cloned()).unwrap_or_default();
+    let alpn = params.get("alpn").cloned().unwrap_or_default();
+    let network = params.get("type").cloned().unwrap_or_else(|| "tcp".into());
+    let path = params.get("path").cloned().unwrap_or_default();
+    let host = params.get("host").cloned().unwrap_or_default();
+
+    let mut node = json!({
+        "name": name,
+        "type": "trojan",
+        "server": server,
+        "port": port,
+        "password": password,
+    });
+
+    if !sni.is_empty() {
+        node["sni"] = json!(sni);
+    }
+    if !alpn.is_empty() {
+        node["alpn"] = json!(alpn.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>());
+    }
+    if network == "ws" {
+        let mut ws = json!({});
+        if !path.is_empty() {
+            ws["path"] = json!(path);
+        }
+        if !host.is_empty() {
+            ws["headers"] = json!({ "Host": host });
+        }
+        node["ws-opts"] = ws;
+        node["network"] = json!("ws");
+    } else if network == "grpc" {
+        node["network"] = json!("grpc");
+        node["grpc-opts"] = json!({ "grpc-service-name": host });
+    }
+
+    Ok(node)
+}
+
+/// hysteria2://password@host:port?...#name  （也支持 hy2://）
+fn parse_hysteria2(rest: &str) -> Result<Value> {
+    let (addr_query, name) = rest.split_once('#').unwrap_or((rest, ""));
+    let (addr, query) = addr_query.split_once('?').unwrap_or((addr_query, ""));
+    let (password, hostport) = addr.rsplit_once('@').context("缺少 @")?;
+    let (server, port) = split_host_port(hostport)?;
+    let name = decode_name(name);
+
+    let params: std::collections::HashMap<_, _> = parse_query(query).into_iter().collect();
+    let sni = params.get("sni").cloned().unwrap_or_default();
+    let obfs = params.get("obfs").cloned().unwrap_or_default();
+    let obfs_password = params.get("obfs-password").cloned().unwrap_or_default();
+    let insecure = params.get("insecure").cloned().unwrap_or_default();
+
+    let mut node = json!({
+        "name": name,
+        "type": "hysteria2",
+        "server": server,
+        "port": port,
+        "password": password,
+    });
+
+    if !sni.is_empty() {
+        node["sni"] = json!(sni);
+    }
+    if obfs == "salamander" && !obfs_password.is_empty() {
+        node["obfs"] = json!("salamander");
+        node["obfs-password"] = json!(obfs_password);
+    }
+    if insecure == "1" || insecure.eq_ignore_ascii_case("true") {
+        node["skip-cert-verify"] = json!(true);
+    }
+
+    Ok(node)
+}
+
+/// tuic://uuid:password@host:port?...#name
+fn parse_tuic(rest: &str) -> Result<Value> {
+    let (addr_query, name) = rest.split_once('#').unwrap_or((rest, ""));
+    let (addr, query) = addr_query.split_once('?').unwrap_or((addr_query, ""));
+    let (uuid_pass, hostport) = addr.rsplit_once('@').context("缺少 @")?;
+    let (uuid, password) = uuid_pass.split_once(':').context("TUIC 缺少 uuid:password")?;
+    let (server, port) = split_host_port(hostport)?;
+    let name = decode_name(name);
+
+    let params: std::collections::HashMap<_, _> = parse_query(query).into_iter().collect();
+    let congestion = params.get("congestion_control").cloned().unwrap_or_else(|| "bbr".into());
+    let alpn = params.get("alpn").cloned().unwrap_or_else(|| "h3".into());
+    let sni = params.get("sni").cloned().unwrap_or_default();
+
+    let mut node = json!({
+        "name": name,
+        "type": "tuic",
+        "server": server,
+        "port": port,
+        "uuid": uuid,
+        "password": password,
+        "congestion-controller": congestion,
+    });
+
+    if !alpn.is_empty() {
+        node["alpn"] = json!(alpn.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>());
+    }
+    if !sni.is_empty() {
+        node["sni"] = json!(sni);
+    }
+
+    Ok(node)
+}
+
+// ---------------- 单元测试 ----------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_uri_list() {
+        assert!(is_uri_list("ss://abc#def"));
+        assert!(is_uri_list("vmess://eyJ2IjoiMiJ9"));
+        assert!(!is_uri_list("proxies:\n  - name: a"));
+        assert!(!is_uri_list("mixed content\nwith ss:// but no"));
+    }
+
+    #[test]
+    fn parses_ss_base64() {
+        let raw = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@1.2.3.4:8388#test-node";
+        let node = parse_line(raw).unwrap().unwrap();
+        assert_eq!(node["type"], "ss");
+        assert_eq!(node["server"], "1.2.3.4");
+        assert_eq!(node["port"], 8388);
+        assert_eq!(node["cipher"], "aes-256-gcm");
+        assert_eq!(node["password"], "password");
+        assert_eq!(node["name"], "test-node");
+    }
+
+    #[test]
+    fn parses_ss_plain() {
+        let raw = "ss://chacha20-ietf-poly1305:secret@example.com:443#plain";
+        let node = parse_line(raw).unwrap().unwrap();
+        assert_eq!(node["cipher"], "chacha20-ietf-poly1305");
+        assert_eq!(node["password"], "secret");
+        assert_eq!(node["server"], "example.com");
+    }
+
+    #[test]
+    fn parses_vmess() {
+        let json = r#"{"v":"2","ps":"vm-node","add":"vm.example.com","port":"443","id":"uuid-1234","aid":"0","scy":"auto","net":"ws","type":"none","host":"cdn.example.com","path":"/ws","tls":"tls","sni":"sni.example.com","alpn":"h2,http/1.1","fp":"chrome"}"#;
+        let b64 = URL_SAFE_NO_PAD.encode(json);
+        let raw = format!("vmess://{b64}");
+        let node = parse_line(&raw).unwrap().unwrap();
+        assert_eq!(node["name"], "vm-node");
+        assert_eq!(node["server"], "vm.example.com");
+        assert_eq!(node["port"], 443);
+        assert_eq!(node["uuid"], "uuid-1234");
+        assert_eq!(node["network"], "ws");
+        assert_eq!(node["tls"], true);
+        assert_eq!(node["sni"], "sni.example.com");
+        assert_eq!(node["client-fingerprint"], "chrome");
+        assert_eq!(node["ws-opts"]["path"], "/ws");
+        assert_eq!(node["ws-opts"]["headers"]["Host"], "cdn.example.com");
+    }
+
+    #[test]
+    fn parses_vless_reality() {
+        let raw = "vless://uuid-5678@1.2.3.4:443?security=reality&flow=xtls-rprx-vision&sni=dl.google.com&fp=chrome&pbk=pubkey123&sid=ab&type=tcp#vless-reality";
+        let node = parse_line(raw).unwrap().unwrap();
+        assert_eq!(node["type"], "vless");
+        assert_eq!(node["uuid"], "uuid-5678");
+        assert_eq!(node["server"], "1.2.3.4");
+        assert_eq!(node["tls"], true);
+        assert_eq!(node["flow"], "xtls-rprx-vision");
+        assert_eq!(node["sni"], "dl.google.com");
+        assert_eq!(node["client-fingerprint"], "chrome");
+        assert_eq!(node["reality-opts"]["public-key"], "pubkey123");
+        assert_eq!(node["reality-opts"]["short-id"], "ab");
+    }
+
+    #[test]
+    fn parses_vless_ws() {
+        let raw = "vless://uuid@cdn.com:443?security=tls&type=ws&path=%2Fapi&host=cdn.com#vless-ws";
+        let node = parse_line(raw).unwrap().unwrap();
+        assert_eq!(node["network"], "ws");
+        assert_eq!(node["ws-opts"]["path"], "/api");
+        assert_eq!(node["ws-opts"]["headers"]["Host"], "cdn.com");
+    }
+
+    #[test]
+    fn parses_trojan() {
+        let raw = "trojan://pass123@trojan.example.com:443?sni=trojan.example.com&type=ws&path=%2Ftj&host=trojan.example.com#trojan";
+        let node = parse_line(raw).unwrap().unwrap();
+        assert_eq!(node["type"], "trojan");
+        assert_eq!(node["password"], "pass123");
+        assert_eq!(node["server"], "trojan.example.com");
+        assert_eq!(node["sni"], "trojan.example.com");
+        assert_eq!(node["network"], "ws");
+    }
+
+    #[test]
+    fn parses_hysteria2() {
+        let raw = "hysteria2://pass456@hy2.example.com:443?sni=hy2.example.com&obfs=salamander&obfs-password=obfspass&insecure=1#hy2-node";
+        let node = parse_line(raw).unwrap().unwrap();
+        assert_eq!(node["type"], "hysteria2");
+        assert_eq!(node["password"], "pass456");
+        assert_eq!(node["obfs"], "salamander");
+        assert_eq!(node["obfs-password"], "obfspass");
+        assert_eq!(node["skip-cert-verify"], true);
+    }
+
+    #[test]
+    fn parses_tuic() {
+        let raw = "tuic://uuid-999:pass999@tuic.example.com:443?congestion_control=bbr&alpn=h3&sni=tuic.example.com#tuic-node";
+        let node = parse_line(raw).unwrap().unwrap();
+        assert_eq!(node["type"], "tuic");
+        assert_eq!(node["uuid"], "uuid-999");
+        assert_eq!(node["password"], "pass999");
+        assert_eq!(node["congestion-controller"], "bbr");
+    }
+
+    #[test]
+    fn parses_ipv6_ss() {
+        let raw = "ss://YWVzLTI1Ni1nY206cGFzcw==@[2001:db8::1]:8388#ipv6";
+        let node = parse_line(raw).unwrap().unwrap();
+        assert_eq!(node["server"], "2001:db8::1");
+        assert_eq!(node["port"], 8388);
+    }
+
+    #[test]
+    fn parses_batch() {
+        let text = "ss://YWVzLTI1Ni1nY206cGFzcw==@a.com:443#a\ninvalid-line\nvmess://eyJ2IjoiMiIsInBzIjoiYiIsImFkZCI6ImIuY29tIiwicG9ydCI6IjQ0MyIsImlkIjoidiJ9#b";
+        let (nodes, errors) = parse_lines(text);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("第 2 行"));
+    }
+}

@@ -561,12 +561,54 @@ pub async fn update_subscription(
         }
     }
 
-    // URI 列表订阅（ss://、vmess://）暂不支持，明确报错而非静默损坏
-    if text.lines().any(|l| {
-        let l = l.trim();
-        l.starts_with("ss://") || l.starts_with("vmess://") || l.starts_with("vless://")
-    }) {
-        return Err("该订阅为 URI 列表格式（ss:// vmess://），当前版本暂不支持，请更换为 Clash YAML 订阅".into());
+    // URI 列表订阅（ss:// vmess:// vless:// trojan:// hysteria2:// tuic:// 分享链接）：
+    // 解析为节点并合成 Clash YAML，复用统一 pipeline，不再拒绝
+    if crate::core::uri_parser::is_uri_list(&text) {
+        let (nodes, errors) = crate::core::uri_parser::parse_lines(&text);
+        if nodes.is_empty() {
+            return Err(format!(
+                "URI 列表订阅解析失败：{}",
+                errors.first().cloned().unwrap_or_else(|| "内容为空".into())
+            ));
+        }
+        if !errors.is_empty() {
+            tracing::warn!("subscription partial parse: {}", errors.join("；"));
+        }
+        // 节点名称去重（同名节点会互相覆盖）
+        let mut seen = std::collections::HashSet::new();
+        let mut proxies = Vec::new();
+        for mut node in nodes {
+            let base = node["name"].as_str().unwrap_or_default().to_string();
+            let base = if base.is_empty() {
+                format!(
+                    "{}:{}",
+                    node["server"].as_str().unwrap_or_default(),
+                    node["port"]
+                )
+            } else {
+                base
+            };
+            let mut name = base.clone();
+            let mut i = 2;
+            while !seen.insert(name.clone()) {
+                name = format!("{base} #{i}");
+                i += 1;
+            }
+            node["name"] = serde_json::json!(name);
+            proxies.push(node);
+        }
+        let names: Vec<&str> = proxies
+            .iter()
+            .filter_map(|n| n["name"].as_str())
+            .collect();
+        let profile = serde_json::json!({
+            "proxies": proxies,
+            "proxy-groups": [
+                { "name": "节点选择", "type": "select", "proxies": names }
+            ],
+            "rules": ["MATCH,节点选择"],
+        });
+        text = serde_yaml::to_string(&profile).map_err(|e| format!("订阅转换失败: {e}"))?;
     }
 
     if !text.contains("proxies") && !text.contains("{") {
