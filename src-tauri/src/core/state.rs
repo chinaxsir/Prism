@@ -77,9 +77,6 @@ pub struct UserSettings {
     /// Pro 高级功能已解锁（历史占位字段；真实授权状态以 license 模块为准）
     #[serde(default)]
     pub pro_unlocked: bool,
-    /// 授权服务地址（为空使用编译期默认；便于自建部署/联调切换）
-    #[serde(default)]
-    pub license_server_url: Option<String>,
     /// 出站模式（规则/全局/直连）
     #[serde(default)]
     pub outbound_mode: OutboundMode,
@@ -103,7 +100,6 @@ impl Default for UserSettings {
             mode: RunMode::SystemProxy,
             auto_start: false,
             pro_unlocked: false,
-            license_server_url: None,
             outbound_mode: OutboundMode::Rule,
             ipv6: false,
             block_quic: false,

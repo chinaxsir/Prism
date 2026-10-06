@@ -17,10 +17,10 @@ const LIFETIME_GRACE_DAYS: i64 = 30;
 /// 订阅离线宽限（距上次成功校验）
 const SUBSCRIPTION_GRACE_DAYS: i64 = 7;
 
-/// 编译期默认授权服务（构建时可用 PRISM_LICENSE_URL 覆盖）
+/// 编译期固定授权服务地址（构建时可用 PRISM_LICENSE_URL 覆盖；App 内置，用户无需输入）
 const DEFAULT_SERVER: &str = match option_env!("PRISM_LICENSE_URL") {
     Some(v) => v,
-    None => "https://license.prism.local",
+    None => "https://ishow.cc.cd",
 };
 
 // ---------------- 对外类型 ----------------
@@ -152,13 +152,8 @@ pub fn cached_entitlement(data_dir: &Path) -> EntitlementStatus {
 
 // ---------------- 服务端通信 ----------------
 
-fn server_base(settings: &UserSettings) -> String {
-    let url = settings
-        .license_server_url
-        .clone()
-        .filter(|u| !u.is_empty())
-        .unwrap_or_else(|| DEFAULT_SERVER.into());
-    url.trim_end_matches('/').to_string()
+fn server_base(_settings: &UserSettings) -> String {
+    DEFAULT_SERVER.trim_end_matches('/').to_string()
 }
 
 fn http_client() -> Result<reqwest::Client> {

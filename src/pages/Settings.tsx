@@ -83,7 +83,6 @@ export default function Settings() {
     mode: "systemProxy",
     autoStart: false,
     proUnlocked: false,
-    licenseServerUrl: null,
     outboundMode: "rule",
     ipv6: false,
     blockQuic: false,
@@ -292,20 +291,6 @@ export default function Settings() {
               移除授权
             </button>
           )}
-        </div>
-
-        {/* 授权服务地址（自建部署/联调用；留空使用内置默认） */}
-        <div className="mt-4 pt-4 border-t border-white/5">
-          <label className="block text-xs text-gray-500 mb-1.5">
-            授权服务地址（留空使用默认；修改后点击下方「保存设置」）
-          </label>
-          <input
-            type="text"
-            value={form.licenseServerUrl ?? ""}
-            onChange={(e) => patch({ licenseServerUrl: e.target.value || null })}
-            placeholder="https://license.example.com"
-            className="w-full px-3 py-1.5 rounded-lg bg-surface-hover border border-white/5 focus:border-accent outline-none text-sm font-mono"
-          />
         </div>
       </section>
 

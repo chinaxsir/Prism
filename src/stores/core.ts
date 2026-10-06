@@ -13,8 +13,6 @@ export interface UserSettings {
   autoStart: boolean;
   /** 历史占位字段，真实授权以 pro store 为准 */
   proUnlocked: boolean;
-  /** 授权服务地址（为空使用内置默认） */
-  licenseServerUrl?: string | null;
   /** 出站模式（规则/全局/直连） */
   outboundMode?: OutboundMode;
   /** 启用 IPv6 */
