@@ -1,20 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { BarChart3, Globe2, ListFilter, PieChart } from "lucide-react";
+import { Globe2, ListFilter, PieChart } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
-import {
-  CartesianGrid,
-  Legend,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 
 import { getRules } from "@/api/ipc";
 import { useCoreStore } from "@/stores/core";
-import { formatBytes, formatSpeed } from "@/utils/format";
+import { formatBytes } from "@/utils/format";
 
 interface ConnItem {
   id: string;
@@ -44,24 +34,11 @@ interface RuleItem {
 
 const TOP_N = 8;
 
-/// 分析页：流量曲线 + 主机名/策略/规则聚合统计。
+/// 分析页：主机名/策略/规则聚合统计。
 /// 聚合数据在本页挂载期间累积（connections://tick 为增量快照）。
 export default function Analytics() {
   const status = useCoreStore((s) => s.status);
-  const traffic = useCoreStore((s) => s.traffic);
   const running = status === "running";
-
-  // 本页独立接收流量事件并推入全局缓冲（与 Dashboard 互斥挂载，不会重复）
-  useEffect(() => {
-    const un = listen<{ up: number; down: number }>("traffic://tick", (e) => {
-      const store = useCoreStore.getState();
-      store.setTrafficRate(e.payload.up, e.payload.down);
-      store.pushTraffic(e.payload.up, e.payload.down);
-    });
-    return () => {
-      un.then((fn) => fn());
-    };
-  }, []);
 
   // 连接聚合：主机名 / 出站策略 / 命中规则（上次快照差量累加流量）
   const aggRef = useRef({
@@ -151,42 +128,7 @@ export default function Analytics() {
         )}
       </div>
 
-      {/* 流量曲线 */}
-      <div className="bg-surface-card rounded-xl p-5 shadow-md">
-        <h2 className="text-base font-semibold mb-4 flex items-center gap-2">
-          <BarChart3 size={16} className="text-accent" />
-          实时流量（最近 60 秒）
-        </h2>
-        <ResponsiveContainer width="100%" height={240}>
-          <LineChart data={traffic} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
-            <XAxis dataKey="time" stroke="#9ca3af" fontSize={11} tickLine={false} minTickGap={48} />
-            <YAxis
-              stroke="#9ca3af"
-              fontSize={11}
-              tickLine={false}
-              width={72}
-              tickFormatter={(v) => formatBytes(Number(v))}
-            />
-            <Tooltip
-              contentStyle={{
-                backgroundColor: "#1E222D",
-                border: "1px solid rgba(255,255,255,0.15)",
-                borderRadius: 8,
-                fontSize: 12,
-              }}
-              formatter={(value, name) => [
-                formatSpeed(Number(value)),
-                name === "down" ? "下载" : "上传",
-              ]}
-            />
-            <Legend formatter={(v) => (v === "down" ? "下载" : "上传")} />
-            <Line type="monotone" dataKey="down" stroke="#22c55e" strokeWidth={2} dot={false} isAnimationActive={false} />
-            <Line type="monotone" dataKey="up" stroke="#6366f1" strokeWidth={2} dot={false} isAnimationActive={false} />
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
-
+      {/* 聚合统计：实时曲线在仪表盘，本页专注聚合 */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         {/* Top 主机名 */}
         <AggCard
