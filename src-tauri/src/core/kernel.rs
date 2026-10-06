@@ -39,7 +39,8 @@ mod ios_ffi {
     use std::os::raw::c_char;
     use std::path::Path;
 
-    extern "C" {
+    // edition 2024：extern 块必须声明为 unsafe（内部函数调用仍需 unsafe {}）
+    unsafe extern "C" {
         fn PrismKernelStart(config_path: *const c_char, work_dir: *const c_char) -> *mut c_char;
         fn PrismKernelCheck(config_path: *const c_char, work_dir: *const c_char) -> *mut c_char;
         fn PrismKernelStop();
