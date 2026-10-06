@@ -120,7 +120,7 @@ async function api(p,opt={}){opt.headers={'X-Admin-Key':KEY,'Content-Type':'appl
 function toast(m,ok){const t=$('#toast');t.textContent=m;t.style.borderColor=ok===false?'var(--bad)':'var(--acc)';t.style.display='block';setTimeout(()=>t.style.display='none',2500);}
 function ts(s){return s?new Date(s*1000).toLocaleDateString('zh-CN'):'-'}
 function csvCell(v){v=v==null?'':String(v);return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;}
-function download(name,text){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'text/plain;charset=utf-8'}));a.download=name;a.click();URL.revokeObjectURL(a.href);}
+function download(name,text){if(name.endsWith('.csv'))text='﻿'+text;const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'text/plain;charset=utf-8'}));a.download=name;a.click();URL.revokeObjectURL(a.href);}
 function saveKey(){KEY=$('#key').value.trim();localStorage.setItem('prism_admin_key',KEY);boot();}
 function logout(){localStorage.removeItem('prism_admin_key');KEY='';$('#login').style.display='';$('#main').style.display='none';}
 async function boot(){if(!KEY)return;try{await api('/admin/stats');}catch(e){return}$('#login').style.display='none';$('#main').style.display='';loadOverview();loadCodes();loadBlacklist();}
