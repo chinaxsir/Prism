@@ -7,7 +7,9 @@ pub mod plugins;
 use tauri::menu::{Menu, MenuItem};
 #[cfg(desktop)]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent};
+#[cfg(desktop)]
+use tauri::WindowEvent;
 use tracing_subscriber::EnvFilter;
 
 /// 显示并聚焦主窗口（托盘左键 / 菜单“显示主窗口”）
@@ -33,6 +35,7 @@ fn quit_app(app: &AppHandle) {
     });
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // RUST_LOG 未设置时默认 info（静音高频网络库日志）
     let filter = EnvFilter::try_from_default_env()
@@ -108,13 +111,13 @@ pub fn run() {
             }
             Ok(())
         })
-        .on_window_event(|window, event| {
+        .on_window_event(|_window, event| {
             // 点关闭按钮 → 隐藏到托盘常驻；真正退出走托盘菜单“退出”。
             // hide() 仅桌面端可用；移动端无关闭窗口语义
             #[cfg(desktop)]
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                let _ = _window.hide();
             }
             let _ = event;
         })

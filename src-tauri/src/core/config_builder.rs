@@ -676,7 +676,7 @@ fn node_to_outbound(node: &ClashNode) -> Option<(Value, Option<String>)> {
         "server_port": node.port,
     });
 
-    let mut outbound = match node.kind.as_str() {
+    let outbound = match node.kind.as_str() {
         "ss" | "shadowsocks" => {
             let mut o = json!({
                 "type": "shadowsocks",

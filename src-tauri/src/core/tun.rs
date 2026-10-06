@@ -96,7 +96,7 @@ impl TunGuard {
     }
 
     /// 添加默认路由劫持（拆成两段 /1，避免直接覆盖默认路由，便于回滚）
-    #[cfg_attr(windows, allow(unused_variables))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(unused_variables))]
     async fn configure_routes(device: &str) -> Result<()> {
         #[cfg(windows)]
         {
@@ -136,7 +136,7 @@ impl TunGuard {
     }
 
     /// 回滚手动路由
-    #[cfg_attr(windows, allow(unused_variables))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(unused_variables))]
     async fn cleanup_routes(device: &str) -> Result<()> {
         #[cfg(windows)]
         {
@@ -157,6 +157,7 @@ impl TunGuard {
     }
 
     /// 将系统 DNS 指向 TUN 网关（内核 fake-ip）
+    #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(unused_variables))]
     fn configure_dns(dns: &str) -> Result<()> {
         #[cfg(windows)]
         {

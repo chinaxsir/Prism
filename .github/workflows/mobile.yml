@@ -65,6 +65,34 @@ jobs:
       - name: Init Android project
         run: npx tauri android init
 
+      # Gradle rust 插件会把 cargo 详细输出重定向到文件，失败时控制台只见
+      # "Process 'command 'npm'' finished with non-zero exit value 1"。
+      # 先用 cargo 直接构建全部目标（与 Tauri 调用等价：--lib --release），
+      # 让真实编译/链接错误完整打印到 CI 日志，同时预热 cargo 缓存。
+      - name: Pre-build Rust for all Android targets
+        working-directory: src-tauri
+        run: |
+          set -euo pipefail
+          BIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          build() {
+            triple="$1"
+            cc_name="$2"
+            upper="$(echo "$triple" | tr 'a-z-' 'A-Z_')"
+            export "CC_${upper}"="$BIN/$cc_name"
+            export "CXX_${upper}"="$BIN/$cc_name"
+            export "AR_${upper}"="$BIN/llvm-ar"
+            export "CARGO_TARGET_${upper}_LINKER"="$BIN/$cc_name"
+            echo "::group::cargo build $triple"
+            cargo build --lib --release --target "$triple"
+            echo "::endgroup::"
+          }
+
+          build aarch64-linux-android    aarch64-linux-android24-clang
+          build armv7-linux-androideabi  armv7a-linux-androideabi24-clang
+          build i686-linux-android       i686-linux-android24-clang
+          build x86_64-linux-android     x86_64-linux-android24-clang
+
       # 开启详细日志，以便定位移动端编译具体报错
       - name: Build APK
         run: npx tauri android build --apk --verbose

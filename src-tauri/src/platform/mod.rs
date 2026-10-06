@@ -39,6 +39,7 @@ pub fn clear_system_proxy() -> anyhow::Result<()> {
 }
 
 /// 强制结束指定 pid 的内核进程（panic 兜底使用，尽力而为不返回错误）
+#[cfg_attr(any(target_os = "android", target_os = "ios"), allow(unused_variables))]
 pub fn kill_pid(pid: u32) {
     #[cfg(target_os = "windows")]
     {

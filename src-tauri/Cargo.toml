@@ -81,7 +81,7 @@ windows = { version = "0.52", features = [
   "Win32_System_Threading",
   "Win32_System_Services",
 ] }
-[target.'cfg(any(target_os = "android", target_os = "macos", target_os = "linux"))'.dependencies]
+[target.'cfg(any(target_os = "android", target_os = "ios", target_os = "macos", target_os = "linux"))'.dependencies]
 libc = "0.2"
 
 # 移动端 IAP（桌面构建不编译）：前端 tauri-plugin-iap-api 经此插件发起购买
