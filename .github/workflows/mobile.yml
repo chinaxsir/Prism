@@ -274,11 +274,10 @@ jobs:
         run: |
           set -e
           go mod tidy
-          SDK=$(xcrun -sdk iphoneos --show-sdk-path)
-          CC="$(xcrun -sdk iphoneos --find clang)" \
-          CGO_ENABLED=1 GOOS=ios GOARCH=arm64 \
-          CGO_CFLAGS="-isysroot $SDK -arch arm64 -miphoneos-version-min=13.0" \
-          CGO_LDFLAGS="-isysroot $SDK -arch arm64" \
+          # CGO_ENABLED=0：sing-box 全纯 Go，DNS 走 netgo 解析器，
+          # 避免 c-archive 引用 libresolv（res_9_*），否则 cargo 与
+          # xcodebuild 两个链接阶段都要额外处理 libresolv
+          CGO_ENABLED=0 GOOS=ios GOARCH=arm64 \
           go build -buildmode=c-archive \
             -tags "with_gvisor,with_quic,with_grpc,with_wireguard,with_ech,with_utls,with_clash_api" \
             -trimpath -ldflags="-s -w" \
