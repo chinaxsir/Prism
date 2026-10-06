@@ -190,7 +190,11 @@ export default function Settings() {
 
       {/* 运行模式 */}
       <section className="bg-surface-card rounded-xl p-5">
-        <h2 className="text-base font-semibold mb-4">运行模式</h2>
+        <h2 className="text-base font-semibold mb-1">运行模式</h2>
+        <p className="text-xs text-gray-500 mb-4">
+          流量如何进入 Prism（系统代理 / TUN 虚拟网卡）；与下方「高级 →
+          出站模式」互不影响
+        </p>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           {MODES.map((m) => (
             <button
@@ -341,7 +345,7 @@ export default function Settings() {
         <div className="py-3 border-b border-white/5">
           <div className="text-sm mb-1">出站模式</div>
           <div className="text-xs text-gray-500 mb-3">
-            流量最终走向；保存后内核自动重启生效
+            内核分流策略（流量最终走向）；与「运行模式」互不影响，保存后内核自动重启生效
           </div>
           <div className="grid grid-cols-3 gap-2">
             {OUTBOUND_MODES.map((m) => (

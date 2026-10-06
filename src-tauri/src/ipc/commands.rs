@@ -572,7 +572,10 @@ pub async fn update_subscription(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut text = fetch_remote_text(&url).await?;
+    // 内核运行中时，直连失败的最终兜底是经本地 mixed 入站转发
+    let local_proxy = (*state.status.read() == CoreStatus::Running)
+        .then(|| state.settings.read().mixed_port);
+    let mut text = fetch_remote_text(&url, local_proxy).await?;
 
     // base64 包裹：明文不含 YAML/JSON 结构时尝试解码
     if !text.contains("proxies") && !text.trim_start().starts_with('{') {
@@ -662,14 +665,18 @@ pub async fn update_subscription(
 
 /// 下载远程文本（订阅 / proxy-provider 共用）。
 /// 伪装为 Clash 客户端，多数机场据此返回 Clash YAML；
-/// 必须 no_proxy：内核运行时系统代理指向本进程，走代理会形成自回环。
+/// 直连必须 no_proxy：内核运行时系统代理指向本进程，走系统代理会自回环。
 ///
-/// IPv4 兜底重试：部分网络环境 IPv6 出口为黑洞（域名 AAAA 记录优先 +
-/// SYN 无响应），hyper 顺序尝试地址会耗尽超时报 "error sending request"。
-/// 第一次直连失败后改用 0.0.0.0 绑定源地址重试——v6 目标因地址族不匹配
-/// 立即跳过，连接器秒级回退到 v4 目标。
-async fn fetch_remote_text(url: &str) -> Result<String, String> {
+/// 三级重试闭环：
+/// 1. 直连（hyper 自动尝试 v6/v4）
+/// 2. 强制 IPv4 源地址直连——部分网络 IPv6 出口为黑洞（AAAA 优先 + SYN 无
+///    响应），0.0.0.0 绑定后 v6 目标因地址族不匹配立即跳过，秒级回退 v4
+/// 3. 内核运行中 → 经本地 mixed 入站（127.0.0.1:mixed_port）转发——受限网络
+///    直连被墙时走节点出境，实现「先启动内核再更新」的真实闭环
+async fn fetch_remote_text(url: &str, local_proxy: Option<u16>) -> Result<String, String> {
     let mut last_err = String::new();
+
+    // ---- 直连两连发（自动 + 强制 v4）----
     for force_v4 in [false, true] {
         let mut builder = reqwest::Client::builder()
             .user_agent("clash-verge/v2.0.0")
@@ -680,32 +687,63 @@ async fn fetch_remote_text(url: &str) -> Result<String, String> {
         if force_v4 {
             builder = builder.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
         }
-        let client = builder.build().map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
-
-        let resp = match client.get(url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                last_err = describe_reqwest_error(&e);
-                tracing::warn!("fetch remote text (force_v4={force_v4}) failed: {last_err}");
-                continue;
-            }
-        };
-        if !resp.status().is_success() {
-            return Err(format!(
-                "下载失败：HTTP {}（订阅链接可能已失效）",
-                resp.status()
-            ));
-        }
-        let bytes = resp
-            .bytes()
+        match try_fetch_text(&builder.build().map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?, url)
             .await
-            .map_err(|e| format!("读取响应失败: {e}"))?;
-        return String::from_utf8(bytes.to_vec())
-            .map_err(|_| "内容不是有效 UTF-8 文本".to_string());
+        {
+            Ok(text) => return Ok(text),
+            Err(e) => {
+                last_err = e;
+                tracing::warn!("fetch remote text (force_v4={force_v4}) failed: {last_err}");
+            }
+        }
     }
-    Err(format!(
-        "下载失败：{last_err}（已尝试 IPv4 直连；若机器处于受限网络请先启动内核再更新）"
-    ))
+
+    // ---- 内核运行中：经本地 mixed 入站转发 ----
+    if let Some(port) = local_proxy {
+        let proxy = reqwest::Proxy::all(&format!("http://127.0.0.1:{port}"))
+            .map_err(|e| format!("配置本地代理失败: {e}"))?;
+        let builder = reqwest::Client::builder()
+            .user_agent("clash-verge/v2.0.0")
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .proxy(proxy);
+        match try_fetch_text(&builder.build().map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?, url)
+            .await
+        {
+            Ok(text) => {
+                tracing::info!("fetch remote text succeeded via local mixed proxy :{port}");
+                return Ok(text);
+            }
+            Err(e) => {
+                last_err = e;
+                tracing::warn!("fetch remote text via local proxy failed: {last_err}");
+            }
+        }
+        Err(format!(
+            "下载失败：{last_err}（直连与本地代理转发均已尝试，请检查节点可用性后重试）"
+        ))
+    } else {
+        Err(format!(
+            "下载失败：{last_err}（已尝试 IPv4 直连；若机器处于受限网络，请先启动内核再更新订阅）"
+        ))
+    }
+}
+
+/// 用给定客户端执行一次 GET 文本下载（状态码 / UTF-8 校验）
+async fn try_fetch_text(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| describe_reqwest_error(&e))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "HTTP {}（订阅链接可能已失效）",
+            resp.status()
+        ));
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("读取响应失败: {e}"))?;
+    String::from_utf8(bytes.to_vec()).map_err(|_| "内容不是有效 UTF-8 文本".to_string())
 }
 
 /// reqwest 顶层 Display 只有 "error sending request"，
@@ -739,7 +777,9 @@ async fn refresh_providers(state: &AppState, sub_url: &str, profile_text: &str) 
             tracing::warn!("provider '{name}' missing url, skipped");
             continue;
         };
-        match fetch_remote_text(&url).await {
+        let local_proxy = (*state.status.read() == CoreStatus::Running)
+            .then(|| state.settings.read().mixed_port);
+        match fetch_remote_text(&url, local_proxy).await {
             Ok(text) => {
                 let path = crate::core::store::provider_path(&state.data_dir, sub_url, &name);
                 if let Some(parent) = path.parent() {
