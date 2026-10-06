@@ -275,18 +275,58 @@ jobs:
           # Libraries" 阶段不拷贝这些库（仅 back-deploy 的 libswift_Concurrency
           # 由链接器单独放入），而 iOS 的 @rpath 回退路径也不含系统
           # /usr/lib/swift，于是 dyld 在执行任何代码前中止进程。
-          # 从 Xcode toolchain 按 otool 依赖闭包把缺失的 dylib 补进 Frameworks
-          # （swift-5.0/iphoneos 即 Xcode 正常嵌入 IPA 的同一来源）。
-          TOOL_ROOT="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
+          DEVELOPER_DIR_X="$(xcode-select -p)"
+          TOOLCHAIN_DIR="$DEVELOPER_DIR_X/Toolchains/XcodeDefault.xctoolchain"
+          TOOL_ROOT="$TOOLCHAIN_DIR/usr/lib"
+
+          # 首选 Xcode 自带的 swift-stdlib-tool（Copy Swift Libraries 构建
+          # 阶段调用的官方工具），让它自动定位并拷贝正确平台/版本的运行时，
+          # 同时 ad-hoc 签名；失败不中断，下面的递归索引 + 闭包补齐兜底。
+          UNSIGNED=$(mktemp -d)
+          if [ -x "$TOOLCHAIN_DIR/usr/bin/swift-stdlib-tool" ]; then
+            SST="$TOOLCHAIN_DIR/usr/bin/swift-stdlib-tool"
+          else
+            SST=$(xcrun --sdk iphoneos --find swift-stdlib-tool 2>/dev/null || true)
+          fi
+          if [ -n "$SST" ]; then
+            echo "using swift-stdlib-tool: $SST"
+            set +e
+            "$SST" --copy --verbose --sign - \
+              --scan-executable "$APP/$EXEC" \
+              --scan-folder "$APP/Frameworks" \
+              $([ -d "$APP/PlugIns" ] && echo "--scan-folder $APP/PlugIns") \
+              --platform iphoneos \
+              --toolchain "$TOOLCHAIN_DIR" \
+              --destination "$APP/Frameworks" \
+              --unsigned-destination "$UNSIGNED"
+            echo "swift-stdlib-tool exit: $?"
+            set -e
+          else
+            echo "::warning::swift-stdlib-tool not found"
+          fi
+
+          # 递归索引所有 iphoneos 的 Swift 运行时来源。不同 Xcode 版本布局
+          # 不同：除 swift-5.0/iphoneos 外，还有 swift-5.x/iphoneos 版本目录
+          # （OSLog/XPC/UniformTypeIdentifiers/DataDetection 等就在其中）以及
+          # iPhoneOS.platform 下的目录。只取路径含 iphoneos 的（天然排除
+          # macosx / iphonesimulator）；back-deployment 目录优先于当前版目录。
           SWIFT_INDEX=$(mktemp -d)
-          for d in "$TOOL_ROOT/swift-5.0/iphoneos" "$TOOL_ROOT/swift/iphoneos"; do
-            if [ -d "$d" ]; then
-              find "$d" \( -type f -o -type l \) -name "libswift*.dylib" | while IFS= read -r f; do
-                b="$(basename "$f")"
-                if [ ! -e "$SWIFT_INDEX/$b" ]; then cp -RL "$f" "$SWIFT_INDEX/$b"; fi
-              done
-            fi
-          done
+          ROOTS=$(mktemp)
+          {
+            ls -d "$TOOL_ROOT"/swift-5.*/iphoneos 2>/dev/null | sort -V
+            [ -d "$TOOL_ROOT/swift/iphoneos" ] && echo "$TOOL_ROOT/swift/iphoneos"
+            find "$DEVELOPER_DIR_X/Platforms/iPhoneOS.platform" \
+              -type d -name iphoneos -path '*swift*' 2>/dev/null
+          } | sort -u > "$ROOTS"
+          echo "--- swift runtime source roots ---"
+          cat "$ROOTS"
+          while IFS= read -r d; do
+            [ -d "$d" ] || continue
+            find "$d" \( -type f -o -type l \) -name "libswift*.dylib" | while IFS= read -r f; do
+              b="$(basename "$f")"
+              if [ ! -e "$SWIFT_INDEX/$b" ]; then cp -RL "$f" "$SWIFT_INDEX/$b"; fi
+            done
+          done < "$ROOTS"
           echo "toolchain swift dylibs indexed: $(ls "$SWIFT_INDEX" | wc -l | tr -d ' ')"
 
           NEED=$(mktemp)
@@ -381,6 +421,9 @@ jobs:
             done
           done < "$LIST"
           if [ "$missing" -ne 0 ]; then
+            echo "--- diagnostic: locate missing libs anywhere under DEVELOPER ---"
+            find "$DEVELOPER_DIR_X" -name "libswift*.dylib" -path '*iphoneos*' \
+              -not -path '*iphonesimulator*' 2>/dev/null | sort
             echo "Swift runtime libraries missing; aborting"
             exit 1
           fi
