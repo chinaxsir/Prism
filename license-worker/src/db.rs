@@ -70,6 +70,30 @@ pub struct DeviceRow {
     pub last_seen: i64,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlacklistRow {
+    pub device_id: String,
+    pub reason: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatsTotals {
+    pub codes_total: i64,
+    pub codes_active: i64,
+    pub devices_total: i64,
+    pub store_purchases: i64,
+    pub blacklist: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DayCount {
+    pub day: i64,
+    pub n: i64,
+}
+
 impl Db {
     pub fn new(d1: D1Database) -> Self {
         Db { d1 }
@@ -359,5 +383,130 @@ impl Db {
             .await
             .map_err(|e| e.to_string())?;
         result.results::<DeviceRow>().map_err(|e| e.to_string())
+    }
+
+    // ---- 黑名单 ----
+
+    /// 判断设备是否在黑名单
+    pub async fn is_device_blacklisted(&self, device_id: &str) -> Result<bool, String> {
+        let row = self
+            .d1
+            .prepare("SELECT COUNT(*) AS n FROM blacklist WHERE device_id=?1")
+            .bind(&[js(device_id)])
+            .map_err(|e| e.to_string())?
+            .first::<CountRow>(None)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(row.map(|r| r.n).unwrap_or(0) > 0)
+    }
+
+    pub async fn blacklist_add(&self, device_id: &str, reason: Option<&str>) -> Result<(), String> {
+        self.d1
+            .prepare(
+                "INSERT INTO blacklist(device_id,reason,created_at) VALUES (?1,?2,?3)
+                 ON CONFLICT(device_id) DO UPDATE SET reason=excluded.reason,created_at=excluded.created_at",
+            )
+            .bind(&[js(device_id), js(reason), js(now_secs())])
+            .map_err(|e| e.to_string())?
+            .run()
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    pub async fn blacklist_remove(&self, device_id: &str) -> Result<bool, String> {
+        let res = self
+            .d1
+            .prepare("DELETE FROM blacklist WHERE device_id=?1")
+            .bind(&[js(device_id)])
+            .map_err(|e| e.to_string())?
+            .run()
+            .await
+            .map_err(|e| e.to_string())?;
+        let changes = res
+            .meta()
+            .ok()
+            .flatten()
+            .and_then(|m| m.changes)
+            .unwrap_or(0);
+        Ok(changes > 0)
+    }
+
+    pub async fn blacklist_list(&self) -> Result<Vec<BlacklistRow>, String> {
+        let result = self
+            .d1
+            .prepare(
+                "SELECT device_id AS deviceId,reason AS reason,created_at AS createdAt
+                 FROM blacklist ORDER BY created_at DESC",
+            )
+            .bind(&[])
+            .map_err(|e| e.to_string())?
+            .all()
+            .await
+            .map_err(|e| e.to_string())?;
+        result.results::<BlacklistRow>().map_err(|e| e.to_string())
+    }
+
+    // ---- 统计 ----
+
+    /// 汇总计数：激活码总数/在用、设备总数、商店购买数、黑名单数
+    pub async fn stats_totals(&self) -> Result<StatsTotals, String> {
+        async fn one(d1: &D1Database, sql: &str) -> Result<i64, String> {
+            let row = d1
+                .prepare(sql)
+                .bind(&[])
+                .map_err(|e| e.to_string())?
+                .first::<CountRow>(None)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(row.map(|r| r.n).unwrap_or(0))
+        }
+        Ok(StatsTotals {
+            codes_total: one(&self.d1, "SELECT COUNT(*) AS n FROM codes").await?,
+            codes_active: one(&self.d1, "SELECT COUNT(*) AS n FROM codes WHERE status='active'").await?,
+            devices_total: one(&self.d1, "SELECT COUNT(*) AS n FROM code_devices").await?,
+            store_purchases: one(&self.d1, "SELECT COUNT(*) AS n FROM store_purchases").await?,
+            blacklist: one(&self.d1, "SELECT COUNT(*) AS n FROM blacklist").await?,
+        })
+    }
+
+    /// 最近 N 天的每日激活设备数（按 activated_at 聚合，时间戳为天起点秒）
+    pub async fn activations_by_day(&self, days: i64) -> Result<Vec<DayCount>, String> {
+        let since = now_secs() - days * 86400;
+        let result = self
+            .d1
+            .prepare(
+                "SELECT (activated_at/86400)*86400 AS day, COUNT(*) AS n
+                 FROM code_devices WHERE activated_at >= ?1
+                 GROUP BY day ORDER BY day",
+            )
+            .bind(&[js(since)])
+            .map_err(|e| e.to_string())?
+            .all()
+            .await
+            .map_err(|e| e.to_string())?;
+        result.results::<DayCount>().map_err(|e| e.to_string())
+    }
+
+    /// 彻底删除激活码及其设备绑定
+    pub async fn delete_code(&self, code: &str) -> Result<bool, String> {
+        if self.get_code(code).await?.is_none() {
+            return Ok(false);
+        }
+        self.d1
+            .prepare("DELETE FROM code_devices WHERE code=?1")
+            .bind(&[js(code)])
+            .map_err(|e| e.to_string())?
+            .run()
+            .await
+            .map_err(|e| e.to_string())?;
+        self.d1
+            .prepare("DELETE FROM codes WHERE code=?1")
+            .bind(&[js(code)])
+            .map_err(|e| e.to_string())?
+            .run()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(true)
     }
 }

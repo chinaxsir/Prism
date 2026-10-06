@@ -141,3 +141,81 @@ pub async fn unbind(
     Response::from_json(&serde_json::json!({ "unbound": true }))
         .map_err(|e| ApiError::internal(e.to_string()))
 }
+
+/// DELETE /admin/codes/:code —— 彻底删除激活码及其设备绑定
+pub async fn delete_code(req: Request, code: String, app: AppCtx) -> Result<Response, ApiError> {
+    check_key(&req, &app.config.admin_key)?;
+    let ok = app.db.delete_code(&code).await.map_err(ApiError::internal)?;
+    if !ok {
+        return Err(ApiError::plain(404, "激活码不存在"));
+    }
+    Response::from_json(&serde_json::json!({ "deleted": true }))
+        .map_err(|e| ApiError::internal(e.to_string()))
+}
+
+// ---------------- 黑名单 ----------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BanBody {
+    device_id: String,
+    reason: Option<String>,
+}
+
+/// GET /admin/blacklist
+pub async fn blacklist_list(req: Request, app: AppCtx) -> Result<Response, ApiError> {
+    check_key(&req, &app.config.admin_key)?;
+    let rows = app.db.blacklist_list().await.map_err(ApiError::internal)?;
+    Response::from_json(&rows).map_err(|e| ApiError::internal(e.to_string()))
+}
+
+/// POST /admin/blacklist {deviceId, reason?}
+pub async fn blacklist_add(mut req: Request, app: AppCtx) -> Result<Response, ApiError> {
+    check_key(&req, &app.config.admin_key)?;
+    let body: BanBody = req
+        .json()
+        .await
+        .map_err(|e| ApiError::bad(format!("请求体解析失败: {e}")))?;
+    if body.device_id.trim().is_empty() {
+        return Err(ApiError::bad("deviceId 不能为空"));
+    }
+    app.db
+        .blacklist_add(&body.device_id, body.reason.as_deref())
+        .await
+        .map_err(ApiError::internal)?;
+    Response::from_json(&serde_json::json!({ "banned": true }))
+        .map_err(|e| ApiError::internal(e.to_string()))
+}
+
+/// DELETE /admin/blacklist/:deviceId
+pub async fn blacklist_remove(
+    req: Request,
+    device_id: String,
+    app: AppCtx,
+) -> Result<Response, ApiError> {
+    check_key(&req, &app.config.admin_key)?;
+    let ok = app
+        .db
+        .blacklist_remove(&device_id)
+        .await
+        .map_err(ApiError::internal)?;
+    if !ok {
+        return Err(ApiError::plain(404, "黑名单记录不存在"));
+    }
+    Response::from_json(&serde_json::json!({ "unbanned": true }))
+        .map_err(|e| ApiError::internal(e.to_string()))
+}
+
+// ---------------- 统计 ----------------
+
+/// GET /admin/stats —— 汇总计数 + 最近 14 天每日激活数
+pub async fn stats(req: Request, app: AppCtx) -> Result<Response, ApiError> {
+    check_key(&req, &app.config.admin_key)?;
+    let totals = app.db.stats_totals().await.map_err(ApiError::internal)?;
+    let daily = app.db.activations_by_day(14).await.map_err(ApiError::internal)?;
+    Response::from_json(&serde_json::json!({
+        "totals": totals,
+        "activationsDaily": daily,
+    }))
+    .map_err(|e| ApiError::internal(e.to_string()))
+}

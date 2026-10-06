@@ -9,14 +9,21 @@
 //!   POST /api/v1/receipt/google
 //! 管理路由（X-Admin-Key）：
 //!   GET/POST /admin/codes
+//!   DELETE   /admin/codes/:code
 //!   POST     /admin/codes/:code/revoke
 //!   GET      /admin/codes/:code/devices
 //!   DELETE   /admin/codes/:code/devices/:deviceId
+//!   GET/POST /admin/blacklist
+//!   DELETE   /admin/blacklist/:deviceId
+//!   GET      /admin/stats
+//! 管理后台页面：
+//!   GET      /admin（内嵌 HTML，密钥存 localStorage）
 
 mod admin;
 mod apple;
 mod config;
 mod context;
+mod dashboard;
 mod db;
 mod google;
 mod handlers;
@@ -107,6 +114,41 @@ async fn main(req: Request, env: Env, _ctx: Context) -> WResult<Response> {
                 })
             },
         )
+        .delete_async("/admin/codes/:code", |req, ctx| async move {
+            let code = ctx.param("code").cloned().unwrap_or_default();
+            to_response(match AppCtx::from_route(&ctx) {
+                Ok(app) => admin::delete_code(req, code, app).await,
+                Err(e) => Err(e),
+            })
+        })
+        .get_async("/admin/blacklist", |req, ctx| async move {
+            to_response(match AppCtx::from_route(&ctx) {
+                Ok(app) => admin::blacklist_list(req, app).await,
+                Err(e) => Err(e),
+            })
+        })
+        .post_async("/admin/blacklist", |req, ctx| async move {
+            to_response(match AppCtx::from_route(&ctx) {
+                Ok(app) => admin::blacklist_add(req, app).await,
+                Err(e) => Err(e),
+            })
+        })
+        .delete_async("/admin/blacklist/:deviceId", |req, ctx| async move {
+            let device_id = ctx.param("deviceId").cloned().unwrap_or_default();
+            to_response(match AppCtx::from_route(&ctx) {
+                Ok(app) => admin::blacklist_remove(req, device_id, app).await,
+                Err(e) => Err(e),
+            })
+        })
+        .get_async("/admin/stats", |req, ctx| async move {
+            to_response(match AppCtx::from_route(&ctx) {
+                Ok(app) => admin::stats(req, app).await,
+                Err(e) => Err(e),
+            })
+        })
+        .get_async("/admin", |_req, _ctx| async {
+            Response::from_html(crate::dashboard::PAGE)
+        })
         .run(req, env)
         .await
 }

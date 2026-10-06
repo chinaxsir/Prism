@@ -71,6 +71,16 @@ pub async fn activate(mut req: Request, app: AppCtx) -> Result<Response, ApiErro
     validate_device(&body.device)?;
     let code_raw = body.code.trim().to_uppercase();
 
+    // 黑名单设备直接拒绝（在查码之前，避免泄露码状态）
+    if app
+        .db
+        .is_device_blacklisted(&body.device.id)
+        .await
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::forbidden("device_banned", "该设备已被封禁"));
+    }
+
     let Some(record) = app
         .db
         .get_code(&code_raw)
@@ -145,6 +155,16 @@ pub async fn verify(mut req: Request, app: AppCtx) -> Result<Response, ApiError>
     let body: VerifyReq = parse_json(&mut req).await?;
     let claims = verify_license(&body.license, app.signer.public_pem(), now_secs())
         .map_err(|_| ApiError::forbidden("license_invalid", "授权凭证无效或已过期，请重新激活"))?;
+
+    // 黑名单设备校验失败
+    if app
+        .db
+        .is_device_blacklisted(&claims.dev)
+        .await
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::forbidden("device_banned", "该设备已被封禁"));
+    }
 
     let now = now_secs();
 
