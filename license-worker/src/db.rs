@@ -1,7 +1,6 @@
 //! D1 数据访问层（SQL 语义与原 rusqlite 版一致：锚点订阅、设备上限、upsert）。
 
 use serde::{Deserialize, Serialize};
-use serde_wasm_bindgen::to_value as js_value;
 use wasm_bindgen::JsValue;
 use worker::D1Database;
 
@@ -11,8 +10,12 @@ pub fn now_secs() -> i64 {
     (js_sys::Date::now() / 1000.0) as i64
 }
 
-fn js<T: serde::Serialize>(v: T) -> JsValue {
-    js_value(&v).unwrap_or(JsValue::NULL)
+/// D1 不接受 undefined：Option::None 必须序列化为 SQL NULL，
+/// 因此显式开启 serialize_missing_as_null（默认 to_value 会输出 undefined）。
+fn js<T: Serialize>(v: T) -> JsValue {
+    let ser =
+        serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true);
+    v.serialize(&ser).unwrap_or(JsValue::NULL)
 }
 
 pub struct Db {
@@ -86,6 +89,30 @@ pub struct StatsTotals {
     pub devices_total: i64,
     pub store_purchases: i64,
     pub blacklist: i64,
+}
+
+/// 存量 / 到期分布 / 渠道明细
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatsBreakdown {
+    /// 未发出（active 且零设备绑定）
+    pub code_unused: i64,
+    /// 使用中（active 且至少 1 台设备）
+    pub code_in_use: i64,
+    /// 已停用/吊销
+    pub code_revoked: i64,
+    /// 订阅码：已到期（已锚定且超过到期时间）
+    pub sub_expired: i64,
+    /// 7 天内到期（不含已到期）
+    pub sub_exp_7d: i64,
+    /// 8–30 天内到期
+    pub sub_exp_30d: i64,
+    /// 30 天后到期
+    pub sub_active: i64,
+    /// 商店渠道去重设备数
+    pub store_devices: i64,
+    /// 商店渠道有效购买（买断或订阅未到期）
+    pub store_active: i64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -329,7 +356,12 @@ impl Db {
             .map_err(|e| e.to_string())
     }
 
-    pub async fn list_codes(&self, status: Option<&str>) -> Result<Vec<CodeSummary>, String> {
+    pub async fn list_codes(
+        &self,
+        status: Option<&str>,
+        q: Option<&str>,
+    ) -> Result<Vec<CodeSummary>, String> {
+        let like = q.map(|s| format!("%{}%", s.trim()));
         let result = self
             .d1
             .prepare(
@@ -339,14 +371,69 @@ impl Db {
                         (SELECT COUNT(*) FROM code_devices d WHERE d.code=c.code) AS devices
                  FROM codes c
                  WHERE (?1 IS NULL OR c.status = ?1)
+                   AND (?2 IS NULL OR c.code LIKE ?2 OR c.note LIKE ?2)
                  ORDER BY c.created_at DESC",
             )
-            .bind(&[js(status)])
+            .bind(&[js(status), js(like.as_deref())])
             .map_err(|e| e.to_string())?
             .all()
             .await
             .map_err(|e| e.to_string())?;
         result.results::<CodeSummary>().map_err(|e| e.to_string())
+    }
+
+    /// 管理端更新激活码（任一字段为 None 表示不修改）。
+    /// - `extend_days`：订阅码在现有 duration_days 上顺延（不受 duration_days 参数影响）
+    /// - `note`：双 Option，None=不改；Some(None)=清空
+    /// 返回 false 表示码不存在
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_code(
+        &self,
+        code: &str,
+        max_devices: Option<i64>,
+        duration_days: Option<i64>,
+        extend_days: Option<i64>,
+        status: Option<&str>,
+        note: Option<Option<&str>>,
+    ) -> Result<bool, String> {
+        let Some(mut rec) = self.get_code(code).await? else {
+            return Ok(false);
+        };
+        if let Some(m) = max_devices {
+            rec.max_devices = m.clamp(1, 100);
+        }
+        if let Some(d) = duration_days {
+            rec.duration_days = Some(d);
+        }
+        if let Some(add) = extend_days {
+            rec.duration_days = Some(rec.duration_days.unwrap_or(365) + add);
+        }
+        if let Some(s) = status {
+            rec.status = s.to_string();
+        }
+        let new_note = match note {
+            None => rec.note.clone(),
+            Some(None) => None,
+            Some(Some(v)) => Some(v.to_string()),
+        };
+        self.d1
+            .prepare(
+                "UPDATE codes SET max_devices=?2,duration_days=?3,status=?4,note=?5
+                 WHERE code=?1",
+            )
+            .bind(&[
+                js(code),
+                js(rec.max_devices),
+                js(rec.duration_days),
+                js(rec.status),
+                js(new_note.as_deref()),
+            ])
+            .map_err(|e| e.to_string())?
+            .run()
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())?;
+        Ok(true)
     }
 
     pub async fn revoke_code(&self, code: &str) -> Result<bool, String> {
@@ -470,7 +557,84 @@ impl Db {
         })
     }
 
-    /// 最近 N 天的每日激活设备数（按 activated_at 聚合，时间戳为天起点秒）
+    /// 存量 / 到期分布 / 渠道明细
+    pub async fn stats_breakdown(&self) -> Result<StatsBreakdown, String> {
+        async fn one(d1: &D1Database, sql: &str, binds: Vec<JsValue>) -> Result<i64, String> {
+            let row = d1
+                .prepare(sql)
+                .bind(&binds)
+                .map_err(|e| e.to_string())?
+                .first::<CountRow>(None)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(row.map(|r| r.n).unwrap_or(0))
+        }
+        let now = now_secs();
+        let d7 = now + 7 * 86400;
+        let d30 = now + 30 * 86400;
+        // 订阅到期时间列（仅已锚定的订阅码参与）
+        let exp = "anchor + COALESCE(duration_days,365)*86400";
+        let sub_where = format!(
+            "status='active' AND kind='subscription' AND anchor IS NOT NULL AND {exp}"
+        );
+        let d1 = &self.d1;
+        Ok(StatsBreakdown {
+            code_unused: one(
+                d1,
+                "SELECT COUNT(*) AS n FROM codes c WHERE c.status='active'
+                 AND NOT EXISTS (SELECT 1 FROM code_devices d WHERE d.code=c.code)",
+                vec![],
+            )
+            .await?,
+            code_in_use: one(
+                d1,
+                "SELECT COUNT(*) AS n FROM codes c WHERE c.status='active'
+                 AND EXISTS (SELECT 1 FROM code_devices d WHERE d.code=c.code)",
+                vec![],
+            )
+            .await?,
+            code_revoked: one(d1, "SELECT COUNT(*) AS n FROM codes WHERE status!='active'", vec![])
+                .await?,
+            sub_expired: one(
+                d1,
+                &format!("SELECT COUNT(*) AS n FROM codes WHERE {sub_where} <= ?1"),
+                vec![js(now)],
+            )
+            .await?,
+            sub_exp_7d: one(
+                d1,
+                &format!("SELECT COUNT(*) AS n FROM codes WHERE {sub_where} > ?1 AND {exp} <= ?2"),
+                vec![js(now), js(d7)],
+            )
+            .await?,
+            sub_exp_30d: one(
+                d1,
+                &format!("SELECT COUNT(*) AS n FROM codes WHERE {sub_where} > ?1 AND {exp} <= ?2"),
+                vec![js(d7), js(d30)],
+            )
+            .await?,
+            sub_active: one(
+                d1,
+                &format!("SELECT COUNT(*) AS n FROM codes WHERE {sub_where} > ?1"),
+                vec![js(d30)],
+            )
+            .await?,
+            store_devices: one(
+                d1,
+                "SELECT COUNT(DISTINCT device_id) AS n FROM store_devices",
+                vec![],
+            )
+            .await?,
+            store_active: one(
+                d1,
+                "SELECT COUNT(*) AS n FROM store_purchases
+                 WHERE expires_at IS NULL OR expires_at > ?1",
+                vec![js(now)],
+            )
+            .await?,
+        })
+    }
+
     pub async fn activations_by_day(&self, days: i64) -> Result<Vec<DayCount>, String> {
         let since = now_secs() - days * 86400;
         let result = self

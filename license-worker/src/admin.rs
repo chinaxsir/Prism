@@ -86,22 +86,89 @@ pub async fn issue(mut req: Request, app: AppCtx) -> Result<Response, ApiError> 
         .map_err(|e| ApiError::internal(e.to_string()))
 }
 
-/// GET /admin/codes?status=active
+/// GET /admin/codes?status=active&q=PRISM
 pub async fn list(req: Request, app: AppCtx) -> Result<Response, ApiError> {
     check_key(&req, &app.config.admin_key)?;
     let url_str = req.url().map_err(|e| ApiError::internal(e.to_string()))?;
     let url = url::Url::parse(url_str.as_str()).map_err(|e| ApiError::internal(e.to_string()))?;
-    let status = url
-        .query_pairs()
-        .find(|(k, _)| k == "status")
-        .map(|(_, v)| v.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let query = |key: &str| {
+        url.query_pairs()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let status = query("status");
+    let q = query("q");
     let items = app
         .db
-        .list_codes(status.as_deref())
+        .list_codes(status.as_deref(), q.as_deref())
         .await
         .map_err(ApiError::internal)?;
     Response::from_json(&items).map_err(|e| ApiError::internal(e.to_string()))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct UpdateBody {
+    max_devices: Option<i64>,
+    duration_days: Option<i64>,
+    extend_days: Option<i64>,
+    status: Option<String>,
+    /// 缺省=不改；null=清空备注
+    note: Option<Option<String>>,
+}
+
+/// PATCH /admin/codes/:code —— 编辑设备上限 / 订阅时长 / 延期 / 停用恢复 / 备注
+pub async fn update(mut req: Request, code: String, app: AppCtx) -> Result<Response, ApiError> {
+    check_key(&req, &app.config.admin_key)?;
+    let body: UpdateBody = req
+        .json()
+        .await
+        .map_err(|e| ApiError::bad(format!("请求体解析失败: {e}")))?;
+
+    if let Some(s) = &body.status {
+        if !matches!(s.as_str(), "active" | "revoked") {
+            return Err(ApiError::plain(400, "status 必须为 active/revoked"));
+        }
+    }
+    if body.max_devices.is_some_and(|m| m <= 0) {
+        return Err(ApiError::plain(400, "maxDevices 必须大于 0"));
+    }
+    if body.duration_days.is_some_and(|d| d <= 0) {
+        return Err(ApiError::plain(400, "durationDays 必须大于 0"));
+    }
+    if body.extend_days.is_some_and(|d| d <= 0) {
+        return Err(ApiError::plain(400, "extendDays 必须大于 0"));
+    }
+    // 时长类修改仅订阅码允许
+    if body.duration_days.is_some() || body.extend_days.is_some() {
+        let Some(rec) = app.db.get_code(&code).await.map_err(ApiError::internal)? else {
+            return Err(ApiError::plain(404, "激活码不存在"));
+        };
+        if rec.kind != "subscription" {
+            return Err(ApiError::plain(400, "买断码不能修改时长/延期"));
+        }
+    }
+
+    let ok = app
+        .db
+        .update_code(
+            &code,
+            body.max_devices,
+            body.duration_days,
+            body.extend_days,
+            body.status.as_deref(),
+            body.note
+                .as_ref()
+                .map(|o| o.as_deref()),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    if !ok {
+        return Err(ApiError::plain(404, "激活码不存在"));
+    }
+    Response::from_json(&serde_json::json!({ "updated": true }))
+        .map_err(|e| ApiError::internal(e.to_string()))
 }
 
 /// POST /admin/codes/:code/revoke
@@ -208,13 +275,15 @@ pub async fn blacklist_remove(
 
 // ---------------- 统计 ----------------
 
-/// GET /admin/stats —— 汇总计数 + 最近 14 天每日激活数
+/// GET /admin/stats —— 汇总计数 + 存量/到期/渠道明细 + 最近 14 天每日激活数
 pub async fn stats(req: Request, app: AppCtx) -> Result<Response, ApiError> {
     check_key(&req, &app.config.admin_key)?;
     let totals = app.db.stats_totals().await.map_err(ApiError::internal)?;
+    let breakdown = app.db.stats_breakdown().await.map_err(ApiError::internal)?;
     let daily = app.db.activations_by_day(14).await.map_err(ApiError::internal)?;
     Response::from_json(&serde_json::json!({
         "totals": totals,
+        "breakdown": breakdown,
         "activationsDaily": daily,
     }))
     .map_err(|e| ApiError::internal(e.to_string()))

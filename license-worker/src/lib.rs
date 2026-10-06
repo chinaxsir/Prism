@@ -9,6 +9,7 @@
 //!   POST /api/v1/receipt/google
 //! 管理路由（X-Admin-Key）：
 //!   GET/POST /admin/codes
+//!   PATCH    /admin/codes/:code
 //!   DELETE   /admin/codes/:code
 //!   POST     /admin/codes/:code/revoke
 //!   GET      /admin/codes/:code/devices
@@ -93,6 +94,13 @@ async fn main(req: Request, env: Env, _ctx: Context) -> WResult<Response> {
             let code = ctx.param("code").cloned().unwrap_or_default();
             to_response(match AppCtx::from_route(&ctx) {
                 Ok(app) => admin::revoke(req, code, app).await,
+                Err(e) => Err(e),
+            })
+        })
+        .patch_async("/admin/codes/:code", |req, ctx| async move {
+            let code = ctx.param("code").cloned().unwrap_or_default();
+            to_response(match AppCtx::from_route(&ctx) {
+                Ok(app) => admin::update(req, code, app).await,
                 Err(e) => Err(e),
             })
         })

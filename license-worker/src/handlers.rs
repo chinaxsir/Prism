@@ -177,7 +177,8 @@ pub async fn verify(mut req: Request, app: AppCtx) -> Result<Response, ApiError>
                 let Some(record) = app.db.get_code(code).await.map_err(ApiError::internal)? else {
                     return Err(ApiError::forbidden("code_invalid", "激活码已不存在"));
                 };
-                if record.status != "active" {
+                let code_info: (&str, String, Option<i64>, String) = if record.status != "active"
+                {
                     ("revoked", record.kind, None, "code".to_string())
                 } else if record.kind == "subscription" {
                     let anchor = record.anchor.unwrap_or(now);
@@ -191,7 +192,22 @@ pub async fn verify(mut req: Request, app: AppCtx) -> Result<Response, ApiError>
                     )
                 } else {
                     ("active", "lifetime".to_string(), None, "code".to_string())
+                };
+                // 远程注销（后台解绑）的设备：license 仍在签名有效期内，
+                // 但绑定关系已删除，必须拒绝并阻止自动重新绑定
+                if code_info.0 == "active"
+                    && !app
+                        .db
+                        .is_device_bound(code, &claims.dev)
+                        .await
+                        .map_err(ApiError::internal)?
+                {
+                    return Err(ApiError::forbidden(
+                        "device_unbound",
+                        "设备已被远程注销，请重新激活",
+                    ));
                 }
+                code_info
             }
             "apple" | "google" => {
                 let store = claims.src.clone();
