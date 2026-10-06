@@ -403,10 +403,12 @@ jobs:
             exit 1
           fi
 
-          # 硬校验 2：每个 @rpath/libswift* 引用必须——
-          #  a) 命中嵌入（仅允许 Xcode archive 自带的 _Concurrency）；或
-          #  b) 命中 SDK 系统 stub（iPhoneOS.sdk/usr/lib/swift，运行时由
-          #     dyld shared cache 提供，第一条 rpath 保证优先于嵌入副本）。
+          # 硬校验 2：每个 @rpath/libswift* 引用必须三选一——
+          #  a) 命中嵌入（仅允许 Xcode archive 自带的 _Concurrency，iOS<15 兜底）；
+          #  b) 命中 SDK stub（iPhoneOS.sdk/usr/lib/swift 下 .tbd/.dylib）；
+          #  c) dyld shared cache 常驻库：iOS 12.2 起内置于系统 /usr/lib/swift，
+          #     Xcode 16.x SDK 目录里连 .tbd 都没有（已在 CI 全 Xcode find 验证），
+          #     第一条 rpath=/usr/lib/swift 保证运行时命中系统新副本。
           SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
           SYS_SWIFT="$SDK_PATH/usr/lib/swift"
           echo "sdk swift stub dir: $SYS_SWIFT ($(ls -1 "$SYS_SWIFT" 2>/dev/null | wc -l | tr -d ' ') entries)"
@@ -423,10 +425,21 @@ jobs:
                   if ls "$SYS_SWIFT/${lib%.dylib}.tbd" "$SYS_SWIFT/$lib" \
                        >/dev/null 2>&1; then
                     echo "system-provided swift lib: $lib"
-                  else
-                    echo "::error file=${bin#$PWD/}::$lib neither embedded nor found as SDK system stub"
-                    exit 1
+                    continue
                   fi
+                  case "$lib" in
+                    libswiftCore.dylib|\
+                    libswiftDataDetection.dylib|\
+                    libswiftOSLog.dylib|\
+                    libswiftUniformTypeIdentifiers.dylib|\
+                    libswiftXPC.dylib)
+                      echo "dyld-shared-cache resident (no SDK stub): $lib"
+                      ;;
+                    *)
+                      echo "::error file=${bin#$PWD/}::$lib neither embedded, SDK stub, nor known OS-resident swift lib"
+                      exit 1
+                      ;;
+                  esac
                 done || unresolved=1
           done < "$LIST"
           if [ "$unresolved" -ne 0 ]; then
