@@ -248,6 +248,16 @@ fn parse_vmess(rest: &str) -> Result<Value> {
         .and_then(|v| u16::try_from(v).ok())
         .context("端口无效")?;
 
+    // 过滤机场流量提示伪节点：server 为环回/本地地址，或名称包含流量关键词
+    let is_placeholder = server.starts_with("127.")
+        || server.starts_with("localhost")
+        || name.contains("剩余流量")
+        || name.contains("下次重置")
+        || name.contains("已用流量");
+    if is_placeholder {
+        bail!("机场流量提示占位节点，非可用代理");
+    }
+
     let uuid = j["id"].as_str().unwrap_or_default().to_string();
     // vmess 分享 JSON 的 port/aid 常为字符串，兼容数字与字符串两种
     let alter_id = j["aid"]
@@ -335,6 +345,11 @@ fn parse_vless(rest: &str) -> Result<Value> {
     let (server, port) = split_host_port(hostport)?;
     let name = decode_name(name);
 
+    // 过滤机场流量提示伪节点（vless/trojan 同）
+    if server.starts_with("127.") || server.starts_with("localhost") || name.contains("剩余流量") || name.contains("下次重置") {
+        bail!("机场流量提示占位节点，非可用代理");
+    }
+
     let params: std::collections::HashMap<_, _> = parse_query(query).into_iter().collect();
     let security = params.get("security").cloned().unwrap_or_else(|| "none".into());
     let network = params.get("type").cloned().unwrap_or_else(|| "tcp".into());
@@ -405,6 +420,11 @@ fn parse_trojan(rest: &str) -> Result<Value> {
     let (password, hostport) = addr.rsplit_once('@').context("缺少 @")?;
     let (server, port) = split_host_port(hostport)?;
     let name = decode_name(name);
+
+    // 过滤机场流量提示伪节点
+    if server.starts_with("127.") || server.starts_with("localhost") || name.contains("剩余流量") || name.contains("下次重置") {
+        bail!("机场流量提示占位节点，非可用代理");
+    }
 
     let params: std::collections::HashMap<_, _> = parse_query(query).into_iter().collect();
     let sni = params.get("sni").cloned().or_else(|| params.get("peer").cloned()).unwrap_or_default();
