@@ -267,7 +267,12 @@ pub fn build(
     }
 
     let mut warnings = Vec::new();
+    // 发射判重：emit_node/group 用 insert 返回值判断首次发射，
+    // 只能在发射阶段写入（预解析写这里会把全部名字误判为重复）
     let mut known_tags: HashSet<String> =
+        ["direct", "block", "dns-out"].map(str::to_string).into_iter().collect();
+    // 跨订阅改名追踪：预解析阶段登记全部订阅的标签，供后续订阅冲突改名
+    let mut seen_tags: HashSet<String> =
         ["direct", "block", "dns-out"].map(str::to_string).into_iter().collect();
 
     let mut outbounds = vec![
@@ -331,11 +336,11 @@ pub fn build(
             .chain(provider_nodes.values().flatten().map(|p| &p.name))
             .chain(profile.proxy_groups.iter().map(|g| &g.name));
         for name in candidates {
-            if known_tags.contains(name) && !rename.contains_key(name) {
+            if seen_tags.contains(name) && !rename.contains_key(name) {
                 rename.insert(name.clone(), format!("[{sub_name}] {name}"));
             }
         }
-        // 把本订阅的全部标签（含改名结果）登记，供后续订阅做冲突判定
+        // 把本订阅的全部标签（含改名结果）登记进 seen_tags，供后续订阅做冲突判定
         for name in profile
             .proxies
             .iter()
@@ -344,7 +349,7 @@ pub fn build(
             .chain(profile.proxy_groups.iter().map(|g| &g.name))
         {
             let mapped = rename.get(name).cloned().unwrap_or_else(|| name.clone());
-            known_tags.insert(mapped);
+            seen_tags.insert(mapped);
         }
         for (from, to) in &rename {
             if !global_rename.contains_key(from) {
@@ -594,7 +599,6 @@ pub fn build(
         }
         for (i, (url, name, text)) in profiles.iter().enumerate() {
             let p: ClashProfile = serde_yaml::from_str(text.trim()).unwrap_or_default();
-            let has_providers = !p.proxy_providers.is_empty();
             let provider_ok = p
                 .proxy_providers
                 .keys()
@@ -1171,5 +1175,61 @@ fn strip_nulls(value: &mut Value) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归：预解析曾把全部标签写入 known_tags（发射判重集），
+    /// 导致 emit_node 判定所有节点/组「标签重复」而全部跳过 → 0 节点。
+    /// 修复后改名追踪走独立的 seen_tags，正常订阅必须发射出节点与组。
+    #[test]
+    fn multi_sub_emits_all_nodes_not_deduped() {
+        let clash = r#"
+proxies:
+  - name: HK-01
+    type: ss
+    server: 1.2.3.4
+    port: 8388
+    cipher: aes-256-gcm
+    password: pw
+  - name: US-01
+    type: trojan
+    server: 5.6.7.8
+    port: 443
+    password: pw2
+proxy-groups:
+  - name: 节点选择
+    type: select
+    proxies: [HK-01, US-01]
+rules:
+  - MATCH,节点选择
+"#;
+        let settings = UserSettings::default();
+        let data_dir = std::env::temp_dir().join("prism-cb-test-dedupe");
+        let work_dir = data_dir.join("kernel");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let built = build(
+            &[("https://sub.example".into(), "订阅1".into(), clash.into())],
+            &[],
+            crate::core::state::RunMode::SystemProxy,
+            &settings,
+            &data_dir,
+            &work_dir,
+            "127.0.0.1:9090",
+            "secret",
+        )
+        .expect("build must succeed with real nodes");
+        let tags: Vec<&str> = built.config["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["tag"].as_str())
+            .collect();
+        assert!(tags.contains(&"HK-01"), "node HK-01 must be emitted, got {tags:?}");
+        assert!(tags.contains(&"US-01"), "node US-01 must be emitted, got {tags:?}");
+        assert!(tags.contains(&"节点选择"), "group must be emitted, got {tags:?}");
     }
 }
