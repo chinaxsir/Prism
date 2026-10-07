@@ -13,22 +13,7 @@ import EmptyState from "@/components/ui/EmptyState";
 import Spinner from "@/components/ui/Spinner";
 import { toast } from "@/components/ui/Toast";
 import { useProStore } from "@/stores/pro";
-
-/// updatedAt 兼容秒/毫秒时间戳，输出相对时间
-function formatRelativeTime(ts: number): string {
-  if (!ts) return "从未更新";
-  const ms = ts < 1e12 ? ts * 1000 : ts;
-  const diff = Date.now() - ms;
-  if (diff < 0) return new Date(ms).toLocaleString("zh-CN");
-  const minutes = Math.floor(diff / 60000);
-  if (minutes < 1) return "刚刚";
-  if (minutes < 60) return `${minutes} 分钟前`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days} 天前`;
-  return new Date(ms).toLocaleDateString("zh-CN");
-}
+import { formatRelativeTime } from "@/utils/time";
 
 function displayName(record: SubscriptionRecord): string {
   if (record.name) return record.name;

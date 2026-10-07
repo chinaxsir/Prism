@@ -82,7 +82,6 @@ struct PreparedStart {
 /// 启动前的全部准备与校验（不提权变更、不写内核状态）：
 /// 提权预检 → 工作目录 → 订阅 profile → 内核二进制 → 端口预检 → 构建配置
 async fn prepare_start(
-    app: &AppHandle,
     state: &State<'_, AppState>,
 ) -> Result<PreparedStart, String> {
     let mode = *state.mode.read();
@@ -121,21 +120,14 @@ async fn prepare_start(
         });
     }
 
-    // 确保内核二进制就位：缺失则首启自动下载（进度走 kernel-download://progress）
-    // iOS 内核静态链接进主程序（ios-kernel c-archive），无二进制解析/下载
-    #[cfg(not(target_os = "ios"))]
-    let binary_path = match resolve_kernel_path(&work_dir) {
-        Ok(path) => path,
-        Err(_) => {
-            tracing::info!("kernel binary missing, triggering first-run download");
-            crate::core::kernel_download::ensure(app, &work_dir)
-                .await
-                .map_err(|e| format!("内核下载失败: {e}"))?;
-            resolve_kernel_path(&work_dir)
-                .map_err(|e| format!("下载后仍找不到内核: {e}"))?
-        }
-    };
-    #[cfg(target_os = "ios")]
+    // 内核必须随安装包分发，任何平台都不运行时联网下载：
+    // - 桌面：Tauri sidecar（bundle.externalBin）
+    // - iOS/Android：c-archive 静态链接进主程序（ios-kernel，无二进制路径）
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    let binary_path = resolve_kernel_path(&work_dir).map_err(|_| {
+        "内核文件缺失（Prism 不会联网下载内核）：请重新安装 Prism；若被安全软件删除或隔离，请恢复后重试"
+    })?;
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     let binary_path = std::path::PathBuf::new();
 
     // 端口预检，避免与本机其他代理内核冲突
@@ -241,7 +233,7 @@ async fn apply_prepared(
 }
 
 async fn do_start(app: &AppHandle, state: &State<'_, AppState>) -> Result<(), String> {
-    let prepared = prepare_start(app, state).await?;
+    let prepared = prepare_start(state).await?;
     apply_prepared(prepared, app, state).await
 }
 
@@ -316,7 +308,7 @@ fn load_enabled_profiles(state: &AppState) -> Vec<(String, String, String)> {
 /// 先构建并静态校验新配置，通过后才停旧内核；校验失败则网络不中断。
 async fn restart_core(app: &AppHandle, state: &State<'_, AppState>) -> Result<(), String> {
     // 1. 准备新配置（不改变任何状态）
-    let prepared = prepare_start(app, state).await?;
+    let prepared = prepare_start(state).await?;
 
     // 2. sing-box check 静态校验
     let check_path = state.work_dir().join("config.precheck.json");
@@ -452,10 +444,10 @@ async fn auto_select_fastest(api: &KernelApi, group: &str) -> anyhow::Result<Opt
 
 /// 解析 sing-box 二进制位置，优先级：
 /// 1. 环境变量 PRISM_KERNEL_PATH
-/// 2. 内核工作目录内 sing-box[.exe]（首启自动下载落盘位置）
+/// 2. 内核工作目录内 sing-box[.exe]（历史版本/手动放置位置）
 /// 3. 主程序同级目录 sing-box[.exe]
-/// （iOS 内核内嵌于主程序，无独立二进制可解析）
-#[cfg(not(target_os = "ios"))]
+/// （iOS/Android 内核内嵌于主程序，无独立二进制可解析）
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub(crate) fn resolve_kernel_path(work_dir: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     let exe_name = if cfg!(windows) {
         "sing-box.exe"
@@ -467,7 +459,7 @@ pub(crate) fn resolve_kernel_path(work_dir: &std::path::Path) -> anyhow::Result<
         Ok(path) => vec![path.into()],
         Err(_) => {
             let mut list = vec![
-                crate::core::kernel_download::kernel_binary_path(work_dir),
+                crate::core::kernel::kernel_binary_path(work_dir),
             ];
             if let Ok(exe) = std::env::current_exe()
                 && let Some(dir) = exe.parent()
@@ -1078,27 +1070,27 @@ pub async fn get_kernel_info(state: State<'_, AppState>) -> Result<KernelInfoDto
     Ok(kernel_info(&state))
 }
 
-/// 手动触发内核下载/修复（设置页按钮）
+/// 校验内核完整性（设置页按钮）。内核始终随包分发，本命令只做探测，
+/// 缺失时给出明确指引，绝不联网下载
 #[tauri::command]
 pub async fn ensure_kernel(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<KernelInfoDto, String> {
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     {
         let _ = app;
-        *state.kernel_version.write() = Some(format!("{} （内置）", crate::core::kernel::IOS_EMBEDDED_VERSION));
+        *state.kernel_version.write() =
+            Some(format!("{} （内置）", crate::core::kernel::EMBEDDED_VERSION));
         return Ok(kernel_info(&state));
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
+        let _ = &app;
         let work_dir = state.work_dir();
-        let path = match resolve_kernel_path(&work_dir) {
-            Ok(path) => path,
-            Err(_) => crate::core::kernel_download::ensure(&app, &work_dir)
-                .await
-                .map_err(|e| format!("内核下载失败: {e}"))?,
-        };
+        let path = resolve_kernel_path(&work_dir).map_err(|_| {
+            "内核文件缺失（Prism 不会联网下载内核）：请重新安装 Prism；若被安全软件删除或隔离，请恢复后重试".to_string()
+        })?;
 
         if let Some(version) = probe_version(&path).await {
             *state.kernel_version.write() = Some(version);
@@ -1108,20 +1100,18 @@ pub async fn ensure_kernel(
 }
 
 fn kernel_info(state: &AppState) -> KernelInfoDto {
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     {
-        let version = state
-            .kernel_version
-            .read()
-            .clone()
-            .or_else(|| Some(format!("{} （内置）", crate::core::kernel::IOS_EMBEDDED_VERSION)));
+        let version = state.kernel_version.read().clone().or_else(|| {
+            Some(format!("{} （内置）", crate::core::kernel::EMBEDDED_VERSION))
+        });
         KernelInfoDto {
             exists: true,
             path: None,
             version,
         }
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         match resolve_kernel_path(&state.work_dir()) {
             Ok(path) => KernelInfoDto {

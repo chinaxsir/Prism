@@ -107,11 +107,3 @@ export interface KernelInfo {
 
 export const getKernelInfo = () => invoke<KernelInfo>("get_kernel_info");
 export const ensureKernel = () => invoke<KernelInfo>("ensure_kernel");
-
-/// 内核下载进度事件载荷
-export interface KernelDownloadProgress {
-  stage: "download" | "extract" | "ready" | "error";
-  percent: number;
-  message: string;
-}
-export const KERNEL_DOWNLOAD_EVENT = "kernel-download://progress";

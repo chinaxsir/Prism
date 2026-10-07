@@ -1,21 +1,25 @@
 import { useEffect, useState } from "react";
-import { Check, Download, Lock, ShieldAlert, Sparkles } from "lucide-react";
-import { listen } from "@tauri-apps/api/event";
+import {
+  Check,
+  Lock,
+  ShieldAlert,
+  ShieldCheck,
+  Sparkles,
+} from "lucide-react";
 
 import {
-  KERNEL_DOWNLOAD_EVENT,
   ensureKernel,
   getCoreStatus,
   getKernelInfo,
   getSettings,
   saveSettings,
   setMode,
-  type KernelDownloadProgress,
   type KernelInfo,
   type EntitlementState,
 } from "@/api/ipc";
-import type { OutboundMode, RunMode, UserSettings } from "@/stores/core";
+import type { RunMode, UserSettings } from "@/stores/core";
 import { useCoreStore } from "@/stores/core";
+import { OUTBOUND_MODES, RUN_MODES } from "@/constants/modes";
 import { ActivateProModal } from "@/components/ProGate";
 import { useProStore } from "@/stores/pro";
 import { toast } from "@/components/ui/Toast";
@@ -37,41 +41,11 @@ function fmtDate(secs: number | null): string {
   return new Date(secs * 1000).toLocaleDateString();
 }
 
-const MODES: { key: RunMode; title: string; desc: string }[] = [
-  {
-    key: "systemProxy",
-    title: "系统代理",
-    desc: "修改系统代理设置，仅接管支持代理的应用流量",
-  },
-  {
-    key: "tun",
-    title: "TUN 全局",
-    desc: "虚拟网卡接管全部流量，需要管理员/root 权限",
-  },
-  {
-    key: "ruleOnly",
-    title: "仅规则",
-    desc: "不修改系统设置，手动配置应用代理后按规则分流",
-  },
-];
+/// 接入模式：流量「如何进入」Prism（与出站模式互不影响）
+const MODES = RUN_MODES;
 
-const OUTBOUND_MODES: { key: OutboundMode; title: string; desc: string }[] = [
-  {
-    key: "rule",
-    title: "规则",
-    desc: "按订阅与自定义规则分流（默认）",
-  },
-  {
-    key: "global",
-    title: "全局",
-    desc: "全部流量走 GLOBAL 组所选节点",
-  },
-  {
-    key: "direct",
-    title: "直连",
-    desc: "全部流量直连，不走任何节点",
-  },
-];
+/// 出站模式：流量「最终走向」（与接入模式互不影响）
+const OUTBOUND_MODES_LOCAL = OUTBOUND_MODES;
 
 export default function Settings() {
   const [mode, setRunMode] = useState<RunMode>("systemProxy");
@@ -97,7 +71,7 @@ export default function Settings() {
   // TUN 为 Pro 功能（全平台门控）
   const tunGated = !proUnlocked;
 
-  // 内核信息与下载状态
+  // 内核信息与校验状态
   const [kernelInfo, setKernelInfo] = useState<KernelInfo | null>(null);
   const [kernelBusy, setKernelBusy] = useState(false);
   const [kernelMsg, setKernelMsg] = useState<string | null>(null);
@@ -115,27 +89,11 @@ export default function Settings() {
     getKernelInfo()
       .then(setKernelInfo)
       .catch((e) => console.error(e));
-
-    const un = listen<KernelDownloadProgress>(KERNEL_DOWNLOAD_EVENT, (event) => {
-      const p = event.payload;
-      if (p.stage === "ready" || p.stage === "error") {
-        setKernelBusy(false);
-        getKernelInfo().then(setKernelInfo).catch(() => undefined);
-      } else {
-        setKernelBusy(true);
-      }
-      setKernelMsg(
-        p.percent > 0 ? `${p.message}（${p.percent}%）` : p.message
-      );
-    });
-    return () => {
-      un.then((fn) => fn());
-    };
   }, []);
 
   const handleEnsureKernel = async () => {
     setKernelBusy(true);
-    setKernelMsg("正在准备内核…");
+    setKernelMsg("正在校验内核…");
     try {
       const info = await ensureKernel();
       setKernelInfo(info);
@@ -159,6 +117,7 @@ export default function Settings() {
     }
     if (modeBusy || m === mode) return;
     setRunMode(m);
+    setForm((f) => ({ ...f, mode: m }));
     useCoreStore.getState().setMode(m);
     setSaved(false);
     // 内核运行中切换模式会重建配置并重启内核，等待完成后重新对齐状态
@@ -168,8 +127,14 @@ export default function Settings() {
       const data = await getCoreStatus();
       useCoreStore.getState().setStatus(data.status);
       useCoreStore.getState().setMode(data.mode);
+      toast.success(
+        data.status === "running"
+          ? "模式已切换，内核已重启生效"
+          : "模式已切换，下次启动内核时生效"
+      );
     } catch (e) {
       console.error(e);
+      toast.error(String(e));
     } finally {
       setModeBusy(false);
     }
@@ -188,12 +153,11 @@ export default function Settings() {
     <div className="space-y-6 max-w-3xl">
       <h1 className="text-2xl font-bold">设置</h1>
 
-      {/* 运行模式 */}
+      {/* 接入模式 */}
       <section className="bg-surface-card rounded-xl p-5">
-        <h2 className="text-base font-semibold mb-1">运行模式</h2>
+        <h2 className="text-base font-semibold mb-1">接入模式</h2>
         <p className="text-xs text-gray-500 mb-4">
-          流量如何进入 Prism（系统代理 / TUN 虚拟网卡）；与下方「高级 →
-          出站模式」互不影响
+          决定流量「如何进入」Prism。注意：这与下方「出站模式」（流量最终走向）是两个独立维度
         </p>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           {MODES.map((m) => (
@@ -345,10 +309,10 @@ export default function Settings() {
         <div className="py-3 border-b border-white/5">
           <div className="text-sm mb-1">出站模式</div>
           <div className="text-xs text-gray-500 mb-3">
-            内核分流策略（流量最终走向）；与「运行模式」互不影响，保存后内核自动重启生效
+            决定流量「最终走向」——按规则分流、全部走节点、或全部直连。与「接入模式」互不影响，保存后内核自动重启生效
           </div>
           <div className="grid grid-cols-3 gap-2">
-            {OUTBOUND_MODES.map((m) => (
+            {OUTBOUND_MODES_LOCAL.map((m) => (
               <button
                 key={m.key}
                 onClick={() => patch({ outboundMode: m.key })}
@@ -387,7 +351,7 @@ export default function Settings() {
         />
       </section>
 
-      {/* 内核管理 */}
+      {/* 内核信息 */}
       <section className="bg-surface-card rounded-xl p-5">
         <h2 className="text-base font-semibold mb-4">代理内核（sing-box）</h2>
         <div className="space-y-2 text-xs text-gray-400 mb-4">
@@ -399,7 +363,7 @@ export default function Settings() {
             />
             {kernelInfo?.exists
               ? `已安装${kernelInfo.version ? ` · v${kernelInfo.version}` : ""}`
-              : "未安装（首次启动内核时将自动下载）"}
+              : "内核文件缺失（请重新安装 Prism，应用不会联网下载内核）"}
           </div>
           {kernelInfo?.path && (
             <div className="font-mono break-all text-gray-500">
@@ -413,8 +377,8 @@ export default function Settings() {
           disabled={kernelBusy}
           className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-hover hover:bg-white/10 transition-colors text-sm disabled:opacity-50"
         >
-          <Download size={15} className={kernelBusy ? "animate-bounce" : ""} />
-          {kernelBusy ? "处理中…" : "下载 / 修复内核"}
+          <ShieldCheck size={15} className={kernelBusy ? "animate-pulse" : ""} />
+          {kernelBusy ? "处理中…" : "校验内核状态"}
         </button>
       </section>
 

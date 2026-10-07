@@ -7,7 +7,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-#[cfg(not(target_os = "ios"))]
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -17,24 +17,24 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
-#[cfg(not(target_os = "ios"))]
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
-#[cfg(not(target_os = "ios"))]
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 
 /// 首选 external-controller 地址；被占用时会退回到系统分配的随机端口
 pub const PREFERRED_API_ADDR: &str = "127.0.0.1:9090";
 
-/// iOS 内嵌内核版本（与 ios-kernel/go.mod 的 sing-box 依赖保持一致）
-#[cfg(target_os = "ios")]
-pub const IOS_EMBEDDED_VERSION: &str = "1.11.3";
+/// iOS/Android 内嵌内核版本（与 ios-kernel/go.mod 的 sing-box 依赖保持一致）
+#[cfg(any(target_os = "ios", target_os = "android"))]
+pub const EMBEDDED_VERSION: &str = "1.11.3";
 
-/// iOS 内嵌内核 FFI（sing-box c-archive，见 src-tauri/ios-kernel/main.go）。
+/// iOS/Android 内嵌内核 FFI（sing-box c-archive，见 src-tauri/ios-kernel/main.go）。
 /// 进程内运行：无子进程、无 pid；clash_api 与桌面 sidecar 完全一致。
-#[cfg(target_os = "ios")]
-mod ios_ffi {
+#[cfg(any(target_os = "ios", target_os = "android"))]
+mod mobile_ffi {
     use std::ffi::{CStr, CString};
     use std::os::raw::c_char;
     use std::path::Path;
@@ -123,21 +123,22 @@ impl KernelHandle {
 
         // 2.5 确保 geoip.db / geosite.db 就位：legacy geoip/geosite 规则需要本地
         // 数据库，缺失时 sing-box 会走代理出站下载（启动期代理未就绪，必失败）。
-        // 数据库随包分发（见 scripts/fetch-kernel.cjs），这里从候选位置拷贝到工作目录
-        ensure_geo_databases(&config, &app_handle);
+        // 数据库随包分发（见 scripts/fetch-kernel.cjs），这里从候选位置拷贝到工作目录。
+        // 原则：任何必需文件缺失都直接报错，绝不允许内核运行时联网下载
+        ensure_geo_databases(&config, &app_handle)?;
 
-        // 3. 启动内核：iOS 进程内嵌（c-archive FFI），其他平台 spawn sidecar
+        // 3. 启动内核：iOS/Android 进程内嵌（c-archive FFI），其他平台 spawn sidecar
         // ENABLE_DEPRECATED_GEOIP/GEOSITE：Clash 订阅常见 GEOIP/GEOSITE 规则，
         // 目前转换为 sing-box legacy geoip/geosite 字段；1.11 起需显式环境变量启用。
         // TODO(内核升级)：迁移到 rule_set（.srs 规则集）后移除这两个环境变量
-        #[cfg(target_os = "ios")]
+        #[cfg(any(target_os = "ios", target_os = "android"))]
         let (child, pid): (Option<Child>, u32) = {
-            ios_ffi::start(&config_path, &config.work_dir)
+            mobile_ffi::start(&config_path, &config.work_dir)
                 .map_err(|e| anyhow::anyhow!("内嵌内核启动失败: {e}"))?;
             tracing::info!("sing-box embedded kernel started in-process");
             (None, std::process::id())
         };
-        #[cfg(not(target_os = "ios"))]
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
         let (child, pid): (Option<Child>, u32) = {
             let mut cmd = Command::new(&config.binary_path);
             cmd.arg("run")
@@ -196,9 +197,9 @@ impl KernelHandle {
 
         if !ready {
             // 启动失败则回收内核并落盘错误上下文，避免残留
-            #[cfg(target_os = "ios")]
-            ios_ffi::stop();
-            #[cfg(not(target_os = "ios"))]
+            #[cfg(any(target_os = "ios", target_os = "android"))]
+            mobile_ffi::stop();
+            #[cfg(not(any(target_os = "ios", target_os = "android")))]
             {
                 if let Some(mut c) = child {
                     let _ = c.start_kill();
@@ -260,8 +261,8 @@ impl KernelHandle {
             }
         }
 
-        #[cfg(target_os = "ios")]
-        ios_ffi::stop();
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        mobile_ffi::stop();
 
         clear_kernel_pid(self.pid);
         tracing::info!("sing-box process {} stopped", self.pid);
@@ -271,19 +272,19 @@ impl KernelHandle {
 
 /// 静态校验待应用的配置：sing-box check -c <path>。
 /// 重启前调用——校验失败时旧内核保留，网络不中断。
-/// iOS 上无法 spawn 子进程，改为调用内嵌 FFI 的 PrismKernelCheck（解析+构建后关闭）。
+/// iOS/Android 上无法 spawn 子进程，改为调用内嵌 FFI 的 PrismKernelCheck（解析+构建后关闭）。
 pub async fn check_config(
     binary: &std::path::Path,
     work_dir: &std::path::Path,
     config_path: &std::path::Path,
 ) -> Result<()> {
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     {
         let _ = binary;
-        ios_ffi::check(config_path, work_dir)
+        mobile_ffi::check(config_path, work_dir)
             .map_err(|e| anyhow::anyhow!("新配置校验未通过，已保留当前内核：\n{}", e))?;
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         let mut cmd = Command::new(binary);
         cmd.arg("check")
@@ -328,14 +329,14 @@ pub fn generate_secret() -> String {
 }
 
 /// 执行 `<binary> version` 并提取版本号（sing-box 输出 JSON）。
-/// iOS 无二进制可执行，直接返回内嵌内核版本。
+/// iOS/Android 无二进制可执行，直接返回内嵌内核版本。
 pub async fn probe_version(binary: &std::path::Path) -> Option<String> {
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     {
         let _ = binary;
-        return Some(format!("{} （内置）", IOS_EMBEDDED_VERSION));
+        return Some(format!("{} （内置）", EMBEDDED_VERSION));
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         let mut cmd = Command::new(binary);
         cmd.arg("version");
@@ -366,7 +367,11 @@ fn read_log_tail(path: &std::path::Path) -> String {
 
 /// 将随包分发的 geoip.db / geosite.db 拷贝到内核工作目录（已存在则跳过）。
 /// 候选来源：内核二进制同级（sidecar 位置）、应用资源目录、源码树 binaries（dev）。
-fn ensure_geo_databases(config: &KernelConfig, app_handle: &AppHandle) {
+/// Android 的 resources 位于 APK assets（非真实文件系统），数据库在编译期直接
+/// 内嵌（include_bytes!，CI 构建前 fetch），运行时写入工作目录。
+///
+/// 硬性原则：任一数据库最终仍不可用即返回错误，**绝不放内核去联网下载**。
+fn ensure_geo_databases(config: &KernelConfig, app_handle: &AppHandle) -> Result<()> {
     const DBS: [&str; 2] = ["geoip.db", "geosite.db"];
 
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -374,7 +379,9 @@ fn ensure_geo_databases(config: &KernelConfig, app_handle: &AppHandle) {
         candidates.push(dir.to_path_buf());
     }
     if let Ok(dir) = app_handle.path().resource_dir() {
-        candidates.push(dir);
+        candidates.push(dir.clone());
+        // 数组形式声明的 resources 会保留原目录结构（$RESOURCE/binaries/*.db）
+        candidates.push(dir.join("binaries"));
     }
     // dev：内核二进制在 target/debug，数据库在源码树 src-tauri/binaries
     candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries"));
@@ -384,29 +391,61 @@ fn ensure_geo_databases(config: &KernelConfig, app_handle: &AppHandle) {
         if dest.is_file() {
             continue;
         }
+        let mut provisioned = false;
         for dir in &candidates {
             let src = dir.join(db);
             if src.is_file() {
                 match std::fs::copy(&src, &dest) {
                     Ok(_) => {
                         tracing::info!("copied {} -> {}", src.display(), dest.display());
+                        provisioned = true;
                         break;
                     }
                     Err(e) => tracing::warn!("copy {} failed: {e}", src.display()),
                 }
             }
         }
-        if !dest.is_file() {
-            tracing::warn!(
-                "{db} not found in any candidate location; kernel will try runtime download (likely fails)"
+
+        // Android：候选路径位于 APK 内（非真实文件系统），写编译期内嵌副本
+        #[cfg(target_os = "android")]
+        if !provisioned {
+            let bytes: &[u8] = match db {
+                "geoip.db" => include_bytes!("../../binaries/geoip.db").as_slice(),
+                "geosite.db" => include_bytes!("../../binaries/geosite.db").as_slice(),
+                _ => unreachable!(),
+            };
+            match std::fs::write(&dest, bytes) {
+                Ok(_) => {
+                    tracing::info!("wrote embedded {db} -> {}", dest.display());
+                    provisioned = true;
+                }
+                Err(e) => tracing::warn!("write embedded {db} failed: {e}"),
+            }
+        }
+
+        if !provisioned {
+            anyhow::bail!(
+                "必需的 {db} 缺失且安装包内未找到（Prism 不会联网下载内核文件）：请重新安装 Prism，或检查安全软件是否删除了应用文件"
             );
         }
     }
+    Ok(())
+}
+
+/// work_dir 下的内核二进制最终路径（桌面：手动放置/历史落盘位置）
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub fn kernel_binary_path(work_dir: &std::path::Path) -> PathBuf {
+    let exe = if cfg!(windows) {
+        "sing-box.exe"
+    } else {
+        "sing-box"
+    };
+    work_dir.join(exe)
 }
 
 /// 将子进程的一条输出管道按行写入 kernel.log，同时转发到 tracing
-/// （iOS 内核进程内运行，日志由 Go 侧直接写文件，无管道可接）
-#[cfg(not(target_os = "ios"))]
+/// （iOS/Android 内核进程内运行，日志由 Go 侧直接写文件，无管道可接）
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 fn spawn_log_pipe<R>(reader: R, tag: &'static str, log_path: &std::path::Path)
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -429,7 +468,7 @@ where
 }
 
 /// 简易 UTC 时间戳（不引入 chrono 依赖，仅用于内核日志排障）
-#[cfg(not(target_os = "ios"))]
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 fn chrono_like_timestamp() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -448,11 +487,12 @@ fn pid_store() -> &'static Mutex<Option<u32>> {
     KERNEL_PID.get_or_init(|| Mutex::new(None))
 }
 
-#[cfg(not(target_os = "ios"))]
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 fn register_kernel_pid(pid: u32) {
     *pid_store().lock() = Some(pid);
 }
 
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 fn clear_kernel_pid(pid: u32) {
     let mut guard = pid_store().lock();
     if *guard == Some(pid) {

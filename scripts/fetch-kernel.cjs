@@ -50,7 +50,7 @@ function targetInfo() {
   return [triplet, TRIPLET_MAP[triplet]];
 }
 
-/** 下载源：官方 + GitHub 镜像（与 Rust 端 kernel_download.rs 保持一致） */
+/** 下载源：官方 + GitHub 镜像。仅构建期（CI/打包）使用——所有产物必须随包分发，应用运行时绝不联网下载 */
 function mirrorUrls(official) {
   const urls = [official];
   if (process.env.PRISM_KERNEL_MIRROR) {

@@ -18,13 +18,7 @@ import {
   YAxis,
 } from "recharts";
 
-import {
-  KERNEL_DOWNLOAD_EVENT,
-  getCoreStatus,
-  startCore,
-  stopCore,
-  type KernelDownloadProgress,
-} from "@/api/ipc";
+import { getCoreStatus, startCore, stopCore } from "@/api/ipc";
 import { useCoreStore, type RunMode } from "@/stores/core";
 import { formatBytes, formatSpeed, formatUptime } from "@/utils/format";
 
@@ -50,7 +44,6 @@ export default function Dashboard() {
   const pushTraffic = useCoreStore((s) => s.pushTraffic);
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [download, setDownload] = useState<KernelDownloadProgress | null>(null);
 
   const running = status === "running";
 
@@ -77,20 +70,6 @@ export default function Dashboard() {
       unlistenMemory.then((fn) => fn());
     };
   }, [setTrafficRate, setMemoryUsage, pushTraffic]);
-
-  // 首启自动下载内核的进度
-  useEffect(() => {
-    const un = listen<KernelDownloadProgress>(KERNEL_DOWNLOAD_EVENT, (event) => {
-      const p = event.payload;
-      if (p.stage === "ready" || p.stage === "error") {
-        setTimeout(() => setDownload(null), 2000);
-      }
-      setDownload(p);
-    });
-    return () => {
-      un.then((fn) => fn());
-    };
-  }, []);
 
   // 本地运行时长计时
   useEffect(() => {
@@ -124,7 +103,6 @@ export default function Dashboard() {
         setStatus("starting");
         await startCore();
         setStatus("running");
-        setDownload(null);
       }
     } catch (e) {
       console.error("toggle core failed:", e);
@@ -166,36 +144,11 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* 内核下载进度 / 启动错误提示 */}
-      {(download || errorMsg) && (
-        <div
-          className={`rounded-xl p-4 text-sm shadow-md ${
-            errorMsg
-              ? "bg-latency-bad/20 text-red-300 border border-red-500/30"
-              : "bg-accent/20 text-accent border border-accent/30"
-          }`}
-        >
-          {errorMsg ? (
-            <div>
-              <div className="font-semibold mb-1">操作失败</div>
-              <div className="text-xs break-all text-red-200">{errorMsg}</div>
-            </div>
-          ) : download ? (
-            <div>
-              <div className="flex items-center justify-between mb-2 text-gray-100">
-                <span>{download.message}</span>
-                {download.percent > 0 && (
-                  <span className="text-xs tabular-nums">{download.percent}%</span>
-                )}
-              </div>
-              <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
-                <div
-                  className="h-full bg-accent transition-all"
-                  style={{ width: `${Math.max(download.percent, 4)}%` }}
-                />
-              </div>
-            </div>
-          ) : null}
+      {/* 启动/停止错误提示 */}
+      {errorMsg && (
+        <div className="rounded-xl p-4 text-sm shadow-md bg-latency-bad/20 text-red-300 border border-red-500/30">
+          <div className="font-semibold mb-1">操作失败</div>
+          <div className="text-xs break-all text-red-200">{errorMsg}</div>
         </div>
       )}
 

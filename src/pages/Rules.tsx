@@ -11,6 +11,7 @@ import ProGate from "@/components/ProGate";
 import Spinner from "@/components/ui/Spinner";
 import { toast } from "@/components/ui/Toast";
 import { Feature } from "@/pro/gating";
+import { ruleTypeClass } from "@/utils/ruleType";
 
 interface Rule {
   type: string;
@@ -117,20 +118,6 @@ export default function Rules() {
   const removeAt = (index: number) =>
     persist(custom.filter((_, i) => i !== index));
 
-  const ruleTypeClass = (type: string) => {
-    const colors: Record<string, string> = {
-      DOMAIN: "text-blue-400",
-      "DOMAIN-SUFFIX": "text-green-400",
-      "DOMAIN-KEYWORD": "text-yellow-400",
-      "IP-CIDR": "text-purple-400",
-      GEOIP: "text-pink-400",
-      GEOSITE: "text-orange-400",
-      "PROCESS-NAME": "text-red-400",
-      RULESET: "text-cyan-400",
-    };
-    return colors[type] ?? "text-gray-400";
-  };
-
   return (
     <div className="space-y-6">
       <ProGate feature={Feature.Rules}>
@@ -167,7 +154,7 @@ export default function Rules() {
               onChange={(e) => setPolicy(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleAdd()}
               list="rule-policy-options"
-              placeholder="策略（默认 direct）"
+              placeholder="策略：direct / block / 策略组名"
               className="md:w-56 rounded-lg bg-surface-hover border border-white/5 px-3 py-2 text-sm outline-none focus:border-accent"
             />
             <datalist id="rule-policy-options">
@@ -184,6 +171,9 @@ export default function Rules() {
               添加
             </button>
           </div>
+          <p className="text-[11px] text-gray-500 -mt-1">
+            策略可选：direct（直连）、block（拦截），或订阅中的策略组名（内核运行时自动列出）。留空默认 direct。
+          </p>
 
           {custom.length > 0 && (
             <div className="mt-4 space-y-1.5 max-h-72 overflow-y-auto pr-1">

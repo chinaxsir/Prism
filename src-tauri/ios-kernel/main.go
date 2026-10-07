@@ -1,12 +1,19 @@
-// iOS 内嵌内核：sing-box 编译为 c-archive 静态库，Rust 经 FFI 调用。
+// 移动端内嵌内核：sing-box 编译为 c-archive 静态库，Rust 经 FFI 调用。
+// iOS 与 Android 共用本源码，构建产物按平台/架构区分：
 //
 // 与桌面 sidecar 的差异仅在于承载方式（进程内 vs 子进程）：
 // 配置 JSON / clash_api / geo 数据库逻辑完全一致。
 //
-// 构建（CI macOS）：
+// 构建 iOS（CI macOS）：
 //   CGO_ENABLED=1 GOOS=ios GOARCH=arm64 CC=$(xcrun -sdk iphoneos -f clang) \
-//     go build -buildmode=c-archive -tags "with_gvisor,with_quic,with_grpc,with_wireguard,with_ech,with_utls,with_clash_api" \
+//     go build -buildmode=c-archive -tags "netgo,with_gvisor,with_quic,with_grpc,with_wireguard,with_ech,with_utls,with_clash_api" \
 //     -trimpath -ldflags="-s -w" -o libprismkernel.a .
+//
+// 构建 Android（CI Linux，NDK clang；四架构各一个产物）：
+//   CGO_ENABLED=1 GOOS=android GOARCH=<arm64|arm|386|amd64> \
+//     CC=<ndk target clang> CGO_CFLAGS="--target=<target>" \
+//     go build -buildmode=c-archive -tags "with_gvisor,with_quic,with_grpc,with_wireguard,with_ech,with_utls,with_clash_api" \
+//     -trimpath -ldflags="-s -w" -o libprismkernel-<arch>.a .
 package main
 
 /*

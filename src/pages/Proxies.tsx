@@ -12,6 +12,7 @@ import {
 } from "@/api/ipc";
 import { useCoreStore } from "@/stores/core";
 import { toast } from "@/components/ui/Toast";
+import { delayClass, delayText, type Delay } from "@/utils/latency";
 import clsx from "clsx";
 
 interface DelaySample {
@@ -105,25 +106,11 @@ export default function Proxies() {
     .filter((item): item is ProxyEntry => Boolean(item));
 
   /// 0 = 超时；undefined = 未测速
-  const lastDelay = (node: ProxyEntry): number | undefined => {
+  const lastDelay = (node: ProxyEntry): Delay => {
     if (failed.has(node.name)) return 0;
     const history = node.history ?? [];
     if (history.length === 0) return undefined;
     return history[history.length - 1].delay;
-  };
-
-  const delayClass = (delay?: number) => {
-    if (delay === undefined) return "text-gray-500";
-    if (delay === 0) return "text-latency-bad";
-    if (delay < 200) return "text-latency-good";
-    if (delay < 500) return "text-latency-medium";
-    return "text-latency-bad";
-  };
-
-  const delayText = (delay?: number) => {
-    if (delay === undefined) return "未测速";
-    if (delay === 0) return "超时";
-    return `${delay} ms`;
   };
 
   const handleTestGroup = async () => {
@@ -207,7 +194,7 @@ export default function Proxies() {
               className="flex items-center gap-2 rounded-lg border border-white/10 px-5 py-2.5 text-sm text-gray-300 transition-colors hover:border-white/20"
             >
               <RefreshCw size={14} />
-              更新订阅
+              管理订阅
             </Link>
           </div>
         </div>

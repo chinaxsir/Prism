@@ -49,6 +49,20 @@ jobs:
       - name: Fetch sing-box sidecar
         run: node scripts/fetch-kernel.cjs --triplet ${{ matrix.target }}
 
+      # 硬校验：内核 sidecar 与 geo 数据库必须随包分发——
+      # 终端用户网络可能完全不支持外网，应用任何时候都不联网下载必需文件
+      - name: Verify bundled kernel & geo databases
+        shell: bash
+        run: |
+          set -e
+          ls -1 src-tauri/binaries/
+          SIDECAR="src-tauri/binaries/sing-box-${{ matrix.target }}"
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then SIDECAR="$SIDECAR.exe"; fi
+          test -f "$SIDECAR"
+          test -f src-tauri/binaries/geoip.db
+          test -f src-tauri/binaries/geosite.db
+          echo "all required files present (no runtime download needed)"
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
