@@ -33,9 +33,17 @@ pub struct KernelInfoDto {
 
 #[tauri::command]
 pub async fn start_core(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    state
-        .transition(CoreStatus::Starting)
-        .map_err(|e| e.to_string())?;
+    // 幂等：启动含下载内核/构建配置等长耗时步骤，期间重复点击或前端自动
+    // 重试会再次进入本函数。只有一个调用完成 Stopped/Error -> Starting，
+    // 其余若已在 Starting（启动进行中）或 Running（已启动）直接成功返回，
+    // 避免抛出 "invalid state transition: Starting -> Starting"
+    if let Err(e) = state.transition(CoreStatus::Starting) {
+        let current = *state.status.read();
+        if matches!(current, CoreStatus::Starting | CoreStatus::Running) {
+            return Ok(());
+        }
+        return Err(e.to_string());
+    }
 
     // 启动失败时统一回滚，避免半成品状态
     if let Err(e) = do_start(&app, &state).await {
