@@ -57,7 +57,9 @@ def inject
     abort "[inject-ios-vpn] 缺少 #{src}（先执行 fetch-kernel.cjs --geo-only）" unless File.exist?(src)
     FileUtils.cp(src, File.join(ext_dir, db))
     ref = group.new_file(File.join(ext_dir, db))
-    ext_target.resources_build_phase.add_file(ref)
+    # PBXResourcesBuildPhase 没有 add_file 方法（CI 实证 NoMethodError），
+    # 构建阶段加文件的正确 API 是 add_file_reference
+    ext_target.resources_build_phase.add_file_reference(ref)
   end
   group.new_file(File.join(ext_dir, 'Info.plist'))
 

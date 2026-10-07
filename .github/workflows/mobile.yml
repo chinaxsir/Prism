@@ -481,7 +481,8 @@ jobs:
           # 含 get-task-allow 的 fallback entitlements（模拟 Xcode 签名），
           # iOS 16+ 因此要求开启“开发者模式”，未开启时 amfid 拒绝执行。
           # 主二进制预签一份不含任何受限 entitlement 的 ad-hoc 签名；
-          # 其余 Mach-O（含刚补入的 Swift dylib）一律无 entitlements ad-hoc 重签。
+          # VPN 扩展二进制（PlugIns/*.appex）带 packet-tunnel-provider
+          # entitlement 重签；其余 Mach-O（含刚补入的 Swift dylib）无 entitlements。
           # TrollStore 安装时仍会用 CoreTrust 漏洞重签整个 app，但不再要求
           # 开发者模式，装完即开。
           while IFS= read -r bin; do
@@ -490,7 +491,17 @@ jobs:
                 --entitlements "$PWD/src-tauri/TrollStore.entitlements.plist" \
                 "$bin"
             else
-              codesign --force --sign - "$bin"
+              case "$bin" in
+                "$APP"/PlugIns/*.appex/*)
+                  # NetworkExtension 隧道提供方二进制必须内嵌
+                  # packet-tunnel-provider entitlement，否则系统拒绝加载扩展；
+                  # TrollStore 安装重签时保留二进制已有签名中的 entitlements
+                  codesign --force --sign - \
+                    --entitlements "$PWD/src-tauri/gen/apple/PrismVPN/PrismVPN.entitlements.plist" \
+                    "$bin" ;;
+                *)
+                  codesign --force --sign - "$bin" ;;
+              esac
             fi
           done < "$LIST"
 
