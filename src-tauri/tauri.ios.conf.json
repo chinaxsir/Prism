@@ -2,9 +2,9 @@
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "bundle": {
     "externalBin": [],
-    "resources": {
-      "binaries/geoip.db": "geoip.db",
-      "binaries/geosite.db": "geosite.db"
-    }
+    "resources": [
+      "binaries/geoip.db",
+      "binaries/geosite.db"
+    ]
   }
 }
