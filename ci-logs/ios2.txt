@@ -1,0 +1,921 @@
+﻿2026-10-06T12:03:07.5075260Z Current runner version: '2.337.0'
+2026-10-06T12:03:07.5113500Z ##[group]Runner Image Provisioner
+2026-10-06T12:03:07.5114070Z Hosted Compute Agent
+2026-10-06T12:03:07.5114450Z Version: 20260828.587
+2026-10-06T12:03:07.5114860Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+2026-10-06T12:03:07.5115330Z Build Date: 2026-08-28T16:44:25Z
+2026-10-06T12:03:07.5115770Z Worker ID: {46d61536-9adc-4cac-a2ba-6474fdb70b3d}
+2026-10-06T12:03:07.5116230Z Azure Region: westus
+2026-10-06T12:03:07.5116590Z ##[endgroup]
+2026-10-06T12:03:07.5117440Z ##[group]Operating System
+2026-10-06T12:03:07.5118000Z macOS
+2026-10-06T12:03:07.5118450Z 15.7.9
+2026-10-06T12:03:07.5118830Z 24G830
+2026-10-06T12:03:07.5119190Z ##[endgroup]
+2026-10-06T12:03:07.5122040Z ##[group]Runner Image
+2026-10-06T12:03:07.5124780Z Image: macos-15-arm64
+2026-10-06T12:03:07.5126430Z Version: 20260907.0337.1
+2026-10-06T12:03:07.5129620Z Included Software: https://github.com/actions/runner-images/blob/macos-15-arm64/20260907.0337/images/macos/macos-15-arm64-Readme.md
+2026-10-06T12:03:07.5135220Z Image Release: https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260907.0337
+2026-10-06T12:03:07.5137190Z ##[endgroup]
+2026-10-06T12:03:07.5138900Z ##[group]GITHUB_TOKEN Permissions
+2026-10-06T12:03:07.5140690Z Contents: read
+2026-10-06T12:03:07.5141140Z Metadata: read
+2026-10-06T12:03:07.5141520Z Packages: read
+2026-10-06T12:03:07.5141900Z ##[endgroup]
+2026-10-06T12:03:07.5144110Z Secret source: Actions
+2026-10-06T12:03:07.5146520Z Cache mode: write
+2026-10-06T12:03:07.5150980Z Prepare workflow directory
+2026-10-06T12:03:07.5526600Z Prepare all required actions
+2026-10-06T12:03:07.5565440Z Getting action download info
+2026-10-06T12:03:08.0583350Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+2026-10-06T12:03:08.6934250Z Download action repository 'actions/setup-node@v4' (SHA:49933ea5288caeca8642d1e84afbd3f7d6820020)
+2026-10-06T12:03:08.9198590Z Download action repository 'dtolnay/rust-toolchain@stable' (SHA:89b12181fb390509a0842a86cc55eeb8eb928c1d)
+2026-10-06T12:03:09.2322000Z Download action repository 'Swatinem/rust-cache@v2' (SHA:6323deb102c322ba6fcbdcafc7e3dddab59af2b6)
+2026-10-06T12:03:09.6858950Z Download action repository 'actions/setup-go@v5' (SHA:40f1582b2485089dde7abd97c1529aa768e1baff)
+2026-10-06T12:03:10.2268830Z Download action repository 'actions/upload-artifact@v4' (SHA:ea165f8d65b6e75b540449e92b4886f43607fa02)
+2026-10-06T12:03:10.6027320Z Complete job name: Build TrollStore IPA
+2026-10-06T12:03:10.7149510Z ##[group]Run actions/checkout@v4
+2026-10-06T12:03:10.7152070Z with:
+2026-10-06T12:03:10.7153150Z   repository: chinaxsir/Prism
+2026-10-06T12:03:10.7161840Z   token: ***
+2026-10-06T12:03:10.7163230Z   ssh-strict: true
+2026-10-06T12:03:10.7163610Z   ssh-user: git
+2026-10-06T12:03:10.7163960Z   persist-credentials: true
+2026-10-06T12:03:10.7164350Z   clean: true
+2026-10-06T12:03:10.7164690Z   sparse-checkout-cone-mode: true
+2026-10-06T12:03:10.7165120Z   fetch-depth: 1
+2026-10-06T12:03:10.7165490Z   fetch-tags: false
+2026-10-06T12:03:10.7165830Z   show-progress: true
+2026-10-06T12:03:10.7166160Z   lfs: false
+2026-10-06T12:03:10.7166450Z   submodules: false
+2026-10-06T12:03:10.7166810Z   set-safe-directory: true
+2026-10-06T12:03:10.7167220Z   allow-unsafe-pr-checkout: false
+2026-10-06T12:03:10.7168910Z ##[endgroup]
+2026-10-06T12:03:11.3864460Z Syncing repository: chinaxsir/Prism
+2026-10-06T12:03:11.3870860Z ##[group]Getting Git version info
+2026-10-06T12:03:11.3874020Z Working directory is '/Users/runner/work/Prism/Prism'
+2026-10-06T12:03:11.3877860Z [command]/opt/homebrew/bin/git version
+2026-10-06T12:03:11.4514350Z git version 2.55.0
+2026-10-06T12:03:11.4528640Z ##[endgroup]
+2026-10-06T12:03:11.4543740Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/920bb7d3-55fc-4727-9d76-e86cfa2117a3/.gitconfig'
+2026-10-06T12:03:11.4549400Z Temporarily overriding HOME='/Users/runner/work/_temp/920bb7d3-55fc-4727-9d76-e86cfa2117a3' before making global git config changes
+2026-10-06T12:03:11.4557090Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-06T12:03:11.4559140Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/Prism/Prism
+2026-10-06T12:03:11.4761940Z Deleting the contents of '/Users/runner/work/Prism/Prism'
+2026-10-06T12:03:11.4771950Z ##[group]Initializing the repository
+2026-10-06T12:03:11.4779030Z [command]/opt/homebrew/bin/git init /Users/runner/work/Prism/Prism
+2026-10-06T12:03:11.5299830Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-10-06T12:03:11.5303380Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-10-06T12:03:11.5308230Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-10-06T12:03:11.5310190Z hint: call:
+2026-10-06T12:03:11.5311470Z hint:
+2026-10-06T12:03:11.5312480Z hint: 	git config --global init.defaultBranch <name>
+2026-10-06T12:03:11.5313770Z hint:
+2026-10-06T12:03:11.5314890Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-10-06T12:03:11.5316560Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-10-06T12:03:11.5339930Z hint:
+2026-10-06T12:03:11.5340840Z hint: 	git branch -m <name>
+2026-10-06T12:03:11.5341720Z hint:
+2026-10-06T12:03:11.5343830Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-10-06T12:03:11.5345600Z Initialized empty Git repository in /Users/runner/work/Prism/Prism/.git/
+2026-10-06T12:03:11.5348480Z [command]/opt/homebrew/bin/git remote add origin https://github.com/chinaxsir/Prism
+2026-10-06T12:03:11.5446250Z ##[endgroup]
+2026-10-06T12:03:11.5447680Z ##[group]Disabling automatic garbage collection
+2026-10-06T12:03:11.5449380Z [command]/opt/homebrew/bin/git config --local gc.auto 0
+2026-10-06T12:03:11.5609180Z ##[endgroup]
+2026-10-06T12:03:11.5610360Z ##[group]Setting up auth
+2026-10-06T12:03:11.5612850Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-06T12:03:11.5758730Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-06T12:03:11.7453590Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-06T12:03:11.7546920Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-06T12:03:11.9589770Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-06T12:03:11.9895990Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-06T12:03:12.2020570Z [command]/opt/homebrew/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-10-06T12:03:12.2034300Z ##[endgroup]
+2026-10-06T12:03:12.2037200Z ##[group]Fetching the repository
+2026-10-06T12:03:12.2042380Z [command]/opt/homebrew/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +efe3879ee19b6e39440f17ca3d1533f7ca40477d:refs/remotes/origin/main
+2026-10-06T12:03:12.8678750Z From https://github.com/chinaxsir/Prism
+2026-10-06T12:03:12.8686000Z  * [new ref]         efe3879ee19b6e39440f17ca3d1533f7ca40477d -> origin/main
+2026-10-06T12:03:12.8717440Z ##[endgroup]
+2026-10-06T12:03:12.8721560Z ##[group]Determining the checkout info
+2026-10-06T12:03:12.8725610Z ##[endgroup]
+2026-10-06T12:03:12.8727950Z [command]/opt/homebrew/bin/git sparse-checkout disable
+2026-10-06T12:03:12.8888370Z [command]/opt/homebrew/bin/git config --local --unset-all extensions.worktreeConfig
+2026-10-06T12:03:12.9016400Z ##[group]Checking out the ref
+2026-10-06T12:03:12.9021940Z [command]/opt/homebrew/bin/git checkout --progress --force -B main refs/remotes/origin/main
+2026-10-06T12:03:12.9830280Z Switched to a new branch 'main'
+2026-10-06T12:03:12.9854230Z branch 'main' set up to track 'origin/main'.
+2026-10-06T12:03:12.9864360Z ##[endgroup]
+2026-10-06T12:03:13.0237970Z [command]/opt/homebrew/bin/git log -1 --format=%H
+2026-10-06T12:03:13.0452450Z efe3879ee19b6e39440f17ca3d1533f7ca40477d
+2026-10-06T12:03:13.1471150Z ##[group]Run actions/setup-node@v4
+2026-10-06T12:03:13.1472830Z with:
+2026-10-06T12:03:13.1474210Z   node-version: 20
+2026-10-06T12:03:13.1475610Z   cache: npm
+2026-10-06T12:03:13.1477100Z   always-auth: false
+2026-10-06T12:03:13.1478560Z   check-latest: false
+2026-10-06T12:03:13.1486370Z   token: ***
+2026-10-06T12:03:13.1488210Z ##[endgroup]
+2026-10-06T12:03:13.7352940Z Attempting to download 20...
+2026-10-06T12:03:13.7765770Z (node:5115) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-10-06T12:03:13.7779070Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-10-06T12:03:14.5256320Z Acquiring 20.20.2 - arm64 from https://github.com/actions/node-versions/releases/download/20.20.2-23521894959/node-20.20.2-darwin-arm64.tar.gz
+2026-10-06T12:03:15.5962500Z Extracting ...
+2026-10-06T12:03:15.6381080Z [command]/usr/bin/tar xz --strip 1 -C /Users/runner/work/_temp/94fcab01-0c39-4957-a28f-9963b43110e4 -f /Users/runner/work/_temp/6b04f4cc-f6a3-4530-bc6f-1cd369393bfa
+2026-10-06T12:03:18.8075320Z Adding to the cache ...
+2026-10-06T12:03:23.4846140Z ##[group]Environment details
+2026-10-06T12:03:24.0248150Z node: v20.20.2
+2026-10-06T12:03:24.0249810Z npm: 10.8.2
+2026-10-06T12:03:24.0250550Z yarn: 1.22.22
+2026-10-06T12:03:24.0251740Z ##[endgroup]
+2026-10-06T12:03:24.0294680Z [command]/Users/runner/hostedtoolcache/node/20.20.2/arm64/bin/npm config get cache
+2026-10-06T12:03:24.2747500Z /Users/runner/.npm
+2026-10-06T12:03:24.6355380Z (node:5115) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+2026-10-06T12:03:24.6461640Z Cache hit for: node-cache-macOS-arm64-npm-f78c9d3f3bf7708a71a2421198bddeaf11c1963f2e47b6149af3002932d7bfec
+2026-10-06T12:03:25.9409910Z Received 0 of 45721361 (0.0%), 0.0 MBs/sec
+2026-10-06T12:03:26.9296530Z Received 41527057 of 45721361 (90.8%), 19.6 MBs/sec
+2026-10-06T12:03:26.9650840Z Received 45721361 of 45721361 (100.0%), 21.2 MBs/sec
+2026-10-06T12:03:26.9668540Z Cache Size: ~44 MB (45721361 B)
+2026-10-06T12:03:26.9713100Z [command]/opt/homebrew/bin/gtar -xf /Users/runner/work/_temp/0ae47c9d-0cf1-424c-b622-4b24458dc1f6/cache.tzst -P -C /Users/runner/work/Prism/Prism --delay-directory-restore --use-compress-program unzstd
+2026-10-06T12:03:27.4027860Z Cache restored successfully
+2026-10-06T12:03:27.4063370Z Cache restored from key: node-cache-macOS-arm64-npm-f78c9d3f3bf7708a71a2421198bddeaf11c1963f2e47b6149af3002932d7bfec
+2026-10-06T12:03:27.4785130Z ##[group]Run dtolnay/rust-toolchain@stable
+2026-10-06T12:03:27.4785670Z with:
+2026-10-06T12:03:27.4786030Z   targets: aarch64-apple-ios,aarch64-apple-ios-sim
+2026-10-06T12:03:27.4786460Z   toolchain: stable
+2026-10-06T12:03:27.4786720Z ##[endgroup]
+2026-10-06T12:03:27.4912260Z ##[start-action display=Parse toolchain version;id=__dtolnay_rust-toolchain.parse]
+2026-10-06T12:03:27.4996630Z ##[group]Run if [[ -z $toolchain ]]; then
+2026-10-06T12:03:27.4997250Z [36;1mif [[ -z $toolchain ]]; then[0m
+2026-10-06T12:03:27.4997900Z [36;1m  # GitHub does not enforce `required: true` inputs itself. https://github.com/actions/runner/issues/1070[0m
+2026-10-06T12:03:27.4998680Z [36;1m  echo "'toolchain' is a required input" >&2[0m
+2026-10-06T12:03:27.4999100Z [36;1m  exit 1[0m
+2026-10-06T12:03:27.4999470Z [36;1melif [[ $toolchain =~ ^stable' '[0-9]+' '(year|month|week|day)s?' 'ago$ ]]; then[0m
+2026-10-06T12:03:27.4999900Z [36;1m  if [[ macOS == macOS ]]; then[0m
+2026-10-06T12:03:27.5048400Z [36;1m    echo "toolchain=1.$((($(date -v-$(sed 's/stable \([0-9]*\) \(.\).*/\1\2/' <<< $toolchain) +%s)/60/60/24-16569)/7/6))" >> $GITHUB_OUTPUT[0m
+2026-10-06T12:03:27.5062280Z [36;1m  else[0m
+2026-10-06T12:03:27.5062630Z [36;1m    echo "toolchain=1.$((($(date --date "${toolchain#stable }" +%s)/60/60/24-16569)/7/6))" >> $GITHUB_OUTPUT[0m
+2026-10-06T12:03:27.5063300Z [36;1m  fi[0m
+2026-10-06T12:03:27.5063760Z [36;1melif [[ $toolchain =~ ^stable' 'minus' '[0-9]+' 'releases?$ ]]; then[0m
+2026-10-06T12:03:27.5064230Z [36;1m  echo "toolchain=1.$((($(date +%s)/60/60/24-16569)/7/6-${toolchain//[^0-9]/}))" >> $GITHUB_OUTPUT[0m
+2026-10-06T12:03:27.5064610Z [36;1melif [[ $toolchain =~ ^1\.[0-9]+$ ]]; then[0m
+2026-10-06T12:03:27.5065040Z [36;1m  echo "toolchain=1.$((i=${toolchain#1.}, c=($(date +%s)/60/60/24-16569)/7/6, i+9*i*(10*i<=c)+90*i*(100*i<=c)))" >> $GITHUB_OUTPUT[0m
+2026-10-06T12:03:27.5065460Z [36;1melse[0m
+2026-10-06T12:03:27.5065690Z [36;1m  echo "toolchain=$toolchain" >> $GITHUB_OUTPUT[0m
+2026-10-06T12:03:27.5065930Z [36;1mfi[0m
+2026-10-06T12:03:27.5163300Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-06T12:03:27.5163610Z env:
+2026-10-06T12:03:27.5163760Z   toolchain: stable
+2026-10-06T12:03:27.5163920Z ##[endgroup]
+2026-10-06T12:03:27.7001880Z ##[end-action id=__dtolnay_rust-toolchain.parse;outcome=success;conclusion=success;duration_ms=208]
+2026-10-06T12:03:27.7009390Z ##[start-action display=Construct rustup command line;id=__dtolnay_rust-toolchain.flags]
+2026-10-06T12:03:27.7035020Z ##[group]Run echo "targets=$(for t in ${targets//,/ }; do echo -n ' --target' $t; done)" >> $GITHUB_OUTPUT
+2026-10-06T12:03:27.7035620Z [36;1mecho "targets=$(for t in ${targets//,/ }; do echo -n ' --target' $t; done)" >> $GITHUB_OUTPUT[0m
+2026-10-06T12:03:27.7036200Z [36;1mecho "components=$(for c in ${components//,/ }; do echo -n ' --component' $c; done)" >> $GITHUB_OUTPUT[0m
+2026-10-06T12:03:27.7036620Z [36;1mecho "downgrade=" >> $GITHUB_OUTPUT[0m
+2026-10-06T12:03:27.7084350Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-06T12:03:27.7084740Z env:
+2026-10-06T12:03:27.7085010Z   targets: aarch64-apple-ios,aarch64-apple-ios-sim
+2026-10-06T12:03:27.7085310Z   components: 
+2026-10-06T12:03:27.7085480Z ##[endgroup]
+2026-10-06T12:03:27.8173660Z ##[end-action id=__dtolnay_rust-toolchain.flags;outcome=success;conclusion=success;duration_ms=116]
+2026-10-06T12:03:27.8176750Z ##[start-action display=Set $CARGO_HOME;id=__dtolnay_rust-toolchain.__run]
+2026-10-06T12:03:27.8198940Z ##[group]Run echo CARGO_HOME=${CARGO_HOME:-"$HOME/.cargo"} >> $GITHUB_ENV
+2026-10-06T12:03:27.8199420Z [36;1mecho CARGO_HOME=${CARGO_HOME:-"$HOME/.cargo"} >> $GITHUB_ENV[0m
+2026-10-06T12:03:27.8267530Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-06T12:03:27.8267870Z ##[endgroup]
+2026-10-06T12:03:27.8839870Z ##[end-action id=__dtolnay_rust-toolchain.__run;outcome=success;conclusion=success;duration_ms=66]
+2026-10-06T12:03:27.8843020Z ##[start-action display=Install rustup if needed;id=__dtolnay_rust-toolchain.__run_2]
+2026-10-06T12:03:27.8873860Z ##[group]Run if ! command -v rustup &>/dev/null; then
+2026-10-06T12:03:27.8874260Z [36;1mif ! command -v rustup &>/dev/null; then[0m
+2026-10-06T12:03:27.8874950Z [36;1m  curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail https://sh.rustup.rs | sh -s -- --default-toolchain none -y[0m
+2026-10-06T12:03:27.8875620Z [36;1m  echo "$CARGO_HOME/bin" >> $GITHUB_PATH[0m
+2026-10-06T12:03:27.8875870Z [36;1mfi[0m
+2026-10-06T12:03:27.8920140Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-06T12:03:27.8936230Z env:
+2026-10-06T12:03:27.8937020Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:03:27.8937590Z ##[endgroup]
+2026-10-06T12:03:27.9440070Z ##[end-action id=__dtolnay_rust-toolchain.__run_2;outcome=success;conclusion=success;duration_ms=59]
+2026-10-06T12:03:27.9442720Z ##[start-action display=Install rustup if needed on windows;id=__dtolnay_rust-toolchain.__run_3]
+2026-10-06T12:03:27.9450240Z ##[end-action id=__dtolnay_rust-toolchain.__run_3;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-06T12:03:27.9460820Z ##[start-action display=rustup toolchain install stable;id=__dtolnay_rust-toolchain.__run_4]
+2026-10-06T12:03:27.9484700Z ##[group]Run log=$(mktemp)
+2026-10-06T12:03:27.9485080Z [36;1mlog=$(mktemp)[0m
+2026-10-06T12:03:27.9485300Z [36;1mtrap 'rm -f "$log"' EXIT[0m
+2026-10-06T12:03:27.9485540Z [36;1mfor attempt in 1 2 3 4 5; do[0m
+2026-10-06T12:03:27.9486680Z [36;1m  if rustup toolchain install stable --target aarch64-apple-ios --target aarch64-apple-ios-sim --profile minimal --no-self-update --force-non-host 2>&1 | tee "$log"; then[0m
+2026-10-06T12:03:27.9487260Z [36;1m    break[0m
+2026-10-06T12:03:27.9487440Z [36;1m  else[0m
+2026-10-06T12:03:27.9487620Z [36;1m    status=$?[0m
+2026-10-06T12:03:27.9487800Z [36;1m  fi[0m
+2026-10-06T12:03:27.9488050Z [36;1m  if [[ $attempt == 5 ]] || ! grep -Fq 'checksum failed for ' "$log" \[0m
+2026-10-06T12:03:27.9488560Z [36;1m      || ! grep -Fq 'this is likely due to an ongoing update of the official release server' "$log"; then[0m
+2026-10-06T12:03:27.9488990Z [36;1m    exit "$status"[0m
+2026-10-06T12:03:27.9489190Z [36;1m  fi[0m
+2026-10-06T12:03:27.9489480Z [36;1m  echo "Retrying rustup toolchain install in 30 seconds (retry $attempt of 4)" >&2[0m
+2026-10-06T12:03:27.9489850Z [36;1m  sleep 30[0m
+2026-10-06T12:03:27.9490040Z [36;1mdone[0m
+2026-10-06T12:03:27.9530760Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-06T12:03:27.9531100Z env:
+2026-10-06T12:03:27.9531290Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:03:27.9531550Z   RUSTUP_PERMIT_COPY_RENAME: 1
+2026-10-06T12:03:27.9531770Z ##[endgroup]
+2026-10-06T12:03:28.5337200Z info: syncing channel updates for stable-aarch64-apple-darwin
+2026-10-06T12:03:28.7173690Z info: latest update on 2026-10-01 for version 1.99.0 (b940084d7 2026-09-28)
+2026-10-06T12:03:28.7335410Z info: removing previous version of component clippy
+2026-10-06T12:03:28.7376110Z info: removing previous version of component rustfmt
+2026-10-06T12:03:28.7414990Z info: removing previous version of component cargo
+2026-10-06T12:03:28.7529170Z info: removing previous version of component rust-std
+2026-10-06T12:03:28.7716000Z info: removing previous version of component rustc
+2026-10-06T12:03:28.7854600Z info: downloading 7 components
+2026-10-06T12:03:41.7009320Z 
+2026-10-06T12:03:41.7973160Z   stable-aarch64-apple-darwin updated - rustc 1.99.0 (b940084d7 2026-09-28) (from rustc 1.98.1 (48a229cea 2026-09-01))
+2026-10-06T12:03:41.7973990Z 
+2026-10-06T12:03:41.7978080Z info: self-update is disabled for this build of rustup
+2026-10-06T12:03:41.7978820Z info: any updates to rustup will need to be fetched with your system package manager
+2026-10-06T12:03:41.8429360Z ##[end-action id=__dtolnay_rust-toolchain.__run_4;outcome=success;conclusion=success;duration_ms=13896]
+2026-10-06T12:03:41.8453410Z ##[start-action display=rustup default stable;id=__dtolnay_rust-toolchain.__run_5]
+2026-10-06T12:03:41.8694470Z ##[group]Run rustup default stable --force-non-host
+2026-10-06T12:03:41.8696870Z [36;1mrustup default stable --force-non-host[0m
+2026-10-06T12:03:41.8791370Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-06T12:03:41.8791810Z env:
+2026-10-06T12:03:41.8792150Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:03:41.8792600Z ##[endgroup]
+2026-10-06T12:03:42.0448510Z info: using existing install for stable-aarch64-apple-darwin
+2026-10-06T12:03:42.0586760Z info: default toolchain set to stable-aarch64-apple-darwin
+2026-10-06T12:03:42.0589150Z 
+2026-10-06T12:03:42.0854300Z   stable-aarch64-apple-darwin unchanged - rustc 1.99.0 (b940084d7 2026-09-28)
+2026-10-06T12:03:42.0883110Z 
+2026-10-06T12:03:42.0905040Z ##[end-action id=__dtolnay_rust-toolchain.__run_5;outcome=success;conclusion=success;duration_ms=245]
+2026-10-06T12:03:42.0907980Z ##[start-action display=Create cachekey;id=__dtolnay_rust-toolchain.rustc-version]
+2026-10-06T12:03:42.1002590Z ##[group]Run DATE=$(rustc +stable --version --verbose | sed -ne 's/^commit-date: \(20[0-9][0-9]\)-\([01][0-9]\)-\([0-3][0-9]\)$/\1\2\3/p')
+2026-10-06T12:03:42.1004170Z [36;1mDATE=$(rustc +stable --version --verbose | sed -ne 's/^commit-date: \(20[0-9][0-9]\)-\([01][0-9]\)-\([0-3][0-9]\)$/\1\2\3/p')[0m
+2026-10-06T12:03:42.1004690Z [36;1mHASH=$(rustc +stable --version --verbose | sed -ne 's/^commit-hash: //p')[0m
+2026-10-06T12:03:42.1005230Z [36;1mecho "cachekey=$(echo $DATE$HASH | head -c12)" >> $GITHUB_OUTPUT[0m
+2026-10-06T12:03:42.1052910Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-06T12:03:42.1053440Z env:
+2026-10-06T12:03:42.1053760Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:03:42.1054080Z ##[endgroup]
+2026-10-06T12:03:42.2824640Z ##[end-action id=__dtolnay_rust-toolchain.rustc-version;outcome=success;conclusion=success;duration_ms=191]
+2026-10-06T12:03:42.2845470Z ##[start-action display=Disable incremental compilation;id=__dtolnay_rust-toolchain.__run_6]
+2026-10-06T12:03:42.2889180Z ##[group]Run if [ -z "${CARGO_INCREMENTAL+set}" ]; then
+2026-10-06T12:03:42.2889650Z [36;1mif [ -z "${CARGO_INCREMENTAL+set}" ]; then[0m
+2026-10-06T12:03:42.2890020Z [36;1m  echo CARGO_INCREMENTAL=0 >> $GITHUB_ENV[0m
+2026-10-06T12:03:42.2890470Z [36;1mfi[0m
+2026-10-06T12:03:42.2947010Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-06T12:03:42.2947660Z env:
+2026-10-06T12:03:42.2948200Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:03:42.2948620Z ##[endgroup]
+2026-10-06T12:03:42.3547730Z ##[end-action id=__dtolnay_rust-toolchain.__run_6;outcome=success;conclusion=success;duration_ms=70]
+2026-10-06T12:03:42.3550260Z ##[start-action display=Enable colors in Cargo output;id=__dtolnay_rust-toolchain.__run_7]
+2026-10-06T12:03:42.3571320Z ##[group]Run if [ -z "${CARGO_TERM_COLOR+set}" ]; then
+2026-10-06T12:03:42.3571660Z [36;1mif [ -z "${CARGO_TERM_COLOR+set}" ]; then[0m
+2026-10-06T12:03:42.3571970Z [36;1m  echo CARGO_TERM_COLOR=always >> $GITHUB_ENV[0m
+2026-10-06T12:03:42.3572220Z [36;1mfi[0m
+2026-10-06T12:03:42.3645660Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-06T12:03:42.3646020Z env:
+2026-10-06T12:03:42.3646220Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:03:42.3646430Z   CARGO_INCREMENTAL: 0
+2026-10-06T12:03:42.3646650Z ##[endgroup]
+2026-10-06T12:03:42.4153950Z ##[end-action id=__dtolnay_rust-toolchain.__run_7;outcome=success;conclusion=success;duration_ms=60]
+2026-10-06T12:03:42.4156590Z ##[start-action display=Enable Cargo sparse registry;id=__dtolnay_rust-toolchain.__run_8]
+2026-10-06T12:03:42.4184340Z ##[group]Run # implemented in 1.66, stabilized in 1.68, made default in 1.70
+2026-10-06T12:03:42.4184830Z [36;1m# implemented in 1.66, stabilized in 1.68, made default in 1.70[0m
+2026-10-06T12:03:42.4185410Z [36;1mif [ -z "${CARGO_REGISTRIES_CRATES_IO_PROTOCOL+set}" -o -f "/Users/runner/work/_temp"/.implicit_cargo_registries_crates_io_protocol ]; then[0m
+2026-10-06T12:03:42.4186530Z [36;1m  if rustc +stable --version --verbose | grep -q '^release: 1\.6[89]\.'; then[0m
+2026-10-06T12:03:42.4187080Z [36;1m    touch "/Users/runner/work/_temp"/.implicit_cargo_registries_crates_io_protocol || true[0m
+2026-10-06T12:03:42.4187860Z [36;1m    echo CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse >> $GITHUB_ENV[0m
+2026-10-06T12:03:42.4189780Z [36;1m  elif rustc +stable --version --verbose | grep -q '^release: 1\.6[67]\.'; then[0m
+2026-10-06T12:03:42.4204830Z [36;1m    touch "/Users/runner/work/_temp"/.implicit_cargo_registries_crates_io_protocol || true[0m
+2026-10-06T12:03:42.4205320Z [36;1m    echo CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git >> $GITHUB_ENV[0m
+2026-10-06T12:03:42.4205610Z [36;1m  fi[0m
+2026-10-06T12:03:42.4205790Z [36;1mfi[0m
+2026-10-06T12:03:42.4245370Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-06T12:03:42.4245660Z env:
+2026-10-06T12:03:42.4245820Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:03:42.4246040Z   CARGO_INCREMENTAL: 0
+2026-10-06T12:03:42.4246250Z   CARGO_TERM_COLOR: always
+2026-10-06T12:03:42.4246500Z ##[endgroup]
+2026-10-06T12:03:42.5584990Z ##[end-action id=__dtolnay_rust-toolchain.__run_8;outcome=success;conclusion=success;duration_ms=142]
+2026-10-06T12:03:42.5588380Z ##[start-action display=Work around spurious network errors in curl 8.0;id=__dtolnay_rust-toolchain.__run_9]
+2026-10-06T12:03:42.5610470Z ##[group]Run # https://rust-lang.zulipchat.com/#narrow/stream/246057-t-cargo/topic/timeout.20investigation
+2026-10-06T12:03:42.5611290Z [36;1m# https://rust-lang.zulipchat.com/#narrow/stream/246057-t-cargo/topic/timeout.20investigation[0m
+2026-10-06T12:03:42.5611890Z [36;1mif rustc +stable --version --verbose | grep -q '^release: 1\.7[01]\.'; then[0m
+2026-10-06T12:03:42.5615880Z [36;1m  echo CARGO_HTTP_MULTIPLEXING=false >> $GITHUB_ENV[0m
+2026-10-06T12:03:42.5616270Z [36;1mfi[0m
+2026-10-06T12:03:42.5683140Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-06T12:03:42.5683410Z env:
+2026-10-06T12:03:42.5683600Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:03:42.5683830Z   CARGO_INCREMENTAL: 0
+2026-10-06T12:03:42.5684040Z   CARGO_TERM_COLOR: always
+2026-10-06T12:03:42.5684220Z ##[endgroup]
+2026-10-06T12:03:42.6470580Z ##[end-action id=__dtolnay_rust-toolchain.__run_9;outcome=success;conclusion=success;duration_ms=88]
+2026-10-06T12:03:42.6474580Z ##[start-action display=rustc +stable --version --verbose;id=__dtolnay_rust-toolchain.__run_10]
+2026-10-06T12:03:42.6497980Z ##[group]Run rustc +stable --version --verbose
+2026-10-06T12:03:42.6498820Z [36;1mrustc +stable --version --verbose[0m
+2026-10-06T12:03:42.6537570Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-06T12:03:42.6537850Z env:
+2026-10-06T12:03:42.6538040Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:03:42.6538260Z   CARGO_INCREMENTAL: 0
+2026-10-06T12:03:42.6538460Z   CARGO_TERM_COLOR: always
+2026-10-06T12:03:42.6538660Z ##[endgroup]
+2026-10-06T12:03:42.7537720Z rustc 1.99.0 (b940084d7 2026-09-28)
+2026-10-06T12:03:42.7595670Z binary: rustc
+2026-10-06T12:03:42.7606000Z commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4
+2026-10-06T12:03:42.7606580Z commit-date: 2026-09-28
+2026-10-06T12:03:42.7607130Z host: aarch64-apple-darwin
+2026-10-06T12:03:42.7607560Z release: 1.99.0
+2026-10-06T12:03:42.7607970Z LLVM version: 23.1.1
+2026-10-06T12:03:42.7614000Z ##[end-action id=__dtolnay_rust-toolchain.__run_10;outcome=success;conclusion=success;duration_ms=113]
+2026-10-06T12:03:42.7821920Z ##[group]Run Swatinem/rust-cache@v2
+2026-10-06T12:03:42.7823050Z with:
+2026-10-06T12:03:42.7823540Z   workspaces: src-tauri
+2026-10-06T12:03:42.7824030Z   prefix-key: v0-rust
+2026-10-06T12:03:42.7824560Z   add-job-id-key: true
+2026-10-06T12:03:42.7825090Z   add-rust-environment-hash-key: true
+2026-10-06T12:03:42.7825710Z   cache-targets: true
+2026-10-06T12:03:42.7826190Z   cache-all-crates: false
+2026-10-06T12:03:42.7826790Z   cache-workspace-crates: false
+2026-10-06T12:03:42.7827430Z   save-if: true
+2026-10-06T12:03:42.7827930Z   cache-provider: github
+2026-10-06T12:03:42.7828430Z   cache-bin: true
+2026-10-06T12:03:42.7828890Z   lookup-only: false
+2026-10-06T12:03:42.7829350Z   cmd-format: {0}
+2026-10-06T12:03:42.7829940Z env:
+2026-10-06T12:03:42.7830430Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:03:42.7831000Z   CARGO_INCREMENTAL: 0
+2026-10-06T12:03:42.7831550Z   CARGO_TERM_COLOR: always
+2026-10-06T12:03:42.7832060Z ##[endgroup]
+2026-10-06T12:03:43.7473520Z ##[group]Cache Configuration
+2026-10-06T12:03:43.7474300Z Cache Provider:
+2026-10-06T12:03:43.7474500Z     github
+2026-10-06T12:03:43.7474680Z Workspaces:
+2026-10-06T12:03:43.7475040Z     /Users/runner/work/Prism/Prism/src-tauri
+2026-10-06T12:03:43.7475320Z Cache Paths:
+2026-10-06T12:03:43.7475500Z     /Users/runner/.cargo/bin
+2026-10-06T12:03:43.7475790Z     /Users/runner/.cargo/.crates.toml
+2026-10-06T12:03:43.7476130Z     /Users/runner/.cargo/.crates2.json
+2026-10-06T12:03:43.7476520Z     /Users/runner/.cargo/registry
+2026-10-06T12:03:43.7476810Z     /Users/runner/.cargo/git
+2026-10-06T12:03:43.7477190Z     /Users/runner/work/Prism/Prism/src-tauri/target
+2026-10-06T12:03:43.7477470Z Restore Key:
+2026-10-06T12:03:43.7477710Z     v0-rust-ios-Darwin-arm64-e59a64c1
+2026-10-06T12:03:43.7478710Z Cache Key:
+2026-10-06T12:03:43.7478940Z     v0-rust-ios-Darwin-arm64-e59a64c1-1667acec
+2026-10-06T12:03:43.7479260Z .. Prefix:
+2026-10-06T12:03:43.7479540Z   - v0-rust-ios-Darwin-arm64
+2026-10-06T12:03:43.7479820Z .. Environment considered:
+2026-10-06T12:03:43.7480060Z   - Rust Versions:
+2026-10-06T12:03:43.7480410Z     - 1.99.0 aarch64-apple-darwin b940084d7eb6a299eb4bfeb8e34901bc051e7ac4
+2026-10-06T12:03:43.7480790Z   - CARGO_HOME
+2026-10-06T12:03:43.7481000Z   - CARGO_INCREMENTAL
+2026-10-06T12:03:43.7481220Z   - CARGO_TERM_COLOR
+2026-10-06T12:03:43.7481420Z .. Lockfiles considered:
+2026-10-06T12:03:43.7481710Z   - /Users/runner/work/Prism/Prism/src-tauri/Cargo.lock
+2026-10-06T12:03:43.7482120Z   - /Users/runner/work/Prism/Prism/src-tauri/Cargo.toml
+2026-10-06T12:03:43.7482610Z ##[endgroup]
+2026-10-06T12:03:43.7482740Z 
+2026-10-06T12:03:43.7482920Z ... Restoring cache ...
+2026-10-06T12:03:44.1412070Z Cache hit for: v0-rust-ios-Darwin-arm64-e59a64c1-1667acec
+2026-10-06T12:03:45.3949140Z Received 0 of 666079168 (0.0%), 0.0 MBs/sec
+2026-10-06T12:03:46.3954460Z Received 62914560 of 666079168 (9.4%), 29.9 MBs/sec
+2026-10-06T12:03:47.4068780Z Received 134217728 of 666079168 (20.2%), 42.5 MBs/sec
+2026-10-06T12:03:48.4009810Z Received 201326592 of 666079168 (30.2%), 47.8 MBs/sec
+2026-10-06T12:03:49.4081910Z Received 268435456 of 666079168 (40.3%), 51.0 MBs/sec
+2026-10-06T12:03:50.4117380Z Received 352321536 of 666079168 (52.9%), 55.8 MBs/sec
+2026-10-06T12:03:51.4102000Z Received 402653184 of 666079168 (60.5%), 54.7 MBs/sec
+2026-10-06T12:03:52.4112890Z Received 494927872 of 666079168 (74.3%), 58.8 MBs/sec
+2026-10-06T12:03:53.4203190Z Received 545259520 of 666079168 (81.9%), 57.6 MBs/sec
+2026-10-06T12:03:54.4127170Z Received 637534208 of 666079168 (95.7%), 60.7 MBs/sec
+2026-10-06T12:03:54.8588650Z Received 666079168 of 666079168 (100.0%), 60.7 MBs/sec
+2026-10-06T12:03:54.8702630Z Cache Size: ~635 MB (666079168 B)
+2026-10-06T12:03:54.8803640Z [command]/opt/homebrew/bin/gtar -xf /Users/runner/work/_temp/ff36dde9-8675-4a61-8c70-d427dd6699ee/cache.tzst -P -C /Users/runner/work/Prism/Prism --delay-directory-restore --use-compress-program unzstd
+2026-10-06T12:04:05.5891660Z Cache restored successfully
+2026-10-06T12:04:05.6376160Z Restored from cache key "v0-rust-ios-Darwin-arm64-e59a64c1-1667acec" full match: true.
+2026-10-06T12:04:05.6720170Z ##[group]Run sudo xcode-select -switch /Applications/Xcode.app
+2026-10-06T12:04:05.6720590Z [36;1msudo xcode-select -switch /Applications/Xcode.app[0m
+2026-10-06T12:04:05.6790290Z shell: /bin/bash -e {0}
+2026-10-06T12:04:05.6790630Z env:
+2026-10-06T12:04:05.6790970Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:04:05.6791440Z   CARGO_INCREMENTAL: 0
+2026-10-06T12:04:05.6791820Z   CARGO_TERM_COLOR: always
+2026-10-06T12:04:05.6792090Z   CACHE_ON_FAILURE: false
+2026-10-06T12:04:05.6792410Z ##[endgroup]
+2026-10-06T12:04:05.8875690Z ##[group]Run actions/setup-go@v5
+2026-10-06T12:04:05.8876210Z with:
+2026-10-06T12:04:05.8876410Z   go-version: 1.23
+2026-10-06T12:04:05.8876940Z   check-latest: false
+2026-10-06T12:04:05.8880470Z   token: ***
+2026-10-06T12:04:05.8880730Z   cache: true
+2026-10-06T12:04:05.8880970Z env:
+2026-10-06T12:04:05.8881200Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:04:05.8881550Z   CARGO_INCREMENTAL: 0
+2026-10-06T12:04:05.8881870Z   CARGO_TERM_COLOR: always
+2026-10-06T12:04:05.8882130Z   CACHE_ON_FAILURE: false
+2026-10-06T12:04:05.8882480Z ##[endgroup]
+2026-10-06T12:04:06.2324350Z Setup go version spec 1.23
+2026-10-06T12:04:06.2750040Z Attempting to download 1.23...
+2026-10-06T12:04:06.2904940Z (node:6223) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-10-06T12:04:06.2905960Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-10-06T12:04:06.8888060Z matching 1.23...
+2026-10-06T12:04:06.8907480Z Acquiring 1.23.12 from https://github.com/actions/go-versions/releases/download/1.23.12-16792118003/go-1.23.12-darwin-arm64.tar.gz
+2026-10-06T12:04:07.7647800Z Extracting Go...
+2026-10-06T12:04:07.7650100Z [command]/usr/bin/tar xz -C /Users/runner/work/_temp/97747c7e-280a-410c-97d8-6ef0348e1b3c -f /Users/runner/work/_temp/1fa657ec-81cb-4dde-8eb4-628d6d67c2c9
+2026-10-06T12:04:12.1188420Z Successfully extracted go to /Users/runner/work/_temp/97747c7e-280a-410c-97d8-6ef0348e1b3c
+2026-10-06T12:04:12.1192470Z Adding to the cache ...
+2026-10-06T12:04:19.9768840Z Successfully cached go to /Users/runner/hostedtoolcache/go/1.23.12/arm64
+2026-10-06T12:04:19.9769830Z Added go to the path
+2026-10-06T12:04:19.9770250Z Successfully set up Go version 1.23
+2026-10-06T12:04:20.0877890Z [command]/Users/runner/hostedtoolcache/go/1.23.12/arm64/bin/go env GOMODCACHE
+2026-10-06T12:04:20.0892330Z [command]/Users/runner/hostedtoolcache/go/1.23.12/arm64/bin/go env GOCACHE
+2026-10-06T12:04:20.0983850Z /Users/runner/go/pkg/mod
+2026-10-06T12:04:20.0992220Z /Users/runner/Library/Caches/go-build
+2026-10-06T12:04:20.1040130Z ##[warning]Restore cache failed: Dependencies file is not found in /Users/runner/work/Prism/Prism. Supported file pattern: go.sum
+2026-10-06T12:04:20.1094710Z go version go1.23.12 darwin/arm64
+2026-10-06T12:04:20.1095650Z 
+2026-10-06T12:04:20.1096760Z ##[group]go env
+2026-10-06T12:04:23.8091480Z GO111MODULE=''
+2026-10-06T12:04:23.8100540Z GOARCH='arm64'
+2026-10-06T12:04:23.8101140Z GOBIN=''
+2026-10-06T12:04:23.8101900Z GOCACHE='/Users/runner/Library/Caches/go-build'
+2026-10-06T12:04:23.8102810Z GOENV='/Users/runner/Library/Application Support/go/env'
+2026-10-06T12:04:23.8103410Z GOEXE=''
+2026-10-06T12:04:23.8103770Z GOEXPERIMENT=''
+2026-10-06T12:04:23.8104240Z GOFLAGS=''
+2026-10-06T12:04:23.8105440Z GOHOSTARCH='arm64'
+2026-10-06T12:04:23.8105970Z GOHOSTOS='darwin'
+2026-10-06T12:04:23.8106400Z GOINSECURE=''
+2026-10-06T12:04:23.8107080Z GOMODCACHE='/Users/runner/go/pkg/mod'
+2026-10-06T12:04:23.8107630Z GONOPROXY=''
+2026-10-06T12:04:23.8107890Z GONOSUMDB=''
+2026-10-06T12:04:23.8108220Z GOOS='darwin'
+2026-10-06T12:04:23.8108590Z GOPATH='/Users/runner/go'
+2026-10-06T12:04:23.8108850Z GOPRIVATE=''
+2026-10-06T12:04:23.8109310Z GOPROXY='https://proxy.golang.org,direct'
+2026-10-06T12:04:23.8109740Z GOROOT='/Users/runner/hostedtoolcache/go/1.23.12/arm64'
+2026-10-06T12:04:23.8110130Z GOSUMDB='sum.golang.org'
+2026-10-06T12:04:23.8110450Z GOTMPDIR=''
+2026-10-06T12:04:23.8110860Z GOTOOLCHAIN='auto'
+2026-10-06T12:04:23.8111390Z GOTOOLDIR='/Users/runner/hostedtoolcache/go/1.23.12/arm64/pkg/tool/darwin_arm64'
+2026-10-06T12:04:23.8112120Z GOVCS=''
+2026-10-06T12:04:23.8112510Z GOVERSION='go1.23.12'
+2026-10-06T12:04:23.8112750Z GODEBUG=''
+2026-10-06T12:04:23.8113070Z GOTELEMETRY='local'
+2026-10-06T12:04:23.8113570Z GOTELEMETRYDIR='/Users/runner/Library/Application Support/go/telemetry'
+2026-10-06T12:04:23.8114000Z GCCGO='gccgo'
+2026-10-06T12:04:23.8114220Z GOARM64='v8.0'
+2026-10-06T12:04:23.8114480Z AR='ar'
+2026-10-06T12:04:23.8115630Z CC='clang'
+2026-10-06T12:04:23.8115850Z CXX='clang++'
+2026-10-06T12:04:23.8116090Z CGO_ENABLED='1'
+2026-10-06T12:04:23.8116440Z GOMOD='/dev/null'
+2026-10-06T12:04:23.8116720Z GOWORK=''
+2026-10-06T12:04:23.8116950Z CGO_CFLAGS='-O2 -g'
+2026-10-06T12:04:23.8117220Z CGO_CPPFLAGS=''
+2026-10-06T12:04:23.8117520Z CGO_CXXFLAGS='-O2 -g'
+2026-10-06T12:04:23.8117750Z CGO_FFLAGS='-O2 -g'
+2026-10-06T12:04:23.8118040Z CGO_LDFLAGS='-O2 -g'
+2026-10-06T12:04:23.8118400Z PKG_CONFIG='pkg-config'
+2026-10-06T12:04:23.8119880Z GOGCCFLAGS='-fPIC -arch arm64 -pthread -fno-caret-diagnostics -Qunused-arguments -fmessage-length=0 -ffile-prefix-map=/var/folders/nj/vtw8zd2j31d1gdrtntc5y4600000gn/T/go-build1335230572=/tmp/go-build -gno-record-gcc-switches -fno-common'
+2026-10-06T12:04:23.8120810Z 
+2026-10-06T12:04:23.8121150Z ##[endgroup]
+2026-10-06T12:04:23.8499530Z ##[group]Run node scripts/fetch-kernel.cjs --geo-only
+2026-10-06T12:04:23.8500010Z [36;1mnode scripts/fetch-kernel.cjs --geo-only[0m
+2026-10-06T12:04:23.8917560Z shell: /bin/bash -e {0}
+2026-10-06T12:04:23.8917880Z env:
+2026-10-06T12:04:23.8919360Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:04:23.8920150Z   CARGO_INCREMENTAL: 0
+2026-10-06T12:04:23.8921020Z   CARGO_TERM_COLOR: always
+2026-10-06T12:04:23.8921520Z   CACHE_ON_FAILURE: false
+2026-10-06T12:04:23.8921850Z ##[endgroup]
+2026-10-06T12:04:24.5773350Z [fetch-kernel] downloading: https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db
+2026-10-06T12:04:25.2227330Z [fetch-kernel] 数据库就绪: src-tauri/binaries/geoip.db
+2026-10-06T12:04:25.2228570Z [fetch-kernel] downloading: https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db
+2026-10-06T12:04:25.6111670Z [fetch-kernel] 数据库就绪: src-tauri/binaries/geosite.db
+2026-10-06T12:04:25.6245880Z ##[group]Run set -e
+2026-10-06T12:04:25.6247160Z [36;1mset -e[0m
+2026-10-06T12:04:25.6247910Z [36;1mgo mod tidy[0m
+2026-10-06T12:04:25.6248600Z [36;1mSDK=$(xcrun -sdk iphoneos --show-sdk-path)[0m
+2026-10-06T12:04:25.6249610Z [36;1mCC="$(xcrun -sdk iphoneos --find clang)" \[0m
+2026-10-06T12:04:25.6250580Z [36;1mCGO_ENABLED=1 GOOS=ios GOARCH=arm64 \[0m
+2026-10-06T12:04:25.6251600Z [36;1mCGO_CFLAGS="-isysroot $SDK -arch arm64 -miphoneos-version-min=13.0" \[0m
+2026-10-06T12:04:25.6252980Z [36;1mCGO_LDFLAGS="-isysroot $SDK -arch arm64" \[0m
+2026-10-06T12:04:25.6253870Z [36;1mgo build -buildmode=c-archive \[0m
+2026-10-06T12:04:25.6256060Z [36;1m  -tags "with_gvisor,with_quic,with_grpc,with_wireguard,with_ech,with_utls,with_clash_api" \[0m
+2026-10-06T12:04:25.6256610Z [36;1m  -trimpath -ldflags="-s -w" \[0m
+2026-10-06T12:04:25.6256980Z [36;1m  -o libprismkernel.a .[0m
+2026-10-06T12:04:25.6257390Z [36;1mls -lh libprismkernel.a libprismkernel.h[0m
+2026-10-06T12:04:25.6301630Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-06T12:04:25.6302080Z env:
+2026-10-06T12:04:25.6302410Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:04:25.6330490Z   CARGO_INCREMENTAL: 0
+2026-10-06T12:04:25.6330920Z   CARGO_TERM_COLOR: always
+2026-10-06T12:04:25.6331260Z   CACHE_ON_FAILURE: false
+2026-10-06T12:04:25.6331590Z ##[endgroup]
+2026-10-06T12:04:25.7487200Z go: downloading github.com/sagernet/sing-box v1.11.3
+2026-10-06T12:04:27.0434360Z go: downloading github.com/sagernet/sing v0.6.1
+2026-10-06T12:04:27.2633690Z go: downloading golang.org/x/mod v0.20.0
+2026-10-06T12:04:27.2635000Z go: downloading github.com/logrusorgru/aurora v2.0.3+incompatible
+2026-10-06T12:04:27.2684160Z go: downloading github.com/miekg/dns v1.1.63
+2026-10-06T12:04:27.3290520Z go: downloading github.com/sagernet/sing-dns v0.4.0
+2026-10-06T12:04:27.3452700Z go: downloading go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
+2026-10-06T12:04:27.3981950Z go: downloading github.com/go-chi/chi/v5 v5.2.1
+2026-10-06T12:04:27.5285560Z go: downloading github.com/stretchr/testify v1.10.0
+2026-10-06T12:04:27.5449180Z go: downloading golang.org/x/net v0.34.0
+2026-10-06T12:04:27.6622500Z go: downloading golang.org/x/sys v0.30.0
+2026-10-06T12:04:28.1236510Z go: downloading golang.org/x/tools v0.24.0
+2026-10-06T12:04:28.1245500Z go: downloading golang.org/x/sync v0.10.0
+2026-10-06T12:04:28.2756510Z go: downloading github.com/sagernet/sing-tun v0.6.1
+2026-10-06T12:04:28.2793480Z go: downloading github.com/metacubex/tfo-go v0.0.0-20241231083714-66613d49c422
+2026-10-06T12:04:28.3340110Z go: downloading github.com/caddyserver/certmagic v0.20.0
+2026-10-06T12:04:28.4083580Z go: downloading github.com/cloudflare/circl v1.3.7
+2026-10-06T12:04:28.9111860Z go: downloading github.com/libdns/alidns v1.0.3
+2026-10-06T12:04:28.9117070Z go: downloading github.com/libdns/cloudflare v0.1.1
+2026-10-06T12:04:28.9333450Z go: downloading github.com/mholt/acmez v1.2.0
+2026-10-06T12:04:28.9346030Z go: downloading github.com/sagernet/cloudflare-tls v0.0.0-20231208171750-a4483c1b7cd1
+2026-10-06T12:04:28.9731650Z go: downloading github.com/sagernet/fswatch v0.1.1
+2026-10-06T12:04:28.9784790Z go: downloading github.com/sagernet/quic-go v0.49.0-beta.1
+2026-10-06T12:04:29.0272710Z go: downloading github.com/sagernet/reality v0.0.0-20230406110435-ee17307e7691
+2026-10-06T12:04:29.0986480Z go: downloading github.com/sagernet/sing-quic v0.4.0
+2026-10-06T12:04:29.1925910Z go: downloading github.com/sagernet/utls v1.6.7
+2026-10-06T12:04:29.2242000Z go: downloading go.uber.org/zap v1.27.0
+2026-10-06T12:04:29.2857910Z go: downloading golang.org/x/crypto v0.32.0
+2026-10-06T12:04:29.3330530Z go: downloading github.com/sagernet/bbolt v0.0.0-20231014093535-ea5cb2fe9f0a
+2026-10-06T12:04:29.3665590Z go: downloading github.com/sagernet/sing-mux v0.3.1
+2026-10-06T12:04:29.3737630Z go: downloading github.com/sagernet/sing-vmess v0.2.0
+2026-10-06T12:04:29.3955960Z go: downloading golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
+2026-10-06T12:04:29.4321850Z go: downloading github.com/go-chi/render v1.0.3
+2026-10-06T12:04:29.4790860Z go: downloading github.com/gofrs/uuid/v5 v5.3.0
+2026-10-06T12:04:29.5220620Z go: downloading github.com/sagernet/cors v1.2.1
+2026-10-06T12:04:29.5346860Z go: downloading github.com/sagernet/ws v0.0.0-20231204124109-acfe8907c854
+2026-10-06T12:04:29.6010690Z go: downloading google.golang.org/grpc v1.63.2
+2026-10-06T12:04:30.9572350Z go: downloading google.golang.org/protobuf v1.33.0
+2026-10-06T12:04:30.9596260Z go: downloading github.com/sagernet/sing-shadowsocks v0.2.7
+2026-10-06T12:04:31.0581390Z go: downloading github.com/sagernet/sing-shadowsocks2 v0.2.0
+2026-10-06T12:04:31.1459280Z go: downloading github.com/sagernet/sing-shadowtls v0.2.0
+2026-10-06T12:04:31.3357060Z go: downloading github.com/cretz/bine v0.2.0
+2026-10-06T12:04:31.4653310Z go: downloading github.com/sagernet/wireguard-go v0.0.1-beta.5
+2026-10-06T12:04:31.5238630Z go: downloading github.com/insomniacslk/dhcp v0.0.0-20250109001534-8abf58130905
+2026-10-06T12:04:31.5952400Z go: downloading github.com/oschwald/maxminddb-golang v1.12.0
+2026-10-06T12:04:31.5982230Z go: downloading github.com/klauspost/cpuid/v2 v2.2.5
+2026-10-06T12:04:31.6276480Z go: downloading github.com/libdns/libdns v0.2.2
+2026-10-06T12:04:31.6580990Z go: downloading github.com/zeebo/blake3 v0.2.3
+2026-10-06T12:04:31.6586410Z go: downloading github.com/sagernet/gvisor v0.0.0-20241123041152-536d05261cff
+2026-10-06T12:04:31.9241640Z go: downloading github.com/sagernet/netlink v0.0.0-20240612041022-b9a21c07ac6a
+2026-10-06T12:04:31.9242690Z go: downloading github.com/sagernet/nftables v0.3.0-beta.4
+2026-10-06T12:04:31.9773300Z go: downloading github.com/fsnotify/fsnotify v1.7.0
+2026-10-06T12:04:31.9844200Z go: downloading github.com/quic-go/qpack v0.4.0
+2026-10-06T12:04:32.0152260Z go: downloading github.com/andybalholm/brotli v1.0.6
+2026-10-06T12:04:32.0776930Z go: downloading github.com/klauspost/compress v1.17.4
+2026-10-06T12:04:32.1213240Z go: downloading go.uber.org/multierr v1.11.0
+2026-10-06T12:04:32.1461740Z go: downloading gopkg.in/yaml.v3 v3.0.1
+2026-10-06T12:04:32.1467670Z go: downloading github.com/hashicorp/yamux v0.1.2
+2026-10-06T12:04:32.1906140Z go: downloading github.com/sagernet/smux v0.0.0-20231208180855-7041f6ea79e7
+2026-10-06T12:04:32.1979470Z go: downloading github.com/ajg/form v1.5.1
+2026-10-06T12:04:32.2163620Z go: downloading github.com/gobwas/httphead v0.1.0
+2026-10-06T12:04:32.2202960Z go: downloading github.com/gobwas/pool v0.2.1
+2026-10-06T12:04:32.2547990Z go: downloading github.com/google/go-cmp v0.6.0
+2026-10-06T12:04:32.2549850Z go: downloading google.golang.org/genproto/googleapis/rpc v0.0.0-20240227224415-6ceb2ff114de
+2026-10-06T12:04:32.3274830Z go: downloading lukechampine.com/blake3 v1.3.0
+2026-10-06T12:04:32.4018370Z go: downloading github.com/davecgh/go-spew v1.1.1
+2026-10-06T12:04:32.4513280Z go: downloading github.com/pmezard/go-difflib v1.0.0
+2026-10-06T12:04:32.4755470Z go: downloading github.com/u-root/uio v0.0.0-20230220225925-ffce2a382923
+2026-10-06T12:04:32.5355170Z go: downloading golang.org/x/text v0.21.0
+2026-10-06T12:04:33.2413510Z go: downloading github.com/google/btree v1.1.3
+2026-10-06T12:04:33.2420180Z go: downloading golang.org/x/time v0.7.0
+2026-10-06T12:04:33.2420730Z go: downloading github.com/mdlayher/netlink v1.7.2
+2026-10-06T12:04:33.2730220Z go: downloading github.com/go-ole/go-ole v1.3.0
+2026-10-06T12:04:33.2867850Z go: downloading github.com/vishvananda/netns v0.0.4
+2026-10-06T12:04:33.3276120Z go: downloading github.com/onsi/ginkgo/v2 v2.9.7
+2026-10-06T12:04:33.3342110Z go: downloading github.com/quic-go/qtls-go1-20 v0.4.1
+2026-10-06T12:04:33.5246710Z go: downloading golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
+2026-10-06T12:04:33.5430500Z go: downloading github.com/josharian/native v1.1.0
+2026-10-06T12:04:33.5651360Z go: downloading github.com/pierrec/lz4/v4 v4.1.14
+2026-10-06T12:04:33.5748360Z go: downloading github.com/mdlayher/socket v0.4.1
+2026-10-06T12:04:33.5853560Z go: downloading github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572
+2026-10-06T12:04:33.6066220Z go: downloading github.com/google/pprof v0.0.0-20231101202521-4ca4178f5c7a
+2026-10-06T12:04:35.2700700Z go: downloading go.uber.org/goleak v1.3.0
+2026-10-06T12:04:35.3067980Z go: downloading github.com/zeebo/assert v1.1.0
+2026-10-06T12:04:35.3072120Z go: downloading github.com/onsi/gomega v1.27.7
+2026-10-06T12:04:35.3081460Z go: downloading golang.org/x/term v0.28.0
+2026-10-06T12:04:35.3149050Z go: downloading github.com/go-logr/logr v1.2.4
+2026-10-06T12:04:35.3999830Z go: downloading github.com/zeebo/pcg v1.0.1
+2026-10-06T12:04:35.4007630Z go: downloading github.com/golang/protobuf v1.5.4
+2026-10-06T12:05:15.1521470Z -rw-r--r--  1 runner  staff    40M Oct  6 12:05 libprismkernel.a
+2026-10-06T12:05:15.1523890Z -rw-r--r--  1 runner  staff   1.9K Oct  6 12:05 libprismkernel.h
+2026-10-06T12:05:15.1709750Z ##[group]Run npm ci
+2026-10-06T12:05:15.1710370Z [36;1mnpm ci[0m
+2026-10-06T12:05:15.1775660Z shell: /bin/bash -e {0}
+2026-10-06T12:05:15.1776090Z env:
+2026-10-06T12:05:15.1776300Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:05:15.1776650Z   CARGO_INCREMENTAL: 0
+2026-10-06T12:05:15.1776960Z   CARGO_TERM_COLOR: always
+2026-10-06T12:05:15.1777260Z   CACHE_ON_FAILURE: false
+2026-10-06T12:05:15.1777510Z ##[endgroup]
+2026-10-06T12:05:19.7264650Z npm warn deprecated recharts@2.15.4: 1.x and 2.x branches are no longer active. Bump to Recharts v3 to receive latest features and bugfixes. See https://github.com/recharts/recharts/wiki/3.0-migration-guide
+2026-10-06T12:05:20.6416090Z 
+2026-10-06T12:05:20.6417910Z added 194 packages, and audited 195 packages in 5s
+2026-10-06T12:05:20.6418610Z 
+2026-10-06T12:05:20.6419920Z 31 packages are looking for funding
+2026-10-06T12:05:20.6420470Z   run `npm fund` for details
+2026-10-06T12:05:20.7078710Z 
+2026-10-06T12:05:20.7080250Z 11 vulnerabilities (5 moderate, 6 high)
+2026-10-06T12:05:20.7081300Z 
+2026-10-06T12:05:20.7082220Z To address issues that do not require attention, run:
+2026-10-06T12:05:20.7083420Z   npm audit fix
+2026-10-06T12:05:20.7083910Z 
+2026-10-06T12:05:20.7085360Z To address all issues (including breaking changes), run:
+2026-10-06T12:05:20.7086240Z   npm audit fix --force
+2026-10-06T12:05:20.7086580Z 
+2026-10-06T12:05:20.7086950Z Run `npm audit` for details.
+2026-10-06T12:05:20.7320810Z ##[group]Run npx tauri ios init
+2026-10-06T12:05:20.7321260Z [36;1mnpx tauri ios init[0m
+2026-10-06T12:05:20.8172230Z shell: /bin/bash -e {0}
+2026-10-06T12:05:20.8172610Z env:
+2026-10-06T12:05:20.8172860Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:05:20.8173210Z   CARGO_INCREMENTAL: 0
+2026-10-06T12:05:20.8173690Z   CARGO_TERM_COLOR: always
+2026-10-06T12:05:20.8173980Z   CACHE_ON_FAILURE: false
+2026-10-06T12:05:20.8174290Z ##[endgroup]
+2026-10-06T12:05:21.9740830Z         Warn No code signing certificates found. You must add one and set the certificate development team ID on the `bundle > iOS > developmentTeam` config value or the `APPLE_DEVELOPMENT_TEAM` environment variable. To list the available certificates, run `tauri info`.
+2026-10-06T12:05:22.0603260Z         Info Installing iOS Rust targets...
+2026-10-06T12:05:22.0604700Z         Info Installing target x86_64-apple-ios
+2026-10-06T12:05:22.1276580Z info: downloading component rust-std
+2026-10-06T12:05:24.9827990Z         Info package `xcodegen` not found
+2026-10-06T12:05:24.9829230Z         Info Installing `xcodegen` with brew...
+2026-10-06T12:05:26.8845100Z [34m==>[0m [1mWould reinstall 1 formula:[0m
+2026-10-06T12:05:26.8946330Z xcodegen
+2026-10-06T12:05:26.8957180Z [34m==>[0m [1mDownloading https://ghcr.io/v2/homebrew/core/xcodegen/manifests/2.46.0-1[0m
+2026-10-06T12:05:27.1798710Z [32m==>[0m [1mFetching downloads for: [32mxcodegen[39m[0m
+2026-10-06T12:05:27.4422040Z ✔︎ Bottle xcodegen (2.46.0)
+2026-10-06T12:05:27.4426410Z [32m==>[0m [1mReinstalling [32mxcodegen[39m [0m
+2026-10-06T12:05:27.5089780Z [34m==>[0m [1mPouring xcodegen--2.46.0.arm64_sequoia.bottle.1.tar.gz[0m
+2026-10-06T12:05:27.6707730Z 🍺  /opt/homebrew/Cellar/xcodegen/2.46.0: 38 files, 7.5MB
+2026-10-06T12:05:27.6950900Z         Info package `libimobiledevice` not found
+2026-10-06T12:05:27.6954120Z         Info Installing `libimobiledevice` with brew...
+2026-10-06T12:05:28.8497310Z [34m==>[0m [1mWould reinstall 1 formula:[0m
+2026-10-06T12:05:28.8497820Z libimobiledevice
+2026-10-06T12:05:28.8510010Z [34m==>[0m [1mDownloading https://ghcr.io/v2/homebrew/core/libimobiledevice/manifests/1.4.0[0m
+2026-10-06T12:05:29.1762490Z [34m==>[0m [1mWould install 4 dependencies for libimobiledevice:[0m
+2026-10-06T12:05:29.1763170Z libplist
+2026-10-06T12:05:29.1763840Z libimobiledevice-glue
+2026-10-06T12:05:29.1764200Z libtatsu
+2026-10-06T12:05:29.1764600Z libusbmuxd
+2026-10-06T12:05:29.2456510Z [32m==>[0m [1mFetching downloads for: [32mlibimobiledevice[39m[0m
+2026-10-06T12:05:29.4806570Z ✔︎ Bottle Manifest libplist (2.7.0)
+2026-10-06T12:05:29.4809780Z ✔︎ Bottle Manifest libimobiledevice-glue (1.3.2)
+2026-10-06T12:05:29.4812770Z ✔︎ Bottle Manifest libtatsu (1.0.5)
+2026-10-06T12:05:29.5184670Z ✔︎ Bottle libimobiledevice (1.4.0)
+2026-10-06T12:05:29.5273650Z ✔︎ Bottle libimobiledevice-glue (1.3.2)
+2026-10-06T12:05:29.5299510Z ✔︎ Bottle libplist (2.7.0)
+2026-10-06T12:05:29.6477550Z ✔︎ Bottle Manifest libusbmuxd (2.1.1)
+2026-10-06T12:05:29.7204820Z ✔︎ Bottle libtatsu (1.0.5)
+2026-10-06T12:05:29.7476780Z ✔︎ Bottle libusbmuxd (2.1.1)
+2026-10-06T12:05:29.7485460Z [32m==>[0m [1mReinstalling [32mlibimobiledevice[39m [0m
+2026-10-06T12:05:29.7720230Z [32m==>[0m [1mInstalling dependencies for libimobiledevice:[0m [32mlibplist[39m, [32mlibimobiledevice-glue[39m, [32mlibtatsu[39m and [32mlibusbmuxd[39m[0m
+2026-10-06T12:05:29.7721750Z [32m==>[0m [1mInstalling libimobiledevice dependency: [32mlibplist[39m[0m
+2026-10-06T12:05:29.7777530Z [34m==>[0m [1mPouring libplist--2.7.0.arm64_sequoia.bottle.tar.gz[0m
+2026-10-06T12:05:29.9397020Z 🍺  /opt/homebrew/Cellar/libplist/2.7.0: 32 files, 604.1KB
+2026-10-06T12:05:29.9420170Z [32m==>[0m [1mInstalling libimobiledevice dependency: [32mlibimobiledevice-glue[39m[0m
+2026-10-06T12:05:29.9575350Z [34m==>[0m [1mPouring libimobiledevice-glue--1.3.2.arm64_sequoia.bottle.tar.gz[0m
+2026-10-06T12:05:29.9887730Z 🍺  /opt/homebrew/Cellar/libimobiledevice-glue/1.3.2: 21 files, 233.4KB
+2026-10-06T12:05:29.9899520Z [32m==>[0m [1mInstalling libimobiledevice dependency: [32mlibtatsu[39m[0m
+2026-10-06T12:05:30.0179030Z [34m==>[0m [1mPouring libtatsu--1.0.5.arm64_sequoia.bottle.tar.gz[0m
+2026-10-06T12:05:30.0668050Z 🍺  /opt/homebrew/Cellar/libtatsu/1.0.5: 12 files, 160.0KB
+2026-10-06T12:05:30.0671000Z [32m==>[0m [1mInstalling libimobiledevice dependency: [32mlibusbmuxd[39m[0m
+2026-10-06T12:05:30.0945430Z [34m==>[0m [1mPouring libusbmuxd--2.1.1.arm64_sequoia.bottle.tar.gz[0m
+2026-10-06T12:05:30.1416050Z 🍺  /opt/homebrew/Cellar/libusbmuxd/2.1.1: 17 files, 244.7KB
+2026-10-06T12:05:30.1423950Z [32m==>[0m [1mInstalling [32mlibimobiledevice[39m[0m
+2026-10-06T12:05:30.1429220Z [34m==>[0m [1mPouring libimobiledevice--1.4.0.arm64_sequoia.bottle.tar.gz[0m
+2026-10-06T12:05:30.2926790Z 🍺  /opt/homebrew/Cellar/libimobiledevice/1.4.0: 82 files, 2.2MB
+2026-10-06T12:05:30.3145110Z /opt/homebrew/lib/ruby/gems/3.3.0/bin/pod
+2026-10-06T12:05:46.1235850Z Apple dependencies are up to date
+2026-10-06T12:05:46.1243070Z         Info "/Users/runner/work/Prism/Prism/src-tauri" relative to "/Users/runner/work/Prism/Prism/src-tauri/gen/apple" is "../../"
+2026-10-06T12:05:46.1420650Z Generating Xcode project...
+2026-10-06T12:05:46.1744390Z ⚙️  Generating plists...
+2026-10-06T12:05:46.1760790Z ⚙️  Generating project...
+2026-10-06T12:05:46.1928250Z ⚙️  Writing project...
+2026-10-06T12:05:46.2076940Z Created project at /Users/runner/work/Prism/Prism/src-tauri/gen/apple/prism-proxy.xcodeproj
+2026-10-06T12:05:46.2126460Z victory: Project generated successfully!
+2026-10-06T12:05:46.2128710Z     Make cool apps! 🌻 🐕 🎉
+2026-10-06T12:05:46.2561260Z ##[group]Run set -e
+2026-10-06T12:05:46.2562840Z [36;1mset -e[0m
+2026-10-06T12:05:46.2563920Z [36;1mICONSET=$(find src-tauri/gen/apple -type d -name AppIcon.appiconset | head -1)[0m
+2026-10-06T12:05:46.2565050Z [36;1mtest -n "$ICONSET"[0m
+2026-10-06T12:05:46.2565610Z [36;1mecho "appiconset: $ICONSET"[0m
+2026-10-06T12:05:46.2566480Z [36;1mcp -fv src-tauri/icons/ios/*.png "$ICONSET"/[0m
+2026-10-06T12:05:46.2567490Z [36;1mecho "icons synced: $(ls "$ICONSET"/*.png | wc -l | tr -d ' ')"[0m
+2026-10-06T12:05:46.2659270Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-06T12:05:46.2660120Z env:
+2026-10-06T12:05:46.2660340Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:05:46.2660740Z   CARGO_INCREMENTAL: 0
+2026-10-06T12:05:46.2661080Z   CARGO_TERM_COLOR: always
+2026-10-06T12:05:46.2661360Z   CACHE_ON_FAILURE: false
+2026-10-06T12:05:46.2661630Z ##[endgroup]
+2026-10-06T12:05:46.3652080Z appiconset: src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset
+2026-10-06T12:05:46.3874900Z src-tauri/icons/ios/AppIcon-20x20@1x.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-20x20@1x.png
+2026-10-06T12:05:46.3876020Z src-tauri/icons/ios/AppIcon-20x20@2x-1.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-20x20@2x-1.png
+2026-10-06T12:05:46.3891520Z src-tauri/icons/ios/AppIcon-20x20@2x.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-20x20@2x.png
+2026-10-06T12:05:46.3894070Z src-tauri/icons/ios/AppIcon-20x20@3x.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-20x20@3x.png
+2026-10-06T12:05:46.3897300Z src-tauri/icons/ios/AppIcon-29x29@1x.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-29x29@1x.png
+2026-10-06T12:05:46.3906290Z src-tauri/icons/ios/AppIcon-29x29@2x-1.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-29x29@2x-1.png
+2026-10-06T12:05:46.3907530Z src-tauri/icons/ios/AppIcon-29x29@2x.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-29x29@2x.png
+2026-10-06T12:05:46.3908690Z src-tauri/icons/ios/AppIcon-29x29@3x.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-29x29@3x.png
+2026-10-06T12:05:46.3909680Z src-tauri/icons/ios/AppIcon-40x40@1x.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-40x40@1x.png
+2026-10-06T12:05:46.3911240Z src-tauri/icons/ios/AppIcon-40x40@2x-1.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-40x40@2x-1.png
+2026-10-06T12:05:46.3912430Z src-tauri/icons/ios/AppIcon-40x40@2x.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-40x40@2x.png
+2026-10-06T12:05:46.3913620Z src-tauri/icons/ios/AppIcon-40x40@3x.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-40x40@3x.png
+2026-10-06T12:05:46.3914650Z src-tauri/icons/ios/AppIcon-512@2x.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png
+2026-10-06T12:05:46.3915670Z src-tauri/icons/ios/AppIcon-60x60@2x.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-60x60@2x.png
+2026-10-06T12:05:46.3916720Z src-tauri/icons/ios/AppIcon-60x60@3x.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-60x60@3x.png
+2026-10-06T12:05:46.3917810Z src-tauri/icons/ios/AppIcon-76x76@1x.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-76x76@1x.png
+2026-10-06T12:05:46.3918780Z src-tauri/icons/ios/AppIcon-76x76@2x.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-76x76@2x.png
+2026-10-06T12:05:46.3919790Z src-tauri/icons/ios/AppIcon-83.5x83.5@2x.png -> src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-83.5x83.5@2x.png
+2026-10-06T12:05:46.4008510Z icons synced: 18
+2026-10-06T12:05:46.4051880Z ##[group]Run npx tauri ios build --no-sign --verbose
+2026-10-06T12:05:46.4052300Z [36;1mnpx tauri ios build --no-sign --verbose[0m
+2026-10-06T12:05:46.4089700Z shell: /bin/bash -e {0}
+2026-10-06T12:05:46.4090050Z env:
+2026-10-06T12:05:46.4090380Z   CARGO_HOME: /Users/runner/.cargo
+2026-10-06T12:05:46.4090710Z   CARGO_INCREMENTAL: 0
+2026-10-06T12:05:46.4090970Z   CARGO_TERM_COLOR: always
+2026-10-06T12:05:46.4091260Z   CACHE_ON_FAILURE: false
+2026-10-06T12:05:46.4091440Z ##[endgroup]
+2026-10-06T12:05:47.1083830Z        Debug [tauri_cli::helpers::app_paths] Found Tauri project inside /Users/runner/work/Prism/Prism/src-tauri on early lookup
+2026-10-06T12:05:47.2189660Z         Warn [tauri_cli::mobile::ios] No code signing certificates found. You must add one and set the certificate development team ID on the `bundle > iOS > developmentTeam` config value or the `APPLE_DEVELOPMENT_TEAM` environment variable. To list the available certificates, run `tauri info`.
+2026-10-06T12:07:44.0807280Z         Info [tauri_cli::build] Looking up installed tauri packages to check mismatched versions...
+2026-10-06T12:07:45.4568770Z      Running [tauri_cli::helpers] beforeBuildCommand `npm run build`
+2026-10-06T12:07:45.4932680Z        Debug [tauri_cli::helpers] Setting environment for hook {"TAURI_ENV_ARCH": "aarch64", "TAURI_ENV_FAMILY": "unix", "TAURI_ENV_PLATFORM_VERSION": "15.7.9", "TAURI_ENV_TARGET_TRIPLE": "aarch64-apple-ios", "TAURI_ENV_PLATFORM": "ios"}
+2026-10-06T12:07:45.4939920Z      Running [tauri_cli] Command `sh -c npm run build`
+2026-10-06T12:07:45.6685160Z 
+2026-10-06T12:07:45.6685630Z > prism-proxy@0.1.0 build
+2026-10-06T12:07:45.6686050Z > tsc && vite build
+2026-10-06T12:07:45.6686220Z 
+2026-10-06T12:07:49.4350220Z [36mvite v5.4.21 [32mbuilding for production...[36m[39m
+2026-10-06T12:07:50.0116300Z transforming...
+2026-10-06T12:08:05.5610560Z [32m✓[39m 2403 modules transformed.
+2026-10-06T12:08:06.3198250Z rendering chunks...
+2026-10-06T12:08:06.3674620Z computing gzip size...
+2026-10-06T12:08:06.3979100Z [33m
+2026-10-06T12:08:06.3980120Z [2mdist/[22m[32mindex.html                 [39m[1m[2m  0.47 kB[22m[1m[22m[2m │ gzip:   0.31 kB[22m
+2026-10-06T12:08:06.4082200Z (!) Some chunks are larger than 500 kB after minification. Consider:
+2026-10-06T12:08:06.4083480Z [2mdist/[22m[2massets/[22m[35mindex-oMa130rx.css  [39m[1m[2m 20.75 kB[22m[1m[22m[2m │ gzip:   4.69 kB[22m
+2026-10-06T12:08:06.4192090Z - Using dynamic import() to code-split the application
+2026-10-06T12:08:06.4193770Z [2mdist/[22m[2massets/[22m[36mindex-DP9_Lr1T.js   [39m[1m[33m633.90 kB[39m[22m[2m │ gzip: 183.84 kB[22m
+2026-10-06T12:08:06.4300360Z - Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+2026-10-06T12:08:06.4375470Z [32m✓ built in 16.94s[39m
+2026-10-06T12:08:06.4479710Z - Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.[39m
+2026-10-06T12:08:11.6343660Z Setting version of project prism-proxy to: 
+2026-10-06T12:08:11.6344720Z     0.1.0.
+2026-10-06T12:08:11.6345040Z 
+2026-10-06T12:08:11.6684210Z Also setting CFBundleVersion key (assuming it exists)
+2026-10-06T12:08:11.6782760Z 
+2026-10-06T12:08:11.7201680Z Updating CFBundleVersion in Info.plist(s)...
+2026-10-06T12:08:11.7303590Z 
+2026-10-06T12:08:11.7754770Z Updated CFBundleVersion in "prism-proxy.xcodeproj/../prism-proxy_iOS/Info.plist" to 0.1.0
+2026-10-06T12:08:11.7814610Z 
+2026-10-06T12:08:11.7856860Z 
+2026-10-06T12:08:14.2364110Z --- xcodebuild: WARNING: Using the first of multiple matching destinations:
+2026-10-06T12:08:14.2365670Z { platform:iOS, id:dvtdevice-DVTiPhonePlaceholder-iphoneos:placeholder, name:Any iOS Device }
+2026-10-06T12:08:14.2366970Z { platform:macOS, arch:arm64, variant:Designed for [iPad,iPhone], id:13fcb96dfe6b26068222182fc087c240ec5e5a63, name:My Mac }
+2026-10-06T12:08:14.2369930Z { platform:iOS Simulator, id:dvtdevice-DVTiOSDeviceSimulatorPlaceholder-iphonesimulator:placeholder, name:Any iOS Simulator Device }
+2026-10-06T12:08:21.1297470Z         Info [jsonrpsee_server::server] connection; remote_addr=127.0.0.1:49250 conn_id=0
+2026-10-06T12:08:21.1318950Z        Debug [jsonrpsee-server] Accepting new connection 1/100
+2026-10-06T12:11:13.2843710Z 
+2026-10-06T12:11:13.2853150Z > prism-proxy@0.1.0 tauri
+2026-10-06T12:11:13.2864540Z > tauri ios xcode-script -v --platform iOS --sdk-root /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk --framework-search-paths /Users/runner/Library/Developer/Xcode/DerivedData/prism-proxy-eefpwlkyknkcfsazstjzhjriqcxc/Build/Intermediates.noindex/ArchiveIntermediates/prism-proxy_iOS/BuildProductsPath/release-iphoneos  "." --header-search-paths /Users/runner/Library/Developer/Xcode/DerivedData/prism-proxy-eefpwlkyknkcfsazstjzhjriqcxc/Build/Intermediates.noindex/ArchiveIntermediates/prism-proxy_iOS/BuildProductsPath/release-iphoneos/include  --gcc-preprocessor-definitions  --configuration release arm64
+2026-10-06T12:11:13.2874980Z 
+2026-10-06T12:11:13.2897460Z [1m[34m       Debug[0m [[30mtauri_cli::helpers::app_paths[0m] Found Tauri project inside /Users/runner/work/Prism/Prism/src-tauri on early lookup
+2026-10-06T12:11:13.2906410Z [1m[34m       Debug[0m [[30mjsonrpsee-client[0m] Connecting to target: Target { host: "127.0.0.1", host_header: "127.0.0.1:49249", _mode: Plain, path_and_query: "/", basic_auth: None }
+2026-10-06T12:11:13.2911630Z [1m[34m       Debug[0m [[30mjsonrpsee-client[0m] Connection established to target: Target { host: "127.0.0.1", host_header: "127.0.0.1:49249", _mode: Plain, path_and_query: "/", basic_auth: None }
+2026-10-06T12:11:13.2916700Z [1m[33m        Warn[0m [[30mtauri_cli::mobile::ios[0m] No code signing certificates found. You must add one and set the certificate development team ID on the `bundle > iOS > developmentTeam` config value or the `APPLE_DEVELOPMENT_TEAM` environment variable. To list the available certificates, run `tauri info`.
+2026-10-06T12:11:13.2919940Z [1m[92m    Updating[0m crates.io index
+2026-10-06T12:11:13.2953310Z [1m[92m   Compiling[0m num_threads v0.1.7 (/Users/runner/work/Prism/Prism/src-tauri/vendor/num_threads)
+2026-10-06T12:11:13.2954840Z [1m[92m   Compiling[0m prism-proxy v0.1.0 (/Users/runner/work/Prism/Prism/src-tauri)
+2026-10-06T12:11:13.2955460Z [1m[92m   Compiling[0m time v0.3.55
+2026-10-06T12:11:13.2956100Z [1m[92m   Compiling[0m cookie v0.18.2
+2026-10-06T12:11:13.2957270Z [1m[92m   Compiling[0m plist v1.10.1
+2026-10-06T12:11:13.2957970Z [1m[92m   Compiling[0m tauri-utils v2.10.1
+2026-10-06T12:11:13.2959000Z [1m[92m   Compiling[0m wry v0.57.0
+2026-10-06T12:11:13.2959860Z [1m[92m   Compiling[0m cookie_store v0.22.1
+2026-10-06T12:11:13.2960370Z [1m[92m   Compiling[0m reqwest v0.12.28
+2026-10-06T12:11:13.2961120Z [1m[92m   Compiling[0m simple_asn1 v0.6.4
+2026-10-06T12:11:13.2961840Z [1m[92m   Compiling[0m tauri-runtime v2.12.1
+2026-10-06T12:11:13.2962740Z [1m[92m   Compiling[0m tauri-runtime-wry v2.12.1
+2026-10-06T12:11:13.2963390Z [1m[92m   Compiling[0m tauri v2.12.1
+2026-10-06T12:11:13.2964060Z [1m[92m   Compiling[0m tauri-plugin-fs v2.6.0
+2026-10-06T12:11:13.2964990Z [1m[92m   Compiling[0m tauri-plugin-http v2.8.0
+2026-10-06T12:11:13.2965590Z [1m[92m   Compiling[0m tauri-plugin-shell v2.4.0
+2026-10-06T12:11:13.2967060Z [1m[92m   Compiling[0m tauri-plugin-log v2.10.0
+2026-10-06T12:11:13.2967980Z [1m[92m   Compiling[0m tauri-plugin-iap v0.9.1
+2026-10-06T12:11:13.2968760Z [1m[92m   Compiling[0m tauri-plugin-notification v2.5.1
+2026-10-06T12:11:13.2969320Z [1m[92m   Compiling[0m tauri-plugin-os v2.4.0
+2026-10-06T12:11:13.2970070Z [1m[92m   Compiling[0m tauri-plugin-process v2.4.0
+2026-10-06T12:11:13.2970870Z [1m[92m   Compiling[0m jsonwebtoken v9.3.1
+2026-10-06T12:11:13.2971690Z [1m[33mwarning[0m[1m: unused variable: `sub_name`[0m
+2026-10-06T12:11:13.2972430Z    [1m[94m--> [0msrc/core/config_builder.rs:345:19
+2026-10-06T12:11:13.2995760Z     [1m[94m|[0m
+2026-10-06T12:11:13.3006410Z [1m[94m345[0m [1m[94m|[0m             name: sub_name,
+2026-10-06T12:11:13.3009970Z     [1m[94m|[0m                   [1m[33m^^^^^^^^[0m [1m[33mhelp: if this is intentional, prefix it with an underscore: `_sub_name`[0m
+2026-10-06T12:11:13.3010740Z     [1m[94m|[0m
+2026-10-06T12:11:13.3011710Z     [1m[94m= [0m[1mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+2026-10-06T12:11:13.3012220Z 
+2026-10-06T12:11:13.3012620Z [1m[33mwarning[0m[1m: unused variable: `app`[0m
+2026-10-06T12:11:13.3013140Z   [1m[94m--> [0msrc/ipc/commands.rs:77:5
+2026-10-06T12:11:13.3013670Z    [1m[94m|[0m
+2026-10-06T12:11:13.3014530Z [1m[94m77[0m [1m[94m|[0m     app: &AppHandle,
+2026-10-06T12:11:13.3015480Z    [1m[94m|[0m     [1m[33m^^^[0m [1m[33mhelp: if this is intentional, prefix it with an underscore: `_app`[0m
+2026-10-06T12:11:13.3015990Z 
+2026-10-06T12:11:13.3016290Z [1m[33mwarning[0m[1m: field `h2_opts` is never read[0m
+2026-10-06T12:11:13.3017440Z    [1m[94m--> [0msrc/core/config_builder.rs:121:5
+2026-10-06T12:11:13.3017910Z     [1m[94m|[0m
+2026-10-06T12:11:13.3019210Z [1m[94m 64[0m [1m[94m|[0m struct ClashNode {
+2026-10-06T12:11:13.3019860Z     [1m[94m|[0m        [1m[94m---------[0m [1m[94mfield in this struct[0m
+2026-10-06T12:11:13.3020410Z [1m[94m...[0m
+2026-10-06T12:11:13.3021010Z [1m[94m121[0m [1m[94m|[0m     h2_opts: Option<H2Opts>,
+2026-10-06T12:11:13.3021900Z     [1m[94m|[0m     [1m[33m^^^^^^^[0m
+2026-10-06T12:11:13.3022300Z     [1m[94m|[0m
+2026-10-06T12:11:13.3023220Z     [1m[94m= [0m[1mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+2026-10-06T12:11:13.3023600Z 
+2026-10-06T12:11:13.3024230Z [1m[33mwarning[0m[1m: fields `path` and `host` are never read[0m
+2026-10-06T12:11:13.3025400Z    [1m[94m--> [0msrc/core/config_builder.rs:161:5
+2026-10-06T12:11:13.3025890Z     [1m[94m|[0m
+2026-10-06T12:11:13.3026610Z [1m[94m159[0m [1m[94m|[0m struct H2Opts {
+2026-10-06T12:11:13.3031310Z     [1m[94m|[0m        [1m[94m------[0m [1m[94mfields in this struct[0m
+2026-10-06T12:11:13.3032720Z [1m[94m160[0m [1m[94m|[0m     #[serde(default)]
+2026-10-06T12:11:13.3033420Z [1m[94m161[0m [1m[94m|[0m     path: Option<String>,
+2026-10-06T12:11:13.3034300Z     [1m[94m|[0m     [1m[33m^^^^[0m
+2026-10-06T12:11:13.3035190Z [1m[94m162[0m [1m[94m|[0m     #[serde(default)]
+2026-10-06T12:11:13.3035830Z [1m[94m163[0m [1m[94m|[0m     host: Option<Vec<String>>,
+2026-10-06T12:11:13.3036630Z     [1m[94m|[0m     [1m[33m^^^^[0m
+2026-10-06T12:11:13.3037050Z 
+2026-10-06T12:11:13.3037530Z [1m[33mwarning[0m[1m: field `url` is never read[0m
+2026-10-06T12:11:13.3038290Z    [1m[94m--> [0msrc/core/config_builder.rs:172:5
+2026-10-06T12:11:13.3038890Z     [1m[94m|[0m
+2026-10-06T12:11:13.3039780Z [1m[94m168[0m [1m[94m|[0m struct ProviderDef {
+2026-10-06T12:11:13.3040570Z     [1m[94m|[0m        [1m[94m-----------[0m [1m[94mfield in this struct[0m
+2026-10-06T12:11:13.3041230Z [1m[94m...[0m
+2026-10-06T12:11:13.3041950Z [1m[94m172[0m [1m[94m|[0m     url: Option<String>,
+2026-10-06T12:11:13.3042650Z     [1m[94m|[0m     [1m[33m^^^[0m
+2026-10-06T12:11:13.3043070Z 
+2026-10-06T12:11:13.3043620Z [1m[33mwarning[0m[1m: field `strategy` is never read[0m
+2026-10-06T12:11:13.3044820Z    [1m[94m--> [0msrc/core/config_builder.rs:194:5
+2026-10-06T12:11:13.3045350Z     [1m[94m|[0m
+2026-10-06T12:11:13.3046340Z [1m[94m183[0m [1m[94m|[0m struct ClashGroup {
+2026-10-06T12:11:13.3047230Z     [1m[94m|[0m        [1m[94m----------[0m [1m[94mfield in this struct[0m
+2026-10-06T12:11:13.3047890Z [1m[94m...[0m
+2026-10-06T12:11:13.3048370Z [1m[94m194[0m [1m[94m|[0m     strategy: Option<String>,
+2026-10-06T12:11:13.3049270Z     [1m[94m|[0m     [1m[33m^^^^^^^^[0m
+2026-10-06T12:11:13.3049760Z 
+2026-10-06T12:11:13.3050230Z [1m[33mwarning[0m[1m: function `run_cmd` is never used[0m
+2026-10-06T12:11:13.3052830Z    [1m[94m--> [0msrc/core/tun.rs:242:10
+2026-10-06T12:11:13.3053440Z     [1m[94m|[0m
+2026-10-06T12:11:13.3054310Z [1m[94m242[0m [1m[94m|[0m async fn run_cmd(program: &str, args: &[&str]) -> Result<()> {
+2026-10-06T12:11:13.3055320Z     [1m[94m|[0m          [1m[33m^^^^^^^[0m
+2026-10-06T12:11:13.3055650Z 
+2026-10-06T12:11:13.3056190Z [1m[91merror[0m[1m: linking with `cc` failed: exit status: 1[0m
+2026-10-06T12:11:13.3056750Z   [1m[94m|[0m
+2026-10-06T12:11:13.3171990Z   [1m[94m= [0m[1mnote[0m:  "cc" "-Wl,-exported_symbols_list" "-Wl,/Users/runner/work/Prism/Prism/src-tauri/target/aarch64-apple-ios/release/deps/rustcC9IJhe/list" "/Users/runner/work/Prism/Prism/src-tauri/target/aarch64-apple-ios/release/deps/rustcC9IJhe/symbols.o" "<2 object files omitted>" "-lprismkernel" "-framework" "Security" "-framework" "Foundation" "-framework" "CoreFoundation" "-framework" "SystemConfiguration" "<sysroot>/lib/rustlib/aarch64-apple-ios/lib/libpanic_abort-*.rlib" "/Users/runner/work/Prism/Prism/src-tauri/target/aarch64-apple-ios/release/deps/{libtauri_plugin_iap-6c8bc44f04fb4ab7,libtauri_plugin_process-b4613974e7c3b2d7,libtauri_plugin_os-b45dc12ee4ccdd44,libgethostname-cb20d72afe278bb3,librustix-314e264416e33a66,libsys_locale-49a67de8b5b7bbf0,libos_info-dab76b91b57b68f6,libtauri_plugin_notification-5399fcd74c99ab7a,librand-d226faaa1b19a0a8,librand_chacha-43f4e8da9ef134b4,librand_core-db62d4be404b1278,libtauri_plugin_http-eac6e9826eea2d2e,libtauri_plugin_fs-e505733afb7e1929,libdata_url-f92ba6a3164b943b,liburlpattern-48639e085819cf4d,libunic_ucd_ident-21c3233da8dda2e4,libunic_ucd_version-19fae0511638af39,libunic_common-0671815b68c04a64,libunic_char_property-aa7a9b749bb1b6ef,libunic_char_range-b46fa583b2b496d0,libtauri_plugin_shell-963f8e09669c6386,libopen-4e036a84e3325d48,libshared_child-540c4e00798db610,libsigchld-73fd0a4d43dd541f,libsignal_hook-152980bbe2322ad3,libos_pipe-88daf69e41ac0db9,libreqwest-d28113be6082936d,libserde_urlencoded-e7eefd503ed5ca78,libcookie_store-ca394c272c15c323,libpublicsuffix-61ba8c172639b48f,libpsl_types-47ff4862d7ffc450,libhyper_rustls-17f77013dff81ec8,libwebpki_roots-d5b473a166f512b1,libtokio_rustls-987930228db2bb35,librustls-7c4c7f4b64f08d7e,libsubtle-7e61ce1d271dc108,libwebpki-28dd3f03d2d8ce5c,librustls_pki_types-284fbcfa964046a5,libzeroize-a6704ceeacc62cf8,libencoding_rs-7672af9386890a97,libsimdutf8-13d6f8ea770a00c5,libtower_http-bb368b6fc0574022,libtower-9024d511bc542f1a,libtower_layer-6291c5a1f3102854,libhyper_util-09fe052c56085902,libipnet-9fc23d4e1d1bba88,libtower_service-751fdbb0921da051,libhyper-3e4738dafbe964c2,libwant-0e620ec5da81c379,libtry_lock-e6ad55f6dfcf784c,libh2-a4ea8409751e027c,libatomic_waker-162201a7ba421458,libhttpdate-f8d63af7dce16f58,libfutures_channel-3d50d5a4549fe49e,libtokio_util-b338a51fdcb09477,libhttp_body_util-24a6dde01998ceac,libhttp_body-dfb5821b3df329de,libsync_wrapper-e4617e2881114744,libserde_yaml-c4e0afa91956cabc,libryu-42a6eb6209576eb2,libunsafe_libyaml-25fefb5b7138b116,libtracing_subscriber-ebbb2065dfd15b7b,libsharded_slab-653781cac19411db,liblazy_static-b0175e1de41770a7,libmatchers-3d896eebddefa3b4,libnu_ansi_term-89dfef2fc6f2eade,libtracing-8b6c0074b83cd349,libthread_local-bf4c2cd8efb5a6ca,libtracing_log-383f8c9d7eb24776,libtracing_core-8050e5b7514264ec,libjsonwebtoken-852b3aa869f64786,libpem-2ca892b7ec0af55b,libsimple_asn1-4b071837722b5df1,libnum_bigint-05e1ea1e1323f609,libnum_integer-69f32c40a7c5b604,libbase64-6a1fe17d885b45a4,libring-77540ec23f35b0cb,libuntrusted-a8d7b159ceaa0260,libtokio_tungstenite-48cdfadbdccd1aa8,libtungstenite-b1e72c905c3c6622,libdata_encoding-c946037539c4be75,librand-30df7fef66aaf7ec,librand_chacha-f78908f4492ae09a,libppv_lite86-0f808bfa03c885a0,libzerocopy-07e7ef41c4a86889,librand_core-d6c2681f91ea5458,libgetrandom-9903ac1eb0e54e24,libutf8-f73a158a6cf1ff4f,libbyteorder-7a06bdf166b91877,libsha1-b25e0ebb6c349dfd,libdigest-9f60e1f66c304051,libblock_buffer-5411d4280ad73a48,libcrypto_common-f16fdf35969f18f8,libgeneric_array-a2cfc2ff45cbbfb4,libtypenum-a76268da439d9f78,libhttparse-b2642ace4061131e,libthiserror-f0235fa111a9fb86,libtauri-46588bb2bc2a3868,libheck-bdf2b36967888736,libmime-f7b03ba6143254e4,libgetrandom-37b325d6a890b78e,libimage-424fb9725858dca1,libbytemuck-3a8d427c8a6dff0b,libbyteorder_lite-2cbffba75478869d,libmoxcms-2c76f3efe1efad2f,libpxfm-23bf774f28dee273,libpng-9b9283e54b74ab1d,libflate2-aabd8f7cb777c8ea,libminiz_oxide-e49e7de1c0f2bdc6,libfdeflate-4b3fb28c50165423,libsimd_adler32-7d38416c9231b59b,libcrc32fast-bf7071963f7b7a66,libnum_traits-7b984e2c18537fc7,libtauri_runtime_wry-2a55afeacdb55ac3,libwry-95daf3edf24c6348,libdirs-cd90dc15b900f08b,libdirs_sys-e522e05716d30a0d,liboption_ext-d2fee81b0f641627,libonce_cell-5cac109015ababc8,libobjc2_web_kit-38e87f56c7d11cda,libtao-4ca07f2375d717e7,libcrossbeam_channel-a7f5440213fbeee6,libcrossbeam_utils-4ff4d05cc074d328,liblog-8b36bd49020c1a87,libtokio-782edb526c046c9d,libsignal_hook_registry-bb6fa60ee0a2ac63,liberrno-975197759371c424,libsocket2-23003f6b0af9db8f,libmio-053f69e916df6910,libparking_lot-878575d79e6775f7,libparking_lot_core-89c6371b76a6c11c,liblock_api-b015f3dc325fe753,libscopeguard-59c96cf6ff383d0c,libtauri_runtime-da36fb8d66db3b2d,libobjc2_ui_kit-250f0d3d48e12cc6,libobjc2_user_notifications-d042955ba8a8f60f,libobjc2_core_data-2d4a837aaddb3945,libobjc2_core_location-3b02c2ff40d28752,libobjc2_core_text-64322b3190e1a828,libobjc2_core_image-a4b292f682348831,libobjc2_cloud_kit-8cc288754c99ff58,libobjc2_quartz_core-d21debc38310f4fa,libobjc2_core_graphics-a5902dffef4fc690,libobjc2_foundation-cab9719b9fe7ecaf,libobjc2_core_foundation-db43445d58a82e5b,libbitflags-61c6a3c3ee2163d4,libblock2-ed3e4d9f2e479558,libobjc2-aa961cd5f9f3000e,libobjc2_exception_helper-6525cfb25a803206,libobjc2_encode-620068c2686df790,libcookie-ab5f941a7598bbd0,libdpi-ea94a0031d747586,libserialize_to_javascript-e5d41016a244163b,libraw_window_handle-b347c490c10ebec6,libtauri_utils-496606025d6ee221,libdunce-80a79d08c46a7c98,libinfer-d5b0cee44f891dc4,libcfb-881a96247557be6c,libweb_time-db97f11170842898,libfnv-5f05f0523af9700a,libuuid-3892ee05ab5e0274,libgetrandom-388f7875863fa075,libcfg_if-ef9c76481aaa3212,libbrotli-0f424c4da8d5d5b3,libbrotli_decompressor-b2a7199e70270069,liballoc_stdlib-c4d5d5141f6a6f2e,liballoc_no_stdlib-8efc0aeef0a49e0d,liburlpattern-75d0d33acc2efab1,libregex-d90518bf5f326aed,libregex_automata-6dcfcecde65e6efc,libaho_corasick-ec6255788fed87f8,libregex_syntax-ede07af95ba318d0,libglob-4d2ce145e845214a,libwalkdir-72a6256f16a785aa,libsame_file-dd5cf4321b92b953,libctor-6c895090542b9594,libplist-2d989541f9cd97f7,libtime-bef986eb04e35183,libnum_threads-766c06e6fac59eae,liblibc-31bf30ac22554400,libpowerfmt-b22a572d7c2d20ef,libnum_conv-e917f7ad578a73a1,libderanged-14d686e783116ddc,libtime_core-cf8f7eda9d6a2ea1,libquick_xml-f800bd575979c3a6,libbase64-935dda7390d1cb1e,libindexmap-8d984e29d833769c,libequivalent-5aa367783c81505f,libhashbrown-f0eb46b6c6734f2f,libjson_patch-1830d4e757a860b4,libjsonptr-62faf0b885fc4e8e,libserde_with-d6e4294eff14cbc4,libhttp-f86ad0a810170596,libbytes-7f1673c7c99a20c2,libphf-96882bdde627770e,libphf_shared-4b141f80a499f089,libsiphasher-aceab37426122732,libtoml-5d71dc52706b8645,libtoml_writer-5872c10e3e547193,libtoml_parser-9043ea23431cc833,libwinnow-a9d5858411c76175,libserde_spanned-0e121ecf0d888385,libtoml_datetime-0d3a3c3718571ef5,libserde_untagged-ca5412d3a9363d8a,liberased_serde-299edad43d0e90b4,libtypeid-529ac20faf599292,liburl-804eb5586077a757,libidna-b4658e0c8d662181,libidna_adapter-a767ee4826e27820,libicu_properties-396bf92e8e627407,libicu_properties_data-401549549abe5b54,libicu_normalizer-661ae27476d5de46,libsmallvec-49453a54de8441b2,libicu_normalizer_data-0f4a4d97546d3426,libicu_collections-f0e5bffc7ababf2d,libutf8_iter-eceaa8ef3c7b9a20,libpotential_utf-1de3fd157e313452,libicu_provider-c98329d8c86de7c6,libicu_locale_core-dba6b09e6f9509ed,libtinystr-c18c9b6cd2cdfb7c,liblitemap-a7812f9303f4f205,libwriteable-dccb63576606e4d8,libzerovec-5cb2b0090552b88e,libzerotrie-9918b7c460a5f0bf,libyoke-244aa643bf8ae0ab,libstable_deref_trait-3f93410b92e8f6c0,libzerofrom-c824a178c97095a3,libform_urlencoded-b459502b72ae3e5a,libpercent_encoding-72eadfca7cc4d422,libthiserror-30760f5d8bb50b1d,libsemver-47c8cafe600da060,libswift_rs-198fb79b6ee3486a,libfutures_util-73a07edf7483401e,libslab-6a18dcd4c9dc0aa2,libpin_project_lite-6736ad27ad9a2b84,libfutures_sink-697c8df72c21607e,libfutures_task-2afa2f6125b9947a,libfutures_core-33e9493ea61f95bf,libserde_json-9781e5803d49648d,libmemchr-73125a7c93f9ea01,libitoa-addf3fa095bb1ad1,libzmij-01f6773a7cfda519,libserde-a181b77cdfe8c61b,libserde_core-a8b1402576191910,libanyhow-011fb8fb523f4df9}.rlib" "<sysroot>/lib/rustlib/aarch64-apple-ios/lib/{libstd-*,libobject-*,libmemchr-*,libaddr2line-*,libgimli-*,libcfg_if-*,librustc_demangle-*,libstd_detect-*,libhashbrown-*,librustc_std_workspace_alloc-*,libminiz_oxide-*,libadler2-*,libunwind-*,liblibc-*,librustc_std_workspace_core-*,liballoc-*,libcore-*,libcompiler_builtins-*}.rlib" "-lclang_rt.ios" "-framework" "CoreFoundation" "-lclang_rt.ios" "-lclang_rt.ios" "-lclang_rt.ios" "-framework" "WebKit" "-framework" "WebKit" "-framework" "UIKit" "-framework" "CoreFoundation" "-framework" "UIKit" "-framework" "UserNotifications" "-framework" "CoreData" "-framework" "CoreLocation" "-framework" "CoreText" "-framework" "CoreImage" "-framework" "CloudKit" "-framework" "QuartzCore" "-framework" "CoreGraphics" "-framework" "Foundation" "-framework" "CoreFoundation" "-lobjc" "-framework" "Foundation" "-liconv" "-lSystem" "-lc" "-lm" "-target" "arm64-apple-ios14.0.0" "-L" "/Users/runner/work/Prism/Prism/src-tauri/target/aarch64-apple-ios/release/build/ring-d996a752da187fec/out" "-L" "/Users/runner/work/Prism/Prism/src-tauri/target/aarch64-apple-ios/release/build/tauri-98e7fae3b43e36a6/out/swift-rs/Tauri/arm64-apple-macosx/release" "-L" "/Users/runner/work/Prism/Prism/src-tauri/target/aarch64-apple-ios/release/build/objc2-exception-helper-57718c465c83bb90/out" "-L" "/Users/runner/work/Prism/Prism/src-tauri/target/aarch64-apple-ios/release/build/tauri-plugin-iap-e596221711948e1e/out/swift-rs/tauri-plugin-iap/arm64-apple-macosx/release" "-L" "/Users/runner/work/Prism/Prism/src-tauri/target/aarch64-apple-ios/release/build/tauri-plugin-log-fe41ad0c11b599a8/out/swift-rs/tauri-plugin-log/arm64-apple-macosx/release" "-L" "/Users/runner/work/Prism/Prism/src-tauri/target/aarch64-apple-ios/release/build/tauri-plugin-notification-73299405230ff7b3/out/swift-rs/tauri-plugin-notification/arm64-apple-macosx/release" "-L" "/Users/runner/work/Prism/Prism/src-tauri/target/aarch64-apple-ios/release/build/tauri-plugin-shell-9c9f70dc185f5f2c/out/swift-rs/tauri-plugin-shell/arm64-apple-macosx/release" "-L" "/Users/runner/work/Prism/Prism/src-tauri/ios-kernel" "-L" "/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos" "-L" "/usr/lib/swift" "-L" "/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/lib/darwin" "-o" "/Users/runner/work/Prism/Prism/src-tauri/target/aarch64-apple-ios/release/deps/libprism_proxy_lib.dylib" "-Wl,-dead_strip" "-dynamiclib" "-nodefaultlibs"
+2026-10-06T12:11:13.3228720Z   [1m[94m= [0m[1mnote[0m: some arguments are omitted. use `--verbose` to show all linker arguments
+2026-10-06T12:11:13.3229930Z   [1m[94m= [0m[1mnote[0m: ld: warning: ignoring duplicate libraries: '-lclang_rt.ios'
+2026-10-06T12:11:13.3231870Z           Undefined symbols for architecture arm64:
+2026-10-06T12:11:13.3422480Z             "_res_9_nclose", referenced from:
+2026-10-06T12:11:13.3423220Z                 _runtime.text in libprismkernel.a[2](go.o)
+2026-10-06T12:11:13.3424020Z             "_res_9_ninit", referenced from:
+2026-10-06T12:11:13.3424980Z                 _runtime.text in libprismkernel.a[2](go.o)
+2026-10-06T12:11:13.3426010Z             "_res_9_nsearch", referenced from:
+2026-10-06T12:11:13.3426980Z                 _runtime.text in libprismkernel.a[2](go.o)
+2026-10-06T12:11:13.3427940Z           ld: symbol(s) not found for architecture arm64
+2026-10-06T12:11:13.3429100Z           clang: error: linker command failed with exit code 1 (use -v to see invocation)
+2026-10-06T12:11:13.3431090Z           
+2026-10-06T12:11:13.3431920Z 
+2026-10-06T12:11:13.3435220Z [1m[33mwarning[0m: `prism-proxy` (lib) generated 7 warnings
+2026-10-06T12:11:13.3439160Z [1m[91merror[0m: could not compile `prism-proxy` (lib) due to 1 previous error; 7 warnings emitted
+2026-10-06T12:11:13.3442670Z failed to compile iOS app: Failed to run `cargo build`: command ["cargo", "build", "--package", "prism-proxy", "--manifest-path", "/Users/runner/work/Prism/Prism/src-tauri/Cargo.toml", "--target", "aarch64-apple-ios", "--features", "tauri/custom-protocol tauri/custom-protocol", "--lib", "--release"] exited with code 101
+2026-10-06T12:11:13.3450050Z [1m[31m       Error[0m [[30mtauri_cli_node[0m] failed to compile iOS app: Failed to run `cargo build`: command ["cargo", "build", "--package", "prism-proxy", "--manifest-path", "/Users/runner/work/Prism/Prism/src-tauri/Cargo.toml", "--target", "aarch64-apple-ios", "--features", "tauri/custom-protocol tauri/custom-protocol", "--lib", "--release"] exited with code 101
+2026-10-06T12:11:13.3453890Z ** ARCHIVE FAILED **
+2026-10-06T12:11:13.3454560Z 
+2026-10-06T12:11:13.3455320Z note: Using codesigning identity override: ""
+2026-10-06T12:11:13.3464400Z note: Disabling previews because SWIFT_VERSION is set and SWIFT_OPTIMIZATION_LEVEL=-O, expected -Onone (in target 'prism-proxy_iOS' from project 'prism-proxy')
+2026-10-06T12:11:13.3466520Z note: Run script build phase 'Build Rust Code' will be run during every build because the option to run the script phase "Based on dependency analysis" is unchecked. (in target 'prism-proxy_iOS' from project 'prism-proxy')
+2026-10-06T12:11:13.3759810Z failed to archive iOS app: Failed to archive via `xcodebuild`: command ["xcodebuild"] exited with code 65
+2026-10-06T12:11:13.3793940Z        Error [tauri_cli_node] failed to archive iOS app: Failed to archive via `xcodebuild`: command ["xcodebuild"] exited with code 65
+2026-10-06T12:11:13.4297280Z ##[error]Process completed with exit code 1.
+2026-10-06T12:11:13.4893350Z Post job cleanup.
+2026-10-06T12:11:14.2575620Z [command]/opt/homebrew/bin/git version
+2026-10-06T12:11:14.3093820Z git version 2.55.0
+2026-10-06T12:11:14.3151020Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/86baa767-8d73-446d-a6d2-bcb2cbcecd46/.gitconfig'
+2026-10-06T12:11:14.3163580Z Temporarily overriding HOME='/Users/runner/work/_temp/86baa767-8d73-446d-a6d2-bcb2cbcecd46' before making global git config changes
+2026-10-06T12:11:14.3166240Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-06T12:11:14.3168080Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/Prism/Prism
+2026-10-06T12:11:14.3507080Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-06T12:11:14.3568430Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-06T12:11:14.5167940Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-06T12:11:14.5233030Z http.https://github.com/.extraheader
+2026-10-06T12:11:14.5241460Z [command]/opt/homebrew/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-10-06T12:11:14.5375690Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-06T12:11:14.6767750Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-06T12:11:14.6839020Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-06T12:11:14.8910770Z Cleaning up orphan processes
+2026-10-06T12:11:16.7457560Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-go@v5, actions/setup-node@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

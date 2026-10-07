@@ -4,6 +4,7 @@
 //! - 系统代理设置/清除（Windows 注册表 / macOS networksetup / Linux gsettings）
 //! - 管理员/root 权限检测（TUN 模式需要）
 //! - 开机自启动注册
+//! - 代理独占：备份并恢复原有系统代理设置，确保只有当前 APP 的代理生效
 
 #[cfg(target_os = "windows")]
 pub mod windows;
@@ -11,6 +12,28 @@ pub mod windows;
 pub mod macos;
 #[cfg(target_os = "linux")]
 pub mod linux;
+
+/// 系统代理备份（停止时恢复原设置，实现独占性）
+/// 注意：具体实现由各平台模块提供，此处 re-export 统一类型
+pub use windows::ProxyBackup;
+#[cfg(not(target_os = "windows"))]
+pub use macos::ProxyBackup;
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub use linux::ProxyBackup;
+
+/// 读取当前系统代理设置（用于备份）
+pub fn get_system_proxy() -> anyhow::Result<ProxyBackup> {
+    #[cfg(target_os = "windows")]
+    return Ok(windows::get_system_proxy()?);
+    #[cfg(target_os = "macos")]
+    return Ok(macos::get_system_proxy()?);
+    #[cfg(target_os = "linux")]
+    return Ok(linux::get_system_proxy()?);
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        anyhow::bail!("unsupported platform for system proxy");
+    }
+}
 
 /// 设置系统代理（HTTP/HTTPS/SOCKS 统一指向 mixed 端口）
 pub fn set_system_proxy(host: &str, port: u16) -> anyhow::Result<()> {
@@ -35,6 +58,19 @@ pub fn clear_system_proxy() -> anyhow::Result<()> {
     linux::clear_system_proxy()?;
 
     tracing::info!("system proxy cleared");
+    Ok(())
+}
+
+/// 恢复系统代理到备份状态（停止/切换时调用）
+pub fn restore_system_proxy(backup: &ProxyBackup) -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    windows::restore_system_proxy(backup)?;
+    #[cfg(target_os = "macos")]
+    macos::restore_system_proxy(backup)?;
+    #[cfg(target_os = "linux")]
+    linux::restore_system_proxy(backup)?;
+
+    tracing::info!("system proxy restored -> enabled={}, server={:?}", backup.enabled, backup.server);
     Ok(())
 }
 

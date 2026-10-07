@@ -8,12 +8,10 @@ import {
 } from "./modes";
 
 describe("接入模式 / 出站模式标签（防混淆）", () => {
-  it("接入模式包含全部三种 key", () => {
+  it("接入模式包含全部两种 key", () => {
     const keys = RUN_MODES.map((m) => m.key);
-    expect(keys).toEqual(
-      expect.arrayContaining(["systemProxy", "tun", "ruleOnly"])
-    );
-    expect(keys).toHaveLength(3);
+    expect(keys).toEqual(expect.arrayContaining(["systemProxy", "tun"]));
+    expect(keys).toHaveLength(2);
   });
 
   it("出站模式包含全部三种 key", () => {

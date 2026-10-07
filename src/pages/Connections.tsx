@@ -7,9 +7,7 @@ import {
   closeConnection,
 } from "@/api/ipc";
 import { formatBytes } from "@/utils/format";
-import ProGate from "@/components/ProGate";
 import { toast } from "@/components/ui/Toast";
-import { Feature } from "@/pro/gating";
 
 interface ConnRow {
   id: string;
@@ -160,8 +158,7 @@ export default function Connections() {
   };
 
   return (
-    <ProGate feature={Feature.Connections}>
-      <div className="space-y-6">
+    <div className="space-y-6">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <span className="text-sm text-gray-400">
@@ -280,6 +277,5 @@ export default function Connections() {
           </table>
         </div>
       </div>
-    </ProGate>
   );
 }

@@ -19,6 +19,8 @@ pub fn is_uri_list(text: &str) -> bool {
             || l.starts_with("trojan://")
             || l.starts_with("hysteria2://")
             || l.starts_with("hy2://")
+            || l.starts_with("hysteria://")
+            || l.starts_with("hy://")
             || l.starts_with("tuic://")
     })
 }
@@ -37,6 +39,7 @@ pub fn parse_line(line: &str) -> Result<Option<Value>> {
         "vless" => parse_vless(rest)?,
         "trojan" => parse_trojan(rest)?,
         "hysteria2" | "hy2" => parse_hysteria2(rest)?,
+        "hysteria" | "hy" => parse_hysteria(rest)?,
         "tuic" => parse_tuic(rest)?,
         _ => bail!("不支持的协议：{scheme}"),
     };
@@ -557,11 +560,77 @@ fn parse_tuic(rest: &str) -> Result<Value> {
     Ok(node)
 }
 
+/// hysteria://host:port?auth=<password>&peer=<sni>&insecure=1#name
+/// （Hysteria 1 分享链接；与 hysteria2 的密码在 userinfo 不同，这里认证在 query）
+fn parse_hysteria(rest: &str) -> Result<Value> {
+    let (addr_query, name) = rest.split_once('#').unwrap_or((rest, ""));
+    let (hostport, query) = addr_query.split_once('?').unwrap_or((addr_query, ""));
+    let (server, port) = split_host_port(hostport)?;
+    let name = decode_name(name);
+
+    let params: std::collections::HashMap<_, _> = parse_query(query).into_iter().collect();
+    // 认证字段：auth / password / token 均可能出现
+    let password = params
+        .get("auth")
+        .or_else(|| params.get("password"))
+        .or_else(|| params.get("token"))
+        .cloned()
+        .context("hysteria 缺少认证参数（auth/password/token）")?;
+    let sni = params
+        .get("peer")
+        .or_else(|| params.get("sni"))
+        .cloned()
+        .unwrap_or_default();
+    let insecure = params.get("insecure").cloned().unwrap_or_default();
+    let alpn = params.get("alpn").cloned().unwrap_or_default();
+
+    let mut node = json!({
+        "name": name,
+        "type": "hysteria",
+        "server": server,
+        "port": port,
+        "password": password,
+    });
+
+    if !sni.is_empty() {
+        node["sni"] = json!(sni);
+    }
+    if !alpn.is_empty() {
+        node["alpn"] = json!(alpn.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>());
+    }
+    if insecure == "1" || insecure.eq_ignore_ascii_case("true") {
+        node["skip-cert-verify"] = json!(true);
+    }
+
+    Ok(node)
+}
+
 // ---------------- 单元测试 ----------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_hysteria() {
+        let raw = "hysteria://hy1.example.com:443?auth=secret123&peer=sni.example.com&insecure=1&alpn=h3#hy-node";
+        let node = parse_line(raw).unwrap().unwrap();
+        assert_eq!(node["type"], "hysteria");
+        assert_eq!(node["server"], "hy1.example.com");
+        assert_eq!(node["port"], 443);
+        assert_eq!(node["password"], "secret123");
+        assert_eq!(node["sni"], "sni.example.com");
+        assert_eq!(node["skip-cert-verify"], true);
+        assert_eq!(node["alpn"], json!(["h3"]));
+    }
+
+    #[test]
+    fn parses_hysteria_with_password_param() {
+        let raw = "hysteria://host.example.com:443?password=pwd&peer=sni.example.com#hy2";
+        let node = parse_line(raw).unwrap().unwrap();
+        assert_eq!(node["type"], "hysteria");
+        assert_eq!(node["password"], "pwd");
+    }
 
     #[test]
     fn detects_uri_list() {

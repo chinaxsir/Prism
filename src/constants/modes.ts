@@ -16,11 +16,6 @@ export const RUN_MODES: { key: RunMode; title: string; desc: string }[] = [
     title: "TUN 虚拟网卡",
     desc: "虚拟网卡接管整机全部流量，需管理员/root 权限",
   },
-  {
-    key: "ruleOnly",
-    title: "手动代理",
-    desc: "不修改系统设置，需在应用内手动填写代理端口后按规则分流",
-  },
 ];
 
 /**

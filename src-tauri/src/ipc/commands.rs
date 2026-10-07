@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD}, Engine as _};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
@@ -225,6 +225,10 @@ async fn apply_prepared(
 
     // TUN 模式下路由由内核 auto_route 接管；系统代理模式按用户设置写入系统代理
     if *state.mode.read() == RunMode::SystemProxy && settings.system_proxy {
+        // 备份当前系统代理，确保停止时可恢复（代理独占：只有当前 APP 的设置生效）
+        if let Ok(backup) = crate::platform::get_system_proxy() {
+            *state.proxy_backup.write() = Some(backup);
+        }
         crate::platform::set_system_proxy("127.0.0.1", settings.mixed_port)
             .map_err(|e| e.to_string())?;
     }
@@ -521,8 +525,20 @@ pub(crate) async fn do_stop(state: &AppState) -> anyhow::Result<()> {
         handle.shutdown().await?;
     }
 
-    // 3. 兜底清除系统代理（无论何种模式都执行，防止残留断网）
-    crate::platform::clear_system_proxy()?;
+    // 3. 恢复系统代理到启动前状态（代理独占：停止后归还控制权）
+    let backup = state.proxy_backup.write().take();
+    match backup {
+        Some(backup) if backup.enabled && !backup.server.is_empty() => {
+            if let Err(e) = crate::platform::restore_system_proxy(&backup) {
+                tracing::warn!("restore system proxy failed: {e}");
+                crate::platform::clear_system_proxy()?;
+            }
+        }
+        _ => {
+            // 无备份或之前未启用代理，直接清除
+            crate::platform::clear_system_proxy()?;
+        }
+    }
 
     Ok(())
 }
@@ -649,6 +665,7 @@ pub async fn update_subscription(
         if !errors.is_empty() {
             tracing::warn!("subscription partial parse: {}", errors.join("；"));
         }
+        tracing::info!("URI subscription parsed: {} nodes ({} errors)", nodes.len(), errors.len());
         // 节点名称去重（同名节点会互相覆盖）
         let mut seen = std::collections::HashSet::new();
         let mut proxies = Vec::new();
@@ -853,13 +870,18 @@ async fn refresh_providers(state: &AppState, sub_url: &str, profile_text: &str) 
     }
 }
 
-/// 尝试 base64 解码（容错换行/空白），成功且结果为可读 UTF-8 时返回
+/// 尝试 base64 解码（容错换行/空白；依次尝试标准 / URL-safe 两种字符集），
+/// 成功且结果为可读 UTF-8 时返回
 fn try_decode_base64(input: &str) -> Result<String, String> {
     let compact: String = input.chars().filter(|c| !c.is_whitespace()).collect();
-    let decoded = STANDARD
-        .decode(&compact)
-        .map_err(|e| format!("not base64: {}", e))?;
-    String::from_utf8(decoded).map_err(|e| format!("decoded bytes not UTF-8: {}", e))
+    for eng in [&STANDARD, &URL_SAFE, &URL_SAFE_NO_PAD] {
+        if let Ok(bytes) = eng.decode(&compact)
+            && let Ok(text) = String::from_utf8(bytes)
+        {
+            return Ok(text);
+        }
+    }
+    Err("not base64".into())
 }
 
 /// 订阅记录（前端展示用）：在存储记录上附加节点数统计
@@ -1164,11 +1186,22 @@ pub async fn close_all_connections(state: State<'_, AppState>) -> Result<(), Str
 pub async fn get_traffic_stats(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    // 实时流量走 WebSocket 事件（traffic://tick），此处仅返回快照兜底
-    state
-        .kernel_api()
-        .get_connections()
-        .await
+    // 实时流量走 WebSocket 事件（traffic://tick），此处返回持久化统计 + 当前连接快照
+    let stats = crate::core::store::load_traffic_stats(&state.data_dir);
+    let conns = state.kernel_api().get_connections().await.unwrap_or_default();
+    Ok(serde_json::json!({
+        "stats": stats,
+        "connections": conns,
+    }))
+}
+
+#[tauri::command]
+pub async fn add_traffic_tick(
+    state: State<'_, AppState>,
+    up: u64,
+    down: u64,
+) -> Result<crate::core::store::TrafficStats, String> {
+    crate::core::store::add_traffic(&state.data_dir, up, down)
         .map_err(|e| e.to_string())
 }
 

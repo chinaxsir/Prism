@@ -542,6 +542,17 @@ impl KernelApi {
             .await?)
     }
 
+    /// 获取单个代理/策略组详情（含 all 成员列表）
+    pub async fn get_proxy(&self, name: &str) -> Result<serde_json::Value> {
+        Ok(self
+            .client
+            .get(format!("{}/proxies/{}", self.base, name))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?)
+    }
+
     /// 获取所有代理节点和策略组
     pub async fn get_proxies(&self) -> Result<serde_json::Value> {
         Ok(self
@@ -568,26 +579,63 @@ impl KernelApi {
         Ok(())
     }
 
-    /// 策略组整组测速：GET /group/{name}/delay
-    /// （/proxies/{name}/delay 只支持单节点，对策略组调用会返回 400）
-    /// 成功响应会将每个成员的延迟写入节点 history，前端据此展示
+    /// 策略组整组测速：逐个节点调用 /proxies/{name}/delay 并汇总为 map。
+    /// 历史实现直接调用 /group/{name}/delay，但 sing-box 1.11.3 对该端点
+    /// 只返回组本身的延迟（非成员 map），导致前端把全部节点标记为超时。
+    /// 改为逐节点测速后，结果可靠且与 Clash API 响应格式一致。
     pub async fn group_url_test(
         &self,
         name: &str,
         url: Option<&str>,
         timeout_ms: Option<u32>,
     ) -> Result<serde_json::Value> {
-        let endpoint = format!("{}/group/{}/delay", self.base, name);
-        // sing-box 要求显式携带 url 和 timeout 参数，缺省会直接 400
-        let request = self.client.get(&endpoint).query(&[
-            ("url", url.unwrap_or("http://www.gstatic.com/generate_204").to_string()),
-            ("timeout", timeout_ms.unwrap_or(5000).to_string()),
-        ]);
-        let resp = request.send().await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("group url test failed: HTTP {}", resp.status());
+        // 1. 先取组成员列表
+        let group_info = self.get_proxy(name).await?;
+        let members: Vec<String> = group_info
+            .get("all")
+            .and_then(|a| a.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if members.is_empty() {
+            anyhow::bail!("策略组 '{}' 没有可测速的成员", name);
         }
-        Ok(resp.json::<serde_json::Value>().await?)
+
+        let test_url = url.unwrap_or("http://www.gstatic.com/generate_204");
+        let timeout = timeout_ms.unwrap_or(5000);
+        let mut results = serde_json::Map::new();
+
+        for member in members {
+            let endpoint = format!("{}/proxies/{}/delay", self.base, member);
+            let req = self.client.get(&endpoint).query(&[
+                ("url", test_url.to_string()),
+                ("timeout", timeout.to_string()),
+            ]);
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(json) => {
+                            if let Some(delay) = json.get("delay").and_then(|d| d.as_u64()) {
+                                results.insert(member, serde_json::json!(delay));
+                            }
+                        }
+                        Err(e) => tracing::warn!("parse delay for {}: {}", member, e),
+                    }
+                }
+                Ok(resp) => {
+                    tracing::warn!("delay test {}: HTTP {}", member, resp.status());
+                }
+                Err(e) => {
+                    tracing::warn!("delay test {}: {}", member, e);
+                }
+            }
+        }
+
+        Ok(serde_json::Value::Object(results))
     }
 
     /// 获取当前规则列表

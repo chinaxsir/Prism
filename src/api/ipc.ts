@@ -3,6 +3,8 @@ import type { CoreStatus, RunMode, UserSettings } from "@/stores/core";
 
 export const startCore = () => invoke<void>("start_core");
 export const stopCore = () => invoke<void>("stop_core");
+export const addTrafficTick = (up: number, down: number) =>
+  invoke<{ todayBytes: number; weekBytes: number; monthBytes: number }>("add_traffic_tick", { up, down });
 
 export interface CoreStatusDto {
   status: CoreStatus;

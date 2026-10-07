@@ -143,6 +143,7 @@ pub fn run() {
             ipc::commands::close_connection,
             ipc::commands::close_all_connections,
             ipc::commands::get_traffic_stats,
+            ipc::commands::add_traffic_tick,
             ipc::commands::get_rules,
             ipc::commands::get_proxy_groups,
             ipc::commands::get_settings,

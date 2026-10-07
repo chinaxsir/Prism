@@ -6,6 +6,13 @@
 use std::io;
 use std::process::Command;
 
+/// 系统代理备份（与 mod.rs 中的 ProxyBackup 对齐）
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ProxyBackup {
+    pub enabled: bool,
+    pub server: String,
+}
+
 /// 获取所有活跃网络服务名称（如 Wi-Fi、Ethernet）
 fn network_services() -> Vec<String> {
     let Ok(output) = Command::new("networksetup")
@@ -47,6 +54,45 @@ fn run_networksetup(args: &[&str]) -> io::Result<()> {
     Ok(())
 }
 
+/// 读取某服务的 web 代理状态：返回 (是否启用, server, port)
+fn get_webproxy(service: &str) -> io::Result<(bool, String, String)> {
+    let output = Command::new("networksetup")
+        .args(["-getwebproxy", service])
+        .output()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let enabled = text.contains("Enabled: Yes");
+    let server = text
+        .lines()
+        .find(|l| l.contains("Server:"))
+        .and_then(|l| l.split(':').nth(1))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let port = text
+        .lines()
+        .find(|l| l.contains("Port:"))
+        .and_then(|l| l.split(':').nth(1))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    Ok((enabled, server, port))
+}
+
+/// 读取当前系统代理设置（用于备份）——检测任一活跃服务是否已启用代理
+pub fn get_system_proxy() -> io::Result<ProxyBackup> {
+    for service in network_services() {
+        if let Ok((enabled, server, port)) = get_webproxy(&service) {
+            if enabled && !server.is_empty() {
+                return Ok(ProxyBackup {
+                    enabled: true,
+                    server: format!("{}:{}", server, port),
+                });
+            }
+        }
+    }
+    Ok(ProxyBackup::default())
+}
+
 pub fn set_system_proxy(host: &str, port: u16) -> io::Result<()> {
     let port = port.to_string();
 
@@ -63,6 +109,23 @@ pub fn clear_system_proxy() -> io::Result<()> {
         run_networksetup(&["-setwebproxystate", &service, "off"])?;
         run_networksetup(&["-setsecurewebproxystate", &service, "off"])?;
         run_networksetup(&["-setsocksfirewallproxystate", &service, "off"])?;
+    }
+    Ok(())
+}
+
+/// 恢复系统代理到备份状态
+pub fn restore_system_proxy(backup: &ProxyBackup) -> io::Result<()> {
+    if backup.enabled && !backup.server.is_empty() {
+        let parts: Vec<&str> = backup.server.split(':').collect();
+        let host = parts.first().copied().unwrap_or("127.0.0.1");
+        let port = parts.get(1).copied().unwrap_or("7890");
+        for service in network_services() {
+            let _ = run_networksetup(&["-setwebproxy", &service, host, port]);
+            let _ = run_networksetup(&["-setsecurewebproxy", &service, host, port]);
+            let _ = run_networksetup(&["-setsocksfirewallproxy", &service, host, port]);
+        }
+    } else {
+        clear_system_proxy()?;
     }
     Ok(())
 }

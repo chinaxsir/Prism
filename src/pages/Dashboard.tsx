@@ -5,6 +5,7 @@ import {
   Gauge,
   Power,
   Timer,
+  BarChart3,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -25,7 +26,15 @@ import { formatBytes, formatSpeed, formatUptime } from "@/utils/format";
 const MODE_LABEL: Record<RunMode, string> = {
   systemProxy: "系统代理",
   tun: "TUN 全局",
-  ruleOnly: "仅规则",
+};
+
+// 平台检测：Tauri 内部 API 或 fallback
+const isMobile = () => {
+  try {
+    return navigator.userAgent.includes("Android") || navigator.userAgent.includes("iPhone") || navigator.userAgent.includes("iPad");
+  } catch {
+    return false;
+  }
 };
 
 export default function Dashboard() {
@@ -36,6 +45,7 @@ export default function Dashboard() {
   const memoryUsage = useCoreStore((s) => s.memoryUsage);
   const uptimeSecs = useCoreStore((s) => s.uptimeSecs);
   const traffic = useCoreStore((s) => s.traffic);
+  const sessionTraffic = useCoreStore((s) => s.sessionTraffic);
   const setStatus = useCoreStore((s) => s.setStatus);
   const setMode = useCoreStore((s) => s.setMode);
   const setTrafficRate = useCoreStore((s) => s.setTrafficRate);
@@ -44,6 +54,7 @@ export default function Dashboard() {
   const pushTraffic = useCoreStore((s) => s.pushTraffic);
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const mobile = isMobile();
 
   const running = status === "running";
 
@@ -137,11 +148,19 @@ export default function Dashboard() {
           label="运行时长"
           value={running ? formatUptime(uptimeSecs) : "—"}
         />
-        <StatCard
-          icon={<Cpu size={20} className="text-accent" />}
-          label="内存占用"
-          value={running && memoryUsage > 0 ? formatBytes(memoryUsage) : "—"}
-        />
+        {mobile ? (
+          <StatCard
+            icon={<BarChart3 size={20} className="text-accent" />}
+            label="今日流量"
+            value={running ? formatBytes(sessionTraffic) : "—"}
+          />
+        ) : (
+          <StatCard
+            icon={<Cpu size={20} className="text-accent" />}
+            label="内存占用"
+            value={running && memoryUsage > 0 ? formatBytes(memoryUsage) : "—"}
+          />
+        )}
       </div>
 
       {/* 启动/停止错误提示 */}

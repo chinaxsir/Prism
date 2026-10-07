@@ -31,13 +31,22 @@ pub enum RunMode {
     SystemProxy,
     /// TUN 全局接管
     Tun,
-    /// 仅规则内分流，不设置系统代理
-    RuleOnly,
 }
 
 impl Default for RunMode {
     fn default() -> Self {
         Self::SystemProxy
+    }
+}
+
+/// 兼容旧配置：历史版本存在 RuleOnly（仅规则）模式，读取时映射到 SystemProxy
+impl RunMode {
+    pub fn from_stored(s: &str) -> Self {
+        match s {
+            "ruleOnly" | "rule_only" | "RuleOnly" => Self::SystemProxy,
+            "tun" | "Tun" => Self::Tun,
+            _ => Self::SystemProxy,
+        }
     }
 }
 
@@ -130,6 +139,8 @@ pub struct AppState {
     pub main_selector: RwLock<Option<String>>,
     /// 当前 Pro 授权状态（启动时由 license 缓存恢复；后台校验后刷新）
     pub entitlement: RwLock<super::license::EntitlementStatus>,
+    /// 系统代理备份：启动时备份原设置，停止/切换时恢复，确保代理独占
+    pub proxy_backup: RwLock<Option<crate::platform::ProxyBackup>>,
 }
 
 impl AppState {
@@ -151,6 +162,7 @@ impl AppState {
             kernel_version: RwLock::new(None),
             main_selector: RwLock::new(None),
             entitlement: RwLock::new(super::license::cached_entitlement(&data_dir)),
+            proxy_backup: RwLock::new(None),
         }
     }
 

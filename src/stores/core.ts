@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 export type CoreStatus = "stopped" | "starting" | "running" | "stopping" | "error";
-export type RunMode = "systemProxy" | "tun" | "ruleOnly";
+export type RunMode = "systemProxy" | "tun";
 export type OutboundMode = "rule" | "global" | "direct";
 
 export interface UserSettings {
@@ -44,6 +44,8 @@ interface CoreState {
   setUptime: (secs: number) => void;
   setSettings: (s: UserSettings) => void;
   pushTraffic: (up: number, down: number) => void;
+  /** 当前会话累计流量（字节），关闭 APP 后清零 */
+  sessionTraffic: number;
 }
 
 // 环形缓冲：仅保留最近 60 个采样点（1 分钟）
@@ -57,6 +59,7 @@ export const useCoreStore = create<CoreState>((set, get) => ({
   memoryUsage: 0,
   uptimeSecs: 0,
   traffic: [],
+  sessionTraffic: 0,
   settings: {
     mixedPort: 2080,
     allowLan: false,
@@ -80,6 +83,7 @@ export const useCoreStore = create<CoreState>((set, get) => ({
     };
     const next = [...get().traffic, point];
     if (next.length > MAX_POINTS) next.shift();
-    set({ traffic: next });
+    // 累计当前会话流量（关闭 APP 后清零）
+    set({ traffic: next, sessionTraffic: get().sessionTraffic + up + down });
   },
 }));

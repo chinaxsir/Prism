@@ -101,9 +101,12 @@ export default function Proxies() {
   const current = groups.find((g) => g.name === activeGroup);
 
   // 组内节点（all 中可能是对象或节点名字符串）
+  // 只显示真实节点（proxiesMap 中 type 非 Selector/URLTest/Fallback/LoadBalance 的条目），
+  // 过滤掉嵌套的策略组引用——否则节点页会把策略组当成节点展示，造成「节点数偏少」的观感。
   const nodes: ProxyEntry[] = (current?.all ?? [])
     .map((item) => (typeof item === "string" ? proxiesMap[item] : item))
-    .filter((item): item is ProxyEntry => Boolean(item));
+    .filter((item): item is ProxyEntry => Boolean(item))
+    .filter((item) => !GROUP_TYPES.includes(item.type));
 
   /// 0 = 超时；undefined = 未测速
   const lastDelay = (node: ProxyEntry): Delay => {
@@ -115,9 +118,13 @@ export default function Proxies() {
 
   const handleTestGroup = async () => {
     if (!activeGroup || testing) return;
+    if (nodes.length === 0) {
+      toast.error("当前策略组没有可测速的节点");
+      return;
+    }
     setTesting(true);
     try {
-      // sing-box 组测速只回传成功节点的延迟 map；缺席成员标记为超时
+      // 后端逐节点测速后返回 {name: delay} 的 map；缺席成员标记为超时
       const result = (await urlTest(activeGroup)) as Record<
         string,
         number
@@ -129,6 +136,7 @@ export default function Proxies() {
       await loadProxies();
     } catch (e) {
       console.error("url test failed:", e);
+      toast.error(`测速失败：${String(e)}`);
     } finally {
       setTesting(false);
     }

@@ -1,0 +1,8 @@
+[package]
+name = "fake-clang"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "clang"
+path = "src/main.rs"

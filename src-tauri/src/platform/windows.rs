@@ -23,6 +23,13 @@ const INTERNET_SETTINGS_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const APP_NAME: &str = "Prism";
 
+/// 系统代理备份结构
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ProxyBackup {
+    pub enabled: bool,
+    pub server: String,
+}
+
 /// &str -> 以 0 结尾的 UTF-16
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -102,6 +109,76 @@ enum RegValue {
     Sz(String),
 }
 
+/// 读取注册表 DWORD 值
+fn read_reg_dword(key_name: &str, value_name: &str) -> io::Result<u32> {
+    let subkey = wide(key_name);
+    let value_wide = wide(value_name);
+    unsafe {
+        let mut hkey = Default::default();
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            0,
+            windows::Win32::System::Registry::KEY_READ,
+            &mut hkey,
+        ).map_err(|e| io::Error::other(format!("RegOpenKeyExW failed: {:?}", e)))?;
+        let mut data = 0u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let result = windows::Win32::System::Registry::RegQueryValueExW(
+            hkey,
+            PCWSTR(value_wide.as_ptr()),
+            None,
+            None,
+            Some(&mut data as *mut _ as *mut u8),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hkey);
+        result.map_err(|e| io::Error::other(format!("RegQueryValueExW failed: {:?}", e)))?;
+        Ok(data)
+    }
+}
+
+/// 读取注册表字符串值
+fn read_reg_string(key_name: &str, value_name: &str) -> io::Result<String> {
+    let subkey = wide(key_name);
+    let value_wide = wide(value_name);
+    unsafe {
+        let mut hkey = Default::default();
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            0,
+            windows::Win32::System::Registry::KEY_READ,
+            &mut hkey,
+        ).map_err(|e| io::Error::other(format!("RegOpenKeyExW failed: {:?}", e)))?;
+        let mut buffer = vec![0u16; 256];
+        let mut size = (buffer.len() * 2) as u32;
+        let result = windows::Win32::System::Registry::RegQueryValueExW(
+            hkey,
+            PCWSTR(value_wide.as_ptr()),
+            None,
+            None,
+            Some(buffer.as_mut_ptr() as *mut u8),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hkey);
+        result.map_err(|e| io::Error::other(format!("RegQueryValueExW failed: {:?}", e)))?;
+        let len = (size as usize) / 2;
+        buffer.truncate(len.saturating_sub(1)); // 去掉结尾 null
+        Ok(String::from_utf16_lossy(&buffer))
+    }
+}
+
+/// 读取当前系统代理设置（用于备份）
+pub fn get_system_proxy() -> io::Result<ProxyBackup> {
+    let enabled = read_reg_dword(INTERNET_SETTINGS_KEY, "ProxyEnable").unwrap_or(0);
+    let server = read_reg_string(INTERNET_SETTINGS_KEY, "ProxyServer").unwrap_or_default();
+    Ok(ProxyBackup {
+        enabled: enabled == 1,
+        server,
+    })
+}
+
 pub fn set_system_proxy(host: &str, port: u16) -> io::Result<()> {
     write_reg_value(
         INTERNET_SETTINGS_KEY,
@@ -122,6 +199,29 @@ pub fn clear_system_proxy() -> io::Result<()> {
         "ProxyEnable",
         &RegValue::Dword(0),
     )?;
+    notify_settings_changed()
+}
+
+/// 恢复系统代理到备份状态
+pub fn restore_system_proxy(backup: &ProxyBackup) -> io::Result<()> {
+    if backup.enabled && !backup.server.is_empty() {
+        write_reg_value(
+            INTERNET_SETTINGS_KEY,
+            "ProxyServer",
+            &RegValue::Sz(backup.server.clone()),
+        )?;
+        write_reg_value(
+            INTERNET_SETTINGS_KEY,
+            "ProxyEnable",
+            &RegValue::Dword(1),
+        )?;
+    } else {
+        write_reg_value(
+            INTERNET_SETTINGS_KEY,
+            "ProxyEnable",
+            &RegValue::Dword(0),
+        )?;
+    }
     notify_settings_changed()
 }
 

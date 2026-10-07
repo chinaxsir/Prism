@@ -64,6 +64,98 @@ pub fn provider_path(data_dir: &Path, sub_url: &str, provider_name: &str) -> Pat
         .join(format!("{:016x}.yaml", h.finish()))
 }
 
+/// 流量统计持久化：日/周/月累计（字节）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrafficStats {
+    /// 今日已用（下载+上传，字节）
+    pub today_bytes: u64,
+    /// 本周已用（字节）
+    pub week_bytes: u64,
+    /// 本月已用（字节）
+    pub month_bytes: u64,
+    /// 上次统计的日期戳（用于判断是否需要重置 today/week/month）
+    pub last_date: String,
+    /// 上次统计的 ISO 周数（用于判断是否需要重置 week）
+    pub last_week: u32,
+    /// 上次统计的月份（用于判断是否需要重置 month）
+    pub last_month: u32,
+}
+
+impl Default for TrafficStats {
+    fn default() -> Self {
+        let now = std::time::SystemTime::now();
+        let epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let days = (epoch.as_secs() / 86400) as i64;
+        // 简化日期计算：用 chrono 太重，这里用 naive 算法
+        // 对于统计用途，只需区分日/周/月即可
+        Self {
+            today_bytes: 0,
+            week_bytes: 0,
+            month_bytes: 0,
+            last_date: format!("day-{}", days),
+            last_week: (days / 7) as u32,
+            last_month: ((days / 30) as u32) % 12,
+        }
+    }
+}
+
+fn traffic_stats_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("traffic_stats.json")
+}
+
+/// 读取流量统计
+pub fn load_traffic_stats(data_dir: &Path) -> TrafficStats {
+    match std::fs::read(traffic_stats_path(data_dir)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(_) => TrafficStats::default(),
+    }
+}
+
+/// 写入流量统计
+pub fn save_traffic_stats(data_dir: &Path, stats: &TrafficStats) -> anyhow::Result<()> {
+    std::fs::create_dir_all(data_dir).ok();
+    let path = traffic_stats_path(data_dir);
+    let tmp = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(stats)?;
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// 追加流量并自动重置过期统计
+pub fn add_traffic(data_dir: &Path, up: u64, down: u64) -> anyhow::Result<TrafficStats> {
+    let mut stats = load_traffic_stats(data_dir);
+    let now = std::time::SystemTime::now();
+    let epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let days = (epoch.as_secs() / 86400) as i64;
+    let current_date = format!("day-{}", days);
+    let current_week = (days / 7) as u32;
+    let current_month = ((days / 30) as u32) % 12;
+
+    // 重置日/周/月统计
+    if stats.last_date != current_date {
+        stats.today_bytes = 0;
+        stats.last_date = current_date;
+    }
+    if stats.last_week != current_week {
+        stats.week_bytes = 0;
+        stats.last_week = current_week;
+    }
+    if stats.last_month != current_month {
+        stats.month_bytes = 0;
+        stats.last_month = current_month;
+    }
+
+    let total = up + down;
+    stats.today_bytes += total;
+    stats.week_bytes += total;
+    stats.month_bytes += total;
+
+    save_traffic_stats(data_dir, &stats)?;
+    Ok(stats)
+}
+
 fn settings_path(data_dir: &Path) -> PathBuf {
     data_dir.join("settings.json")
 }
