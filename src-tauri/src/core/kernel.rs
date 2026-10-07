@@ -264,6 +264,7 @@ impl KernelHandle {
         #[cfg(any(target_os = "ios", target_os = "android"))]
         mobile_ffi::stop();
 
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
         clear_kernel_pid(self.pid);
         tracing::info!("sing-box process {} stopped", self.pid);
         Ok(())

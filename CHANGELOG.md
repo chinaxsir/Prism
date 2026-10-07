@@ -3,6 +3,16 @@
 本项目版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 每次发布前更新本文件，并在 Git 打对应 tag。
 
+## [0.3.1] - 2026-10-07
+
+### 构建修复（0.3.0 移动端构建失败）
+- **iOS**：`kernel.rs` 中 `clear_kernel_pid(self.pid)` 缺少 `not(ios, android)` 门控，
+  导致 iOS 编译报 `cannot find function clear_kernel_pid`。已加 cfg 门控。
+- **Android**：Go 在 android 目标不支持 `-buildmode=c-archive`（报
+  `c-archive not supported on android/arm64`）。改用 `-buildmode=c-shared` 产出
+  `.so`，`build.rs` 链接方式由 `static` 改为 `dylib`，并在 CI 中将四架构 `.so`
+  拷入 `gen/android/app/src/main/jniLibs/<abi>/` 供 APK 打包与运行时加载。
+
 ## [0.3.0] - 2026-10-07
 
 ### 核心变更

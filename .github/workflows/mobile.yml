@@ -136,8 +136,9 @@ jobs:
       - name: Fetch geo databases
         run: node scripts/fetch-kernel.cjs --geo-only
 
-      # Android 内核与 iOS 同为 c-archive 进程内承载：用 NDK clang 按四架构
-      # 各产出一个静态库，build.rs 按 CARGO_CFG_TARGET_ARCH 选择链接。
+      # Android 内核与 iOS 同为进程内承载，但 Go 在 android 上不支持 c-archive，
+      # 改用 c-shared 产出 .so，build.rs 以 dylib 方式链接；.so 还需拷入
+      # gen/android/.../jniLibs/<abi>/ 才能被 APK 打包并在运行时加载。
       # 不再有 sidecar，也不存在任何运行时内核下载
       - name: Build embedded Android kernels
         working-directory: src-tauri/ios-kernel
@@ -152,16 +153,29 @@ jobs:
               CC="$BIN/$cc" \
               CGO_CFLAGS="--target=$target" \
               CGO_LDFLAGS="--target=$target" \
-              go build -buildmode=c-archive \
+              go build -buildmode=c-shared \
                 -tags "with_gvisor,with_quic,with_grpc,with_wireguard,with_ech,with_utls,with_clash_api" \
                 -trimpath -ldflags="-s -w" \
-                -o "libprismkernel-$arch.a" .
+                -o "libprismkernel-$arch.so" .
           }
           build arm64  arm64 aarch64-linux-android24-clang       aarch64-linux-android24
           build arm    arm   armv7a-linux-androideabi24-clang   armv7a-linux-androideabi24
           build 386    386   i686-linux-android24-clang          i686-linux-android24
           build amd64  amd64 x86_64-linux-android24-clang        x86_64-linux-android24
-          ls -lh libprismkernel-*.a
+          ls -lh libprismkernel-*.so
+
+      # 将四个架构的 .so 拷入 Tauri Android 工程的 jniLibs，确保被打包进 APK
+      - name: Stage Android kernel .so into jniLibs
+        shell: bash
+        run: |
+          set -e
+          JNI="src-tauri/gen/android/app/src/main/jniLibs"
+          mkdir -p "$JNI/arm64-v8a" "$JNI/armeabi-v7a" "$JNI/x86" "$JNI/x86_64"
+          cp src-tauri/ios-kernel/libprismkernel-arm64.so "$JNI/arm64-v8a/"
+          cp src-tauri/ios-kernel/libprismkernel-arm.so   "$JNI/armeabi-v7a/"
+          cp src-tauri/ios-kernel/libprismkernel-386.so   "$JNI/x86/"
+          cp src-tauri/ios-kernel/libprismkernel-amd64.so "$JNI/x86_64/"
+          ls -lhR "$JNI"
 
       # Gradle rust 插件会把 cargo 详细输出重定向到文件，失败时控制台只见
       # "Process 'command 'npm'' finished with non-zero exit value 1"。

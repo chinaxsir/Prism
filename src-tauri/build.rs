@@ -2,9 +2,9 @@
 //! 1. tauri_build：能力/codegen，并在 Android 编译期生成
 //!    gen/android/tauri.settings.gradle（缺失会导致 Gradle settings 评估失败）、
 //!    注入 desktop/mobile cfg 别名（缺它会报 unexpected `cfg` condition `desktop`）。
-//! 2. iOS / Android 目标额外链接内嵌 sing-box 静态库（ios-kernel/libprismkernel*.a，
-//!    由 CI 用 Go c-archive 构建，见 .github/workflows/mobile.yml）——
-//!    两平台均进程内运行内核，不携带任何需要联网下载的文件。
+//! 2. iOS 目标链接内嵌 sing-box 静态库（c-archive，.a）；
+//!    Android 目标链接内嵌 sing-box 共享库（c-shared，.so——Go 不支持
+//!    android 上的 c-archive），产物由 CI 构建并拷入 jniLibs 供 APK 打包。
 
 use std::path::{Path, PathBuf};
 
@@ -30,7 +30,8 @@ fn main() {
             );
         }
         "android" => {
-            // c-archive 按架构单独命名（CI 在 ios-kernel/ 一次产出四个）
+            // Go 在 android 上不支持 c-archive，改用 c-shared 产出 .so；
+            // 按架构单独命名（CI 在 ios-kernel/ 一次产出四个），并拷入 jniLibs 打包。
             let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
             let name = match arch.as_str() {
                 "aarch64" => "prismkernel-arm64",
@@ -40,13 +41,13 @@ fn main() {
                 other => panic!("android: 内嵌内核不支持的架构: {other}"),
             };
             println!("cargo:rustc-link-search=native={}", kernel_dir.display());
-            println!("cargo:rustc-link-lib=static={name}");
+            println!("cargo:rustc-link-lib=dylib={name}");
             // Go android 运行时需要 liblog（__android_log_print）
             println!("cargo:rustc-link-lib=log");
             println!(
                 "cargo:rerun-if-changed={}",
                 Path::new(&kernel_dir)
-                    .join(format!("lib{name}.a"))
+                    .join(format!("lib{name}.so"))
                     .display()
             );
         }
