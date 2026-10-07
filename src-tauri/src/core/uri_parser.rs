@@ -43,18 +43,28 @@ pub fn parse_line(line: &str) -> Result<Option<Value>> {
     Ok(Some(node))
 }
 
-/// 批量解析（返回 (节点列表, 无法解析的行号+原因)）
-pub fn parse_lines(text: &str) -> (Vec<Value>, Vec<String>) {
+/// 批量解析（返回 (节点列表, 无法解析的行号+原因, 机场提示信息)）
+/// 机场提示：如「终端超限，请至面板重置」等，由 AIRPORT_NOTICE: 前缀标识
+pub fn parse_lines(text: &str) -> (Vec<Value>, Vec<String>, Option<String>) {
     let mut nodes = Vec::new();
     let mut errors = Vec::new();
+    let mut notice = None;
     for (idx, line) in text.lines().enumerate() {
         match parse_line(line) {
             Ok(Some(node)) => nodes.push(node),
             Ok(None) => {}
-            Err(e) => errors.push(format!("第 {} 行：{}", idx + 1, e)),
+            Err(e) => {
+                let msg = e.to_string();
+                if let Some(notice_text) = msg.strip_prefix("AIRPORT_NOTICE:") {
+                    // 机场提示优先级最高，直接返回给上层展示
+                    notice = Some(notice_text.to_string());
+                } else {
+                    errors.push(format!("第 {} 行：{}", idx + 1, msg));
+                }
+            }
         }
     }
-    (nodes, errors)
+    (nodes, errors, notice)
 }
 
 // ---------------- 通用工具 ----------------
@@ -248,14 +258,20 @@ fn parse_vmess(rest: &str) -> Result<Value> {
         .and_then(|v| u16::try_from(v).ok())
         .context("端口无效")?;
 
-    // 过滤机场流量提示伪节点：server 为环回/本地地址，或名称包含流量关键词
+    // 机场返回的提示节点（流量超限/到期/重置引导等）：server 为环回地址，
+    // 名称包含提示关键词。识别后跳过，由上层统一给出友好错误
     let is_placeholder = server.starts_with("127.")
         || server.starts_with("localhost")
         || name.contains("剩余流量")
         || name.contains("下次重置")
-        || name.contains("已用流量");
+        || name.contains("已用流量")
+        || name.contains("超限")
+        || name.contains("重置接入")
+        || name.contains("到期")
+        || name.contains("请至面板")
+        || name.contains("请联系客服");
     if is_placeholder {
-        bail!("机场流量提示占位节点，非可用代理");
+        bail!("AIRPORT_NOTICE:{name}");
     }
 
     let uuid = j["id"].as_str().unwrap_or_default().to_string();
@@ -345,9 +361,12 @@ fn parse_vless(rest: &str) -> Result<Value> {
     let (server, port) = split_host_port(hostport)?;
     let name = decode_name(name);
 
-    // 过滤机场流量提示伪节点（vless/trojan 同）
-    if server.starts_with("127.") || server.starts_with("localhost") || name.contains("剩余流量") || name.contains("下次重置") {
-        bail!("机场流量提示占位节点，非可用代理");
+    // 机场返回的提示节点（流量超限/到期/重置引导等）
+    if server.starts_with("127.") || server.starts_with("localhost")
+        || name.contains("剩余流量") || name.contains("下次重置")
+        || name.contains("超限") || name.contains("重置接入")
+        || name.contains("到期") || name.contains("请至面板") {
+        bail!("AIRPORT_NOTICE:{name}");
     }
 
     let params: std::collections::HashMap<_, _> = parse_query(query).into_iter().collect();
@@ -421,9 +440,12 @@ fn parse_trojan(rest: &str) -> Result<Value> {
     let (server, port) = split_host_port(hostport)?;
     let name = decode_name(name);
 
-    // 过滤机场流量提示伪节点
-    if server.starts_with("127.") || server.starts_with("localhost") || name.contains("剩余流量") || name.contains("下次重置") {
-        bail!("机场流量提示占位节点，非可用代理");
+    // 机场返回的提示节点
+    if server.starts_with("127.") || server.starts_with("localhost")
+        || name.contains("剩余流量") || name.contains("下次重置")
+        || name.contains("超限") || name.contains("重置接入")
+        || name.contains("到期") || name.contains("请至面板") {
+        bail!("AIRPORT_NOTICE:{name}");
     }
 
     let params: std::collections::HashMap<_, _> = parse_query(query).into_iter().collect();

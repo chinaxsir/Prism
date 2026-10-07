@@ -633,7 +633,13 @@ pub async fn update_subscription(
     // URI 列表订阅（ss:// vmess:// vless:// trojan:// hysteria2:// tuic:// 分享链接）：
     // 解析为节点并合成 Clash YAML，复用统一 pipeline，不再拒绝
     if crate::core::uri_parser::is_uri_list(&text) {
-        let (nodes, errors) = crate::core::uri_parser::parse_lines(&text);
+        let (nodes, errors, notice) = crate::core::uri_parser::parse_lines(&text);
+        // 机场提示（流量超限/到期等）优先展示，引导用户去机场面板处理
+        if let Some(notice_text) = notice {
+            return Err(format!(
+                "机场提示：{notice_text}\n\n请至机场面板重置接入记录或续费后重试"
+            ));
+        }
         if nodes.is_empty() {
             return Err(format!(
                 "URI 列表订阅解析失败：{}",
