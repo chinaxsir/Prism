@@ -255,9 +255,21 @@ fn load_enabled_profiles(state: &AppState) -> Vec<(String, String, String)> {
 
     for (i, record) in enabled.iter().enumerate() {
         let path = crate::core::store::profile_path(&state.data_dir, &record.url);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(_) => {
+        // 已缓存内容必须是含节点的有效 Clash YAML；空壳（如机场返回的
+        // JSON 错误页）视为缺失，走旧版迁移兜底恢复
+        let cached_valid = std::fs::read_to_string(&path)
+            .ok()
+            .filter(|text| {
+                crate::core::config_builder::validate_subscription_text(text)
+                    .map(|_| true)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("cached profile invalid for {}: {e}", record.url);
+                        false
+                    })
+            });
+        let text = match cached_valid {
+            Some(text) => text,
+            None => {
                 // 新版按 URL 哈希落盘；旧版本内容在 data_dir/profile.yaml 或
                 // kernel/profile.yaml——首次升级时迁移到哈希路径，后续逻辑统一
                 if let Some(text) = &legacy_text {
@@ -670,6 +682,11 @@ pub async fn update_subscription(
 
     if !text.contains("proxies") && !text.contains("{") {
         return Err("订阅内容无法识别：既不是 Clash YAML，也不是 sing-box JSON".into());
+    }
+
+    // 落盘前校验：防止机场返回 HTML 错误页/限流提示等空内容覆盖本地可用订阅
+    if let Err(e) = crate::core::config_builder::validate_subscription_text(&text) {
+        return Err(e);
     }
 
     // 每条订阅独立 profile 文件（多订阅模型），路径由 URL 哈希派生

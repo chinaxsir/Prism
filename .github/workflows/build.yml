@@ -53,14 +53,11 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # 暂不签名（仓库内旧 APPLE_CERTIFICATE 已失效会导致 security import 失败）；
-          # 显式置空跳过签名，产出未签名安装包供直接分发，后续配置有效证书再开启
-          APPLE_CERTIFICATE: ""
-          APPLE_CERTIFICATE_PASSWORD: ""
-          APPLE_SIGNING_IDENTITY: ""
-          APPLE_ID: ""
-          APPLE_PASSWORD: ""
-          APPLE_TEAM_ID: ""
+          # 注意：不要设置任何 APPLE_* 环境变量（包括空字符串）。
+          # tauri-bundler 只要检测到 APPLE_CERTIFICATE 存在就会尝试导入
+          # keychain 证书，空值也会失败——曾导致 macOS 打包全挂。
+          # 当前策略：产出未签名安装包直接分发（与移动端 TrollStore 一致），
+          # 后续配置有效 Apple 开发者证书后再启用签名。
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Prism ${{ github.ref_name }}"

@@ -52,6 +52,23 @@ pub struct ClashProfileView {
     pub proxy_providers: HashMap<String, ProviderView>,
 }
 
+/// 订阅内容落盘前校验：必须包含节点 / 策略组 / proxy-provider 之一。
+/// 防止机场返回 HTML 错误页、限流提示等无效内容覆盖掉本地可用订阅，
+/// 导致启动时报「未解析到任何节点或策略组」。
+pub fn validate_subscription_text(text: &str) -> Result<(), String> {
+    let profile: ClashProfile = serde_yaml::from_str(text.trim())
+        .map_err(|e| format!("订阅内容不是有效的 Clash YAML（{e}）"))?;
+    if profile.proxies.is_empty()
+        && profile.proxy_groups.is_empty()
+        && profile.proxy_providers.is_empty()
+    {
+        return Err(
+            "订阅内容未包含任何节点（proxies）、策略组（proxy-groups）或 provider，可能是机场限流/到期提示页，已保留原订阅".into(),
+        );
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 pub struct ProviderView {
     #[serde(rename = "type")]

@@ -5,6 +5,11 @@
 body {
   @apply bg-surface text-gray-200 antialiased;
   font-family: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  /* 移动端 WebView 禁止捏合缩放/双击缩放（viewport user-scalable=no 的兜底） */
+  touch-action: pan-x pan-y;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  overscroll-behavior: none;
 }
 
 /* Custom scrollbar for a more commercial app look */
