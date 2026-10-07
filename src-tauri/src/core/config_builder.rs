@@ -60,6 +60,8 @@ pub fn validate_subscription_text(text: &str) -> Result<(), String> {
         .map_err(|e| format!("订阅内容不是有效的 Clash YAML（{e}）"))?;
 
     // 检查 proxies：不仅要有节点，且节点 server 不能全是环回地址（机场提示页）
+    // 注意：emit_node 会跳过 127.x/localhost 节点，这里必须同步过滤，否则
+    // 更新时通过校验、启动时却被过滤导致「无节点」
     let real_nodes: Vec<_> = profile
         .proxies
         .iter()
@@ -69,12 +71,19 @@ pub fn validate_subscription_text(text: &str) -> Result<(), String> {
         })
         .collect();
 
-    if real_nodes.is_empty()
-        && profile.proxy_groups.is_empty()
-        && profile.proxy_providers.is_empty()
-    {
+    // 有可用节点 或 有 proxy-providers（启动时会下载）即视为有效
+    if real_nodes.is_empty() && profile.proxy_providers.is_empty() {
         return Err(
             "订阅内容未包含可用节点（可能是机场限流/到期提示页），已保留原订阅".into(),
+        );
+    }
+    // 只有策略组没有节点：策略组成员为空，同样无法启动
+    if real_nodes.is_empty()
+        && profile.proxy_providers.is_empty()
+        && !profile.proxy_groups.is_empty()
+    {
+        return Err(
+            "订阅内容包含策略组但无可用节点（可能是机场限流/到期提示页），已保留原订阅".into(),
         );
     }
     Ok(())
@@ -578,7 +587,36 @@ pub fn build(
     });
 
     if total_nodes == 0 && total_groups == 0 {
-        bail!("订阅内容未解析到任何节点或策略组：请确认订阅返回的是 Clash 格式（含 proxies / proxy-groups），或更新订阅后重试");
+        // 诊断信息：帮助定位是订阅为空、provider 未下载、还是节点类型不支持
+        let mut diag = Vec::new();
+        if profiles.is_empty() {
+            diag.push("未加载任何订阅".to_string());
+        }
+        for (i, (url, name, text)) in profiles.iter().enumerate() {
+            let p: ClashProfile = serde_yaml::from_str(text.trim()).unwrap_or_default();
+            let has_providers = !p.proxy_providers.is_empty();
+            let provider_ok = p
+                .proxy_providers
+                .keys()
+                .filter(|k| {
+                    let path = crate::core::store::provider_path(data_dir, url, k);
+                    path.exists()
+                })
+                .count();
+            diag.push(format!(
+                "订阅{}「{}」: proxies={} groups={} providers={}/{}",
+                i + 1,
+                name,
+                p.proxies.len(),
+                p.proxy_groups.len(),
+                provider_ok,
+                p.proxy_providers.len()
+            ));
+        }
+        bail!(
+            "订阅内容未解析到任何节点或策略组。\n诊断：{}\n可能原因：1) 机场限流返回提示页 2) proxy-provider 下载失败 3) 节点类型不支持",
+            diag.join("; ")
+        );
     }
 
     Ok(BuiltConfig {

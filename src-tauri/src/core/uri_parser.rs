@@ -677,7 +677,7 @@ mod tests {
     #[test]
     fn parses_batch() {
         let text = "ss://YWVzLTI1Ni1nY206cGFzcw==@a.com:443#a\ninvalid-line\nvmess://eyJ2IjoiMiIsInBzIjoiYiIsImFkZCI6ImIuY29tIiwicG9ydCI6IjQ0MyIsImlkIjoidiJ9#b";
-        let (nodes, errors) = parse_lines(text);
+        let (nodes, errors, _notice) = parse_lines(text);
         assert_eq!(nodes.len(), 2);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("第 2 行"));
