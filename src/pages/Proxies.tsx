@@ -59,10 +59,13 @@ export default function Proxies() {
       })
       .catch(() => loadProxies());
 
+    // 内核状态变化（启动/停止/重启）时刷新节点列表：clash API 仅在内核运行时可用
+    const unStatus = listen("core://status", () => loadProxies());
     // 内核启动/模式切换后的自动选点完成时刷新
-    const un = listen("proxies://changed", () => loadProxies());
+    const unProxies = listen("proxies://changed", () => loadProxies());
     return () => {
-      un.then((fn) => fn());
+      unStatus.then((fn) => fn());
+      unProxies.then((fn) => fn());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -160,6 +163,8 @@ export default function Proxies() {
     try {
       await startCore();
       toast.success("内核已启动");
+      // 内核启动后 clash API 才就绪，必须重新拉取节点/策略组
+      await loadProxies();
     } catch (e) {
       toast.error(String(e));
     } finally {

@@ -139,8 +139,8 @@ impl KernelHandle {
         };
         #[cfg(not(target_os = "ios"))]
         let (child, pid): (Option<Child>, u32) = {
-            let mut child = Command::new(&config.binary_path)
-                .arg("run")
+            let mut cmd = Command::new(&config.binary_path);
+            cmd.arg("run")
                 .arg("-c")
                 .arg(&config_path)
                 .env("ENABLE_DEPRECATED_GEOIP", "true")
@@ -148,7 +148,16 @@ impl KernelHandle {
                 // 固定工作目录：sing-box 在此读写 geoip.db / geosite.db / cache.db
                 .current_dir(&config.work_dir)
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            // Windows：sing-box 是控制台程序，默认会弹出黑色命令行窗口。
+            // CREATE_NO_WINDOW 让内核进程不分配控制台，主进程保持 UI 干净。
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            let mut child = cmd
                 .spawn()
                 .context("failed to spawn sing-box process")?;
 
@@ -276,14 +285,20 @@ pub async fn check_config(
     }
     #[cfg(not(target_os = "ios"))]
     {
-        let output = Command::new(binary)
-            .arg("check")
+        let mut cmd = Command::new(binary);
+        cmd.arg("check")
             .arg("-c")
             .arg(config_path)
             // 与 spawn 一致：legacy GEOIP/GEOSITE 规则需要环境变量启用
             .env("ENABLE_DEPRECATED_GEOIP", "true")
             .env("ENABLE_DEPRECATED_GEOSITE", "true")
-            .current_dir(work_dir)
+            .current_dir(work_dir);
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        let output = cmd
             .output()
             .await
             .context("failed to run sing-box check")?;
@@ -322,7 +337,14 @@ pub async fn probe_version(binary: &std::path::Path) -> Option<String> {
     }
     #[cfg(not(target_os = "ios"))]
     {
-        let output = Command::new(binary).arg("version").output().await.ok()?;
+        let mut cmd = Command::new(binary);
+        cmd.arg("version");
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        let output = cmd.output().await.ok()?;
         if !output.status.success() {
             return None;
         }
