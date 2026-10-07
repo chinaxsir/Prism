@@ -517,6 +517,82 @@ pub fn build(
         }
     }
 
+    // 策略组之外的「游离节点」补入路由链末端的主选择组。
+    // 部分订阅 proxies 含大量节点，但 proxy-groups 只引用其中一小部分；
+    // 按组展示的客户端会让其余节点彻底「消失」（用户实例：51 节点只见 10 个）。
+    // 把未被任何组引用的节点追加到主选择组，保证每个节点可见/可选/可测速。
+    //
+    // 1) 统计被任意组引用的成员 tag
+    let mut referenced: HashSet<String> = HashSet::new();
+    for outbound in &outbounds {
+        if let Some(list) = outbound.get("outbounds").and_then(Value::as_array) {
+            for item in list {
+                if let Some(t) = item.as_str() {
+                    referenced.insert(t.to_string());
+                }
+            }
+        }
+    }
+
+    // 2) 定位主选择组：从 route.final 沿 selector 的 default（首个成员）链向下，
+    //    直到 default 不再是 selector（与 ipc::resolve_main_selector 逻辑一致，
+    //    但不依赖内核运行，基于构建期的确定性 default）。
+    let mut main_group_tag: Option<String> = None;
+    {
+        let lookup =
+            |tag: &str| outbounds.iter().find(|o| o["tag"].as_str() == Some(tag));
+        let mut current = final_tag.clone();
+        let mut visited: HashSet<String> = HashSet::new();
+        loop {
+            if !visited.insert(current.clone()) {
+                break;
+            }
+            let Some(group) = lookup(&current) else { break };
+            if group["type"].as_str() != Some("selector") {
+                break;
+            }
+            let Some(first) = group
+                .get("outbounds")
+                .and_then(|l| l.as_array())
+                .and_then(|l| l.first())
+                .and_then(|v| v.as_str())
+            else {
+                break;
+            };
+            let Some(first_ob) = lookup(first) else { break };
+            if first_ob["type"].as_str() == Some("selector") {
+                current = first.to_string();
+                continue;
+            }
+            main_group_tag = Some(current);
+            break;
+        }
+    }
+
+    match main_group_tag {
+        Some(main_tag) => {
+            let uncovered: Vec<String> = node_tags
+                .iter()
+                .filter(|t| !referenced.contains(*t))
+                .cloned()
+                .collect();
+            if !uncovered.is_empty() {
+                if let Some(group) =
+                    outbounds.iter_mut().find(|o| o["tag"].as_str() == Some(main_tag.as_str()))
+                {
+                    if let Some(list) = group.get_mut("outbounds").and_then(Value::as_array_mut) {
+                        for t in uncovered {
+                            list.push(json!(t));
+                        }
+                    }
+                }
+            }
+        }
+        None => warnings.push(
+            "订阅中存在不属于任何策略组的节点，但未找到可挂接的主选择组，这些节点无法在节点页选择".into(),
+        ),
+    }
+
     // 4. 入站
     let mut inbounds = vec![json!({
         "type": "mixed",
@@ -544,19 +620,51 @@ pub fn build(
     }
 
     // 5. DNS（1.11 legacy 格式：servers 用 address；1.12 的 type/server 尚未支持）
-    // dns-remote 用 DoH 直连：UDP 53 的 8.8.8.8 在国内会被污染，
-    // 非 .cn 后缀的国内域名（如 baidu.com）若被解析到假 IP，direct 出站也会 TLS 握手失败。
+    //
+    // dns-remote 用国内可达的阿里 DoH 直连：原先的 https://1.1.1.1/dns-query 在国内
+    // 直连 TCP/443 被墙（kernel.log 实证：dial tcp 1.1.1.1:443: i/o timeout），
+    // 所有非 CN 域名解析全部失败，节点服务器为域名的节点必然拨号超时。
+    // UDP 53 的 8.8.8.8 同样不可用（污染 + 不可达）。
     // geosite cn 覆盖国内域名（含 .com），".cn" 后缀规则仅作兜底。
     // IPv6 关闭时 ipv4_only：不返回 AAAA，避免 TUN/代理链路下的 v6 泄漏与连接失败。
+
+    // 服务器为域名的节点：节点入口域名（如 node-1.sub.ibuy.eu.cc）必须经国内
+    // 解析器解析——它们是面向国内的入口域名，且整条解析链路不得依赖境外可达性。
+    // DNS 规则的 outbound 匹配器专门用于匹配「正在拨号的出站 tag」。
+    const RESOLVABLE_NODE_TYPES: [&str; 7] = [
+        "shadowsocks", "vmess", "vless", "trojan", "tuic", "hysteria", "hysteria2",
+    ];
+    let is_ip_literal = |s: &str| {
+        s.parse::<std::net::Ipv4Addr>().is_ok() || s.parse::<std::net::Ipv6Addr>().is_ok()
+    };
+    let mut domain_server_tags: Vec<Value> = Vec::new();
+    for outbound in &outbounds {
+        let ty = outbound.get("type").and_then(|v| v.as_str());
+        let server = outbound.get("server").and_then(|v| v.as_str());
+        if ty.is_some_and(|t| RESOLVABLE_NODE_TYPES.contains(&t))
+            && server.is_some_and(|s| !is_ip_literal(s))
+            && let Some(tag) = outbound.get("tag").and_then(|v| v.as_str())
+        {
+            domain_server_tags.push(json!(tag));
+        }
+    }
+
+    let mut dns_rules: Vec<Value> = Vec::new();
+    if !domain_server_tags.is_empty() {
+        // 最具体的规则放最前，优先于 geosite/后缀规则
+        dns_rules.push(json!({ "outbound": domain_server_tags, "server": "dns-local" }));
+    }
+    dns_rules.push(json!({ "geosite": ["cn"], "server": "dns-local" }));
+    dns_rules.push(json!({ "domain_suffix": [".cn"], "server": "dns-local" }));
+
     let dns = json!({
         "servers": [
-            { "tag": "dns-remote", "address": "https://1.1.1.1/dns-query", "detour": "direct" },
+            // DoH 地址是域名，需 address_resolver 经 dns-local（223.5.5.5）自举解析，
+            // 否则 sing-box 报 missing address_resolver
+            { "tag": "dns-remote", "address": "https://dns.alidns.com/dns-query", "address_resolver": "dns-local", "detour": "direct" },
             { "tag": "dns-local", "address": "223.5.5.5", "detour": "direct" }
         ],
-        "rules": [
-            { "geosite": ["cn"], "server": "dns-local" },
-            { "domain_suffix": [".cn"], "server": "dns-local" }
-        ],
+        "rules": dns_rules,
         "final": "dns-remote",
         "strategy": if settings.ipv6 { "prefer_ipv4" } else { "ipv4_only" }
     });
@@ -1231,5 +1339,184 @@ rules:
         assert!(tags.contains(&"HK-01"), "node HK-01 must be emitted, got {tags:?}");
         assert!(tags.contains(&"US-01"), "node US-01 must be emitted, got {tags:?}");
         assert!(tags.contains(&"节点选择"), "group must be emitted, got {tags:?}");
+    }
+
+    /// 回归（51 节点只见 10 个）：策略组只引用一个节点时，
+    /// 其余「游离节点」必须被追加到主选择组，全部可见/可选。
+    #[test]
+    fn uncovered_nodes_are_attached_to_main_selector() {
+        let clash = r#"
+proxies:
+  - {name: IN-01, type: ss, server: 1.2.3.4, port: 8388, cipher: aes-256-gcm, password: pw}
+  - {name: IN-02, type: trojan, server: 5.6.7.8, port: 443, password: pw2}
+  - {name: IN-03, type: vless, server: node-1.sub.example.cc, port: 443, uuid: u}
+proxy-groups:
+  - {name: 节点选择, type: select, proxies: [IN-01]}
+rules:
+  - MATCH,节点选择
+"#;
+        let built = build(
+            &[("https://sub.example".into(), "订阅1".into(), clash.into())],
+            &[],
+            RunMode::SystemProxy,
+            &UserSettings::default(),
+            &std::env::temp_dir().join("prism-cb-test-uncovered"),
+            &std::env::temp_dir().join("prism-cb-test-uncovered/kernel"),
+            "127.0.0.1:9090",
+            "secret",
+        )
+        .expect("build must succeed");
+
+        let selector = built.config["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"].as_str() == Some("节点选择"))
+            .expect("main selector must exist");
+        let members: Vec<&str> = selector["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(members.contains(&"IN-01"), "original member kept: {members:?}");
+        assert!(members.contains(&"IN-02"), "uncovered node attached: {members:?}");
+        assert!(members.contains(&"IN-03"), "uncovered node attached: {members:?}");
+    }
+
+    /// 回归（测速全部超时）：服务器为域名的节点必须出现在 DNS outbound 规则中
+    /// 且指向 dns-local；dns-remote 必须是国内可达的 DoH（不再是 1.1.1.1）。
+    #[test]
+    fn node_server_domains_resolve_via_dns_local() {
+        let clash = r#"
+proxies:
+  - {name: IP-NODE, type: ss, server: 1.2.3.4, port: 8388, cipher: aes-256-gcm, password: pw}
+  - {name: DOM-NODE, type: vless, server: node-9.sub.ibuy.eu.cc, port: 443, uuid: u}
+proxy-groups:
+  - {name: 节点选择, type: select, proxies: [IP-NODE, DOM-NODE]}
+rules:
+  - MATCH,节点选择
+"#;
+        let built = build(
+            &[("https://sub.example".into(), "订阅1".into(), clash.into())],
+            &[],
+            RunMode::SystemProxy,
+            &UserSettings::default(),
+            &std::env::temp_dir().join("prism-cb-test-dns"),
+            &std::env::temp_dir().join("prism-cb-test-dns/kernel"),
+            "127.0.0.1:9090",
+            "secret",
+        )
+        .expect("build must succeed");
+
+        let dns = &built.config["dns"];
+        let remote = dns["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["tag"].as_str() == Some("dns-remote"))
+            .unwrap();
+        assert_eq!(
+            remote["address"].as_str(),
+            Some("https://dns.alidns.com/dns-query"),
+            "dns-remote must be a domestically reachable DoH"
+        );
+
+        let outbound_rule = dns["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r.get("outbound").is_some())
+            .expect("outbound DNS rule must exist");
+        let tags: Vec<&str> = outbound_rule["outbound"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(tags.contains(&"DOM-NODE"), "domain-server node routed to dns-local: {tags:?}");
+        assert!(!tags.contains(&"IP-NODE"), "IP node must not be listed: {tags:?}");
+        assert_eq!(outbound_rule["server"].as_str(), Some("dns-local"));
+    }
+
+    /// 真实订阅端到端校验（默认跳过；设 PRISM_REAL_PROFILE=<profile.yaml> 时执行）。
+    /// 保证：①每个节点出站都至少被一个策略组引用（节点页不会再"消失"）；
+    /// ②每个服务器为域名的节点都在 DNS outbound 规则中（解析不再依赖境外可达性）。
+    #[test]
+    fn real_subscription_every_node_covered() {
+        let Ok(profile_path) = std::env::var("PRISM_REAL_PROFILE") else {
+            eprintln!("skipped: set PRISM_REAL_PROFILE to run");
+            return;
+        };
+        let text = std::fs::read_to_string(&profile_path).expect("read real profile");
+        let dir = std::env::temp_dir().join("prism-cb-real");
+        std::fs::create_dir_all(dir.join("kernel")).unwrap();
+        let built = build(
+            &[("https://sub.example".into(), "订阅1".into(), text)],
+            &[],
+            RunMode::SystemProxy,
+            &UserSettings::default(),
+            &dir,
+            &dir.join("kernel"),
+            "127.0.0.1:9090",
+            "secret",
+        )
+        .expect("real profile must build");
+
+        // 落盘以便用 sing-box check 做运行期 schema 校验
+        std::fs::write(
+            dir.join("config.json"),
+            serde_json::to_vec_pretty(&built.config).unwrap(),
+        )
+        .unwrap();
+
+        const NODE_TYPES: [&str; 7] = [
+            "shadowsocks", "vmess", "vless", "trojan", "tuic", "hysteria", "hysteria2",
+        ];
+        let outbounds = built.config["outbounds"].as_array().unwrap();
+        let node_tags: Vec<&str> = outbounds
+            .iter()
+            .filter(|o| o.get("type").and_then(|t| t.as_str()).is_some_and(|t| NODE_TYPES.contains(&t)))
+            .filter_map(|o| o["tag"].as_str())
+            .collect();
+
+        let mut referenced = std::collections::HashSet::new();
+        for o in outbounds {
+            if let Some(list) = o.get("outbounds").and_then(|l| l.as_array()) {
+                for item in list {
+                    if let Some(t) = item.as_str() {
+                        referenced.insert(t);
+                    }
+                }
+            }
+        }
+        let unreferenced: Vec<&&str> = node_tags.iter().filter(|t| !referenced.contains(**t)).collect();
+        assert!(unreferenced.is_empty(), "nodes still invisible: {unreferenced:?}");
+
+        let is_ip = |s: &str| {
+            s.parse::<std::net::Ipv4Addr>().is_ok() || s.parse::<std::net::Ipv6Addr>().is_ok()
+        };
+        let domain_nodes: Vec<&str> = node_tags
+            .iter()
+            .copied()
+            .filter(|t| {
+                let o = outbounds.iter().find(|x| x["tag"].as_str() == Some(*t)).unwrap();
+                o.get("server").and_then(|s| s.as_str()).is_some_and(|s| !is_ip(s))
+            })
+            .collect();
+
+        let dns_rule_tags: std::collections::HashSet<&str> = built.config["dns"]["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r.get("outbound").is_some())
+            .flat_map(|r| r["outbound"].as_array().unwrap().iter().filter_map(|v| v.as_str()))
+            .collect();
+        let missing_dns: Vec<&str> = domain_nodes.iter().copied().filter(|t| !dns_rule_tags.contains(t)).collect();
+        assert!(missing_dns.is_empty(), "domain nodes missing DNS rule: {missing_dns:?}");
+        eprintln!(
+            "OK: {} nodes all referenced, {} domain-server nodes covered by dns-local rule",
+            node_tags.len(), domain_nodes.len()
+        );
     }
 }
