@@ -8,12 +8,7 @@
 use std::io;
 use std::process::Command;
 
-/// 系统代理备份（与 mod.rs 中的 ProxyBackup 对齐）
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct ProxyBackup {
-    pub enabled: bool,
-    pub server: String,
-}
+use super::ProxyBackup;
 
 fn gsettings(args: &[&str]) -> bool {
     Command::new("gsettings")

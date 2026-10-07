@@ -13,13 +13,14 @@ pub mod macos;
 #[cfg(target_os = "linux")]
 pub mod linux;
 
-/// 系统代理备份（停止时恢复原设置，实现独占性）
-/// 注意：具体实现由各平台模块提供，此处 re-export 统一类型
-pub use windows::ProxyBackup;
-#[cfg(not(target_os = "windows"))]
-pub use macos::ProxyBackup;
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub use linux::ProxyBackup;
+/// 系统代理备份（停止时恢复原设置，实现独占性）。
+/// 类型统一定义在此，各平台模块通过 `super::ProxyBackup` 引用，
+/// 保证 iOS/Android 等无系统代理的平台也能编译（移动端运行时为 no-op）。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ProxyBackup {
+    pub enabled: bool,
+    pub server: String,
+}
 
 /// 读取当前系统代理设置（用于备份）
 pub fn get_system_proxy() -> anyhow::Result<ProxyBackup> {
@@ -31,7 +32,8 @@ pub fn get_system_proxy() -> anyhow::Result<ProxyBackup> {
     return Ok(linux::get_system_proxy()?);
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
-        anyhow::bail!("unsupported platform for system proxy");
+        // 移动端无系统代理概念，返回空备份（enabled=false）
+        Ok(ProxyBackup::default())
     }
 }
 

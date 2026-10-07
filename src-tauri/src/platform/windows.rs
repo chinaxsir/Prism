@@ -19,16 +19,11 @@ use windows::Win32::System::Registry::{
 // windows 0.52 中 OpenProcessToken 位于 System::Threading
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
+use super::ProxyBackup;
+
 const INTERNET_SETTINGS_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const APP_NAME: &str = "Prism";
-
-/// 系统代理备份结构
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct ProxyBackup {
-    pub enabled: bool,
-    pub server: String,
-}
 
 /// &str -> 以 0 结尾的 UTF-16
 fn wide(s: &str) -> Vec<u16> {
