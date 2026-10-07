@@ -58,12 +58,23 @@ pub struct ClashProfileView {
 pub fn validate_subscription_text(text: &str) -> Result<(), String> {
     let profile: ClashProfile = serde_yaml::from_str(text.trim())
         .map_err(|e| format!("订阅内容不是有效的 Clash YAML（{e}）"))?;
-    if profile.proxies.is_empty()
+
+    // 检查 proxies：不仅要有节点，且节点 server 不能全是环回地址（机场提示页）
+    let real_nodes: Vec<_> = profile
+        .proxies
+        .iter()
+        .filter(|n| {
+            let server = n.server.to_lowercase();
+            !server.starts_with("127.") && !server.starts_with("localhost") && !server.is_empty()
+        })
+        .collect();
+
+    if real_nodes.is_empty()
         && profile.proxy_groups.is_empty()
         && profile.proxy_providers.is_empty()
     {
         return Err(
-            "订阅内容未包含任何节点（proxies）、策略组（proxy-groups）或 provider，可能是机场限流/到期提示页，已保留原订阅".into(),
+            "订阅内容未包含可用节点（可能是机场限流/到期提示页），已保留原订阅".into(),
         );
     }
     Ok(())
