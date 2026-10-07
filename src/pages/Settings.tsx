@@ -47,6 +47,16 @@ const MODES = RUN_MODES;
 /// 出站模式：流量「最终走向」（与接入模式互不影响）
 const OUTBOUND_MODES_LOCAL = OUTBOUND_MODES;
 
+// 平台检测：移动端不存在系统代理通道，需隐藏相关设置
+const isMobile = () => {
+  try {
+    const ua = navigator.userAgent;
+    return ua.includes("Android") || ua.includes("iPhone") || ua.includes("iPad");
+  } catch {
+    return false;
+  }
+};
+
 export default function Settings() {
   const [mode, setRunMode] = useState<RunMode>("systemProxy");
   const [modeBusy, setModeBusy] = useState(false);
@@ -62,6 +72,7 @@ export default function Settings() {
     closeConnectionsOnSwitch: false,
   });
   const [saved, setSaved] = useState(false);
+  const mobile = isMobile();
   const [showActivate, setShowActivate] = useState(false);
   const proUnlocked = useProStore((s) => s.unlocked);
   const entitlement = useProStore((s) => s.entitlement);
@@ -153,14 +164,17 @@ export default function Settings() {
     <div className="space-y-6 max-w-3xl">
       <h1 className="text-2xl font-bold">设置</h1>
 
-      {/* 接入模式 */}
+      {/* 接入模式：移动端不存在系统代理通道（需 VPN 扩展），仅展示 TUN */}
+      {(() => {
+        const runModes = MODES.filter((m) => (mobile ? m.key === "tun" : true));
+        return (
       <section className="bg-surface-card rounded-xl p-5">
         <h2 className="text-base font-semibold mb-1">接入模式</h2>
         <p className="text-xs text-gray-500 mb-4">
           决定流量「如何进入」Prism。注意：这与下方「出站模式」（流量最终走向）是两个独立维度
         </p>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          {MODES.map((m) => (
+          {runModes.map((m) => (
             <button
               key={m.key}
               onClick={() => chooseMode(m.key)}
@@ -189,7 +203,7 @@ export default function Settings() {
           </div>
         )}
 
-        {mode === "tun" && (
+        {!mobile && mode === "tun" && (
           <div className="mt-4 flex items-start gap-2 p-3 rounded-lg bg-yellow-500/10 text-yellow-400 text-xs">
             <ShieldAlert size={15} className="mt-0.5 shrink-0" />
             TUN 模式启动时若提示权限不足，请完全退出 Prism 后，右键选择
@@ -197,6 +211,8 @@ export default function Settings() {
           </div>
         )}
       </section>
+        );
+      })()}
 
       {/* Pro 授权 */}
       <section className="bg-surface-card rounded-xl p-5">
@@ -288,18 +304,24 @@ export default function Settings() {
           checked={form.allowLan}
           onChange={(v) => patch({ allowLan: v })}
         />
-        <ToggleRow
-          title="设置系统代理"
-          desc="系统代理模式启动时自动修改系统代理设置"
-          checked={form.systemProxy}
-          onChange={(v) => patch({ systemProxy: v })}
-        />
-        <ToggleRow
-          title="开机自启动"
-          desc="登录系统后自动启动 Prism"
-          checked={form.autoStart}
-          onChange={(v) => patch({ autoStart: v })}
-        />
+        {/* 设置系统代理：仅桌面端有系统代理通道，移动端隐藏 */}
+        {!mobile && (
+          <ToggleRow
+            title="设置系统代理"
+            desc="系统代理模式启动时自动修改系统代理设置"
+            checked={form.systemProxy}
+            onChange={(v) => patch({ systemProxy: v })}
+          />
+        )}
+        {/* 开机自启动：桌面端登录项，移动端无对应机制 */}
+        {!mobile && (
+          <ToggleRow
+            title="开机自启动"
+            desc="登录系统后自动启动 Prism"
+            checked={form.autoStart}
+            onChange={(v) => patch({ autoStart: v })}
+          />
+        )}
       </section>
 
       {/* 高级 */}

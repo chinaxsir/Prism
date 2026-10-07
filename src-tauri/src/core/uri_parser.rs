@@ -22,6 +22,8 @@ pub fn is_uri_list(text: &str) -> bool {
             || l.starts_with("hysteria://")
             || l.starts_with("hy://")
             || l.starts_with("tuic://")
+            || l.starts_with("socks5://")
+            || l.starts_with("socks://")
     })
 }
 
@@ -41,6 +43,7 @@ pub fn parse_line(line: &str) -> Result<Option<Value>> {
         "hysteria2" | "hy2" => parse_hysteria2(rest)?,
         "hysteria" | "hy" => parse_hysteria(rest)?,
         "tuic" => parse_tuic(rest)?,
+        "socks5" | "socks" => parse_socks(rest)?,
         _ => bail!("不支持的协议：{scheme}"),
     };
     Ok(Some(node))
@@ -605,6 +608,61 @@ fn parse_hysteria(rest: &str) -> Result<Value> {
     Ok(node)
 }
 
+// ---------------- 分享链接：SOCKS5 ----------------
+
+/// socks5://[user:pass@]host:port#name （userinfo 可缺省；也兼容 query user/pass）
+fn parse_socks(rest: &str) -> Result<Value> {
+    let (addr_query, name) = rest.split_once('#').unwrap_or((rest, ""));
+    let (addr, query) = addr_query.split_once('?').unwrap_or((addr_query, ""));
+    let (userinfo, hostport) = match addr.rsplit_once('@') {
+        Some((u, h)) => (Some(u), h),
+        None => (None, addr),
+    };
+    let (server, port) = split_host_port(hostport)?;
+    let name = decode_name(name);
+
+    let mut username = String::new();
+    let mut password = String::new();
+    if let Some(u) = userinfo {
+        if let Some((raw_user, raw_pass)) = u.split_once(':') {
+            username = urlencoding_decode(raw_user).unwrap_or_else(|| raw_user.to_string());
+            password = urlencoding_decode(raw_pass).unwrap_or_else(|| raw_pass.to_string());
+        } else {
+            username = urlencoding_decode(u).unwrap_or_else(|| u.to_string());
+        }
+    }
+    // query 形式补充：socks5://host:port?user=u&pass=p
+    let params: std::collections::HashMap<_, _> = parse_query(query).into_iter().collect();
+    if username.is_empty() {
+        username = params
+            .get("user")
+            .or_else(|| params.get("username"))
+            .cloned()
+            .unwrap_or_default();
+    }
+    if password.is_empty() {
+        password = params
+            .get("pass")
+            .or_else(|| params.get("password"))
+            .cloned()
+            .unwrap_or_default();
+    }
+
+    let mut node = json!({
+        "name": name,
+        "type": "socks5",
+        "server": server,
+        "port": port,
+    });
+    if !username.is_empty() {
+        node["username"] = json!(username);
+    }
+    if !password.is_empty() {
+        node["password"] = json!(password);
+    }
+    Ok(node)
+}
+
 // ---------------- 单元测试 ----------------
 
 #[cfg(test)]
@@ -750,5 +808,27 @@ mod tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("第 2 行"));
+    }
+
+    #[test]
+    fn parses_socks5_with_auth() {
+        let raw = "socks5://alice:s3cret@5.6.7.8:1080#socks-node";
+        let node = parse_line(raw).unwrap().unwrap();
+        assert_eq!(node["type"], "socks5");
+        assert_eq!(node["server"], "5.6.7.8");
+        assert_eq!(node["port"], 1080);
+        assert_eq!(node["username"], "alice");
+        assert_eq!(node["password"], "s3cret");
+    }
+
+    #[test]
+    fn parses_socks5_anonymous_and_query_auth() {
+        let node = parse_line("socks5://5.6.7.8:1080#anon").unwrap().unwrap();
+        assert!(node.get("username").is_none());
+        assert!(node.get("password").is_none());
+
+        let node2 = parse_line("socks5://5.6.7.8:1080?user=bob&pass=qp").unwrap().unwrap();
+        assert_eq!(node2["username"], "bob");
+        assert_eq!(node2["password"], "qp");
     }
 }

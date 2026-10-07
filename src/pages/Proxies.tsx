@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Zap, Power, Loader2, RefreshCw } from "lucide-react";
+import { Zap, Gauge, RefreshCw } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { Link } from "react-router-dom";
 
@@ -7,7 +7,6 @@ import {
   getCoreStatus,
   getProxyGroups,
   selectProxy,
-  startCore,
   urlTest,
 } from "@/api/ipc";
 import { useCoreStore } from "@/stores/core";
@@ -44,7 +43,6 @@ export default function Proxies() {
   const [groups, setGroups] = useState<ProxyEntry[]>([]);
   const [activeGroup, setActiveGroup] = useState("");
   const [testing, setTesting] = useState(false);
-  const [starting, setStarting] = useState(false);
   /// 上一轮组测速中失败（未出现在结果 map）的节点，展示为「超时」
   const [failed, setFailed] = useState<Set<string>>(new Set());
   /// 主选择组（route.final 链上最深的 selector）：默认落在此 tab，选择才真实生效
@@ -152,27 +150,12 @@ export default function Proxies() {
     }
   };
 
-  const handleStart = async () => {
-    if (starting) return;
-    setStarting(true);
-    try {
-      await startCore();
-      toast.success("内核已启动");
-      // 内核启动后 clash API 才就绪，必须重新拉取节点/策略组
-      await loadProxies();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setStarting(false);
-    }
-  };
-
   return (
     <div className="space-y-6">
       {groups.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-white/10 bg-surface-card/50 py-20 px-6 text-center">
           <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-accent/10 text-accent">
-            <Power size={26} />
+            <Gauge size={26} />
           </div>
           <h3 className="text-base font-semibold text-gray-200">
             {coreStatus === "running" ? "暂无策略组" : "内核未运行"}
@@ -180,22 +163,17 @@ export default function Proxies() {
           <p className="mt-2 max-w-sm text-sm leading-relaxed text-gray-500">
             {coreStatus === "running"
               ? "当前订阅没有可展示的策略组，请尝试更新订阅。"
-              : "启动内核后将自动加载订阅中的节点与策略组，可在此测速、切换节点。"}
+              : "请在仪表盘点击「启动」，启动后将自动加载订阅中的节点与策略组，可在此测速、切换节点。"}
           </p>
           <div className="mt-6 flex items-center gap-3">
             {coreStatus !== "running" && (
-              <button
-                onClick={handleStart}
-                disabled={starting || coreStatus === "starting"}
-                className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
+              <Link
+                to="/dashboard"
+                className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-hover"
               >
-                {starting || coreStatus === "starting" ? (
-                  <Loader2 size={15} className="animate-spin" />
-                ) : (
-                  <Power size={15} />
-                )}
-                启动内核
-              </button>
+                <Gauge size={15} />
+                前往仪表盘启动
+              </Link>
             )}
             <Link
               to="/subscription"

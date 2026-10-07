@@ -748,26 +748,52 @@ pub async fn update_subscription(
 /// 3. 内核运行中 → 经本地 mixed 入站（127.0.0.1:mixed_port）转发——受限网络
 ///    直连被墙时走节点出境，实现「先启动内核再更新」的真实闭环
 async fn fetch_remote_text(url: &str, local_proxy: Option<u16>) -> Result<String, String> {
+    use futures_util::stream::{FuturesUnordered, StreamExt as _};
+    use std::time::Instant;
+
+    let fetch_started = Instant::now();
     let mut last_err = String::new();
 
-    // ---- 直连两连发（自动 + 强制 v4）----
-    for force_v4 in [false, true] {
+    // ---- 直连双栈竞速（自动探测 + 强制 IPv4 同时发起）----
+    // 原串行实现：第一次请求若撞上 IPv6 黑洞，必须等满 10s 连接超时才
+    // 发起第二次，导入体感「非常慢」。竞速后任一栈先成功立即返回，
+    // 整体只受实际网络 RTT 约束，不再为黑洞等待。
+    let build_direct_client = |force_v4: bool| -> Result<reqwest::Client, String> {
         let mut builder = reqwest::Client::builder()
             .user_agent("clash-verge/v2.0.0")
             .timeout(std::time::Duration::from_secs(30))
-            // 连接阶段独立短超时：黑洞地址快速失败，尽快进入重试
-            .connect_timeout(std::time::Duration::from_secs(10))
+            // 连接阶段独立短超时：黑洞地址快速失败
+            .connect_timeout(std::time::Duration::from_secs(8))
             .no_proxy();
         if force_v4 {
-            builder = builder.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+            builder =
+                builder.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
         }
-        match try_fetch_text(&builder.build().map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?, url)
-            .await
-        {
-            Ok(text) => return Ok(text),
+        builder.build().map_err(|e| format!("创建 HTTP 客户端失败: {e}"))
+    };
+
+    let mut attempts = FuturesUnordered::new();
+    for force_v4 in [false, true] {
+        let client = build_direct_client(force_v4)?;
+        let target = url.to_string();
+        attempts.push(async move { (force_v4, try_fetch_text(&client, &target).await) });
+    }
+
+    while let Some((force_v4, result)) = attempts.next().await {
+        match result {
+            Ok(text) => {
+                tracing::info!(
+                    "fetch succeeded (force_v4={force_v4}) in {}ms",
+                    fetch_started.elapsed().as_millis()
+                );
+                return Ok(text);
+            }
             Err(e) => {
                 last_err = e;
-                tracing::warn!("fetch remote text (force_v4={force_v4}) failed: {last_err}");
+                tracing::warn!(
+                    "fetch direct (force_v4={force_v4}) failed at {}ms: {last_err}",
+                    fetch_started.elapsed().as_millis()
+                );
             }
         }
     }
@@ -832,8 +858,12 @@ fn describe_reqwest_error(e: &reqwest::Error) -> String {
     msg
 }
 
-/// 解析订阅内的 proxy-providers（仅 http），逐个下载落盘
+/// 解析订阅内的 proxy-providers（仅 http），并发下载落盘
 async fn refresh_providers(state: &AppState, sub_url: &str, profile_text: &str) {
+    use futures_util::future::FutureExt as _;
+    use std::time::Instant;
+
+    let started = Instant::now();
     let view: crate::core::config_builder::ClashProfileView =
         match serde_yaml::from_str(profile_text) {
             Ok(v) => v,
@@ -843,6 +873,13 @@ async fn refresh_providers(state: &AppState, sub_url: &str, profile_text: &str) 
             }
         };
 
+    let local_proxy = (*state.status.read() == CoreStatus::Running)
+        .then(|| state.settings.read().mixed_port);
+
+    // 收集所有可下载任务后并发执行：原 for 循环串行下载，N 个 provider
+    // 的耗时是 N 倍 RTT（各带 30s 超时），这是多 provider 订阅导入慢的
+    // 另一主因；并发后总耗时约等于最慢的一个。
+    let mut tasks = Vec::new();
     for (name, provider) in view.proxy_providers {
         if provider.kind != "http" {
             continue;
@@ -851,23 +888,39 @@ async fn refresh_providers(state: &AppState, sub_url: &str, profile_text: &str) 
             tracing::warn!("provider '{name}' missing url, skipped");
             continue;
         };
-        let local_proxy = (*state.status.read() == CoreStatus::Running)
-            .then(|| state.settings.read().mixed_port);
-        match fetch_remote_text(&url, local_proxy).await {
-            Ok(text) => {
-                let path = crate::core::store::provider_path(&state.data_dir, sub_url, &name);
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if let Err(e) = std::fs::write(&path, &text) {
-                    tracing::warn!("write provider '{name}' failed: {e}");
-                } else {
-                    tracing::info!("proxy-provider '{name}' refreshed");
+
+        let data_dir = state.data_dir.clone();
+        tasks.push(
+            async move {
+                match fetch_remote_text(&url, local_proxy).await {
+                    Ok(text) => {
+                        let path =
+                            crate::core::store::provider_path(&data_dir, sub_url, &name);
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        if let Err(e) = std::fs::write(&path, &text) {
+                            tracing::warn!("write provider '{name}' failed: {e}");
+                        } else {
+                            tracing::info!("proxy-provider '{name}' refreshed");
+                        }
+                    }
+                    Err(e) => tracing::warn!("fetch proxy-provider '{name}' failed: {e}"),
                 }
             }
-            Err(e) => tracing::warn!("fetch proxy-provider '{name}' failed: {e}"),
-        }
+            .boxed(),
+        );
     }
+
+    if tasks.is_empty() {
+        return;
+    }
+    let count = tasks.len();
+    futures_util::future::join_all(tasks).await;
+    tracing::info!(
+        "{count} proxy-providers refreshed concurrently in {}ms",
+        started.elapsed().as_millis()
+    );
 }
 
 /// 尝试 base64 解码（容错换行/空白；依次尝试标准 / URL-safe 两种字符集），

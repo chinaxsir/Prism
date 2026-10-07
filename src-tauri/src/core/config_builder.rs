@@ -156,6 +156,27 @@ struct ClashNode {
     http_opts: Option<HttpOpts>,
     #[serde(default, rename = "h2-opts")]
     h2_opts: Option<H2Opts>,
+
+    // ---- socks5 / http 节点鉴权 ----
+    #[serde(default)]
+    username: Option<String>,
+
+    // ---- WireGuard 节点（mihomo 字段名）----
+    #[serde(default, rename = "private-key")]
+    private_key: Option<String>,
+    #[serde(default, rename = "public-key")]
+    public_key: Option<String>,
+    /// 本端接口地址，mihomo 支持裸 IP（"10.0.0.2"）或逗号分隔多个
+    #[serde(default)]
+    ip: Option<String>,
+    #[serde(default)]
+    ipv6: Option<String>,
+    #[serde(default, rename = "preshared-key")]
+    preshared_key: Option<String>,
+    #[serde(default)]
+    mtu: Option<u32>,
+    #[serde(default)]
+    reserved: Option<Vec<u8>>,
 }
 
 #[derive(Deserialize)]
@@ -1022,6 +1043,77 @@ fn node_to_outbound(node: &ClashNode) -> Option<(Value, Option<String>)> {
             (o, None)
         }
 
+        "wireguard" => {
+            // mihomo 裸 IP（10.0.0.2）→ sing-box local_address 需带前缀长度
+            let mut local_address: Vec<String> = Vec::new();
+            for raw in [node.ip.as_deref(), node.ipv6.as_deref()].into_iter().flatten() {
+                for part in raw.split(',') {
+                    let part = part.trim();
+                    if part.is_empty() {
+                        continue;
+                    }
+                    if part.contains('/') {
+                        local_address.push(part.to_string());
+                    } else if let Ok(v4) = part.parse::<std::net::Ipv4Addr>() {
+                        local_address.push(format!("{v4}/32"));
+                    } else if let Ok(v6) = part.parse::<std::net::Ipv6Addr>() {
+                        local_address.push(format!("{v6}/128"));
+                    }
+                }
+            }
+
+            let mut o = json!({
+                "type": "wireguard",
+                "private_key": node.private_key.clone().unwrap_or_default(),
+                "peer_public_key": node.public_key.clone().unwrap_or_default(),
+                "local_address": local_address,
+            });
+            if let Some(psk) = &node.preshared_key
+                && !psk.is_empty()
+            {
+                o["pre_shared_key"] = json!(psk);
+            }
+            if let Some(mtu) = node.mtu {
+                o["mtu"] = json!(mtu);
+            }
+            if let Some(reserved) = &node.reserved
+                && reserved.len() == 3
+            {
+                o["reserved"] = json!(reserved);
+            }
+            merge(&mut o, &base);
+            (o, None)
+        }
+
+        // Clash socks5 节点 → sing-box socks 出站（version 默认 5）
+        "socks5" | "socks" => {
+            let mut o = json!({ "type": "socks", "version": "5" });
+            if let Some(u) = &node.username {
+                o["username"] = json!(u);
+            }
+            if let Some(p) = &node.password {
+                o["password"] = json!(p);
+            }
+            merge(&mut o, &base);
+            (o, None)
+        }
+
+        // Clash http/https 节点 → sing-box http 出站（https 显式带 TLS）
+        "http" | "https" => {
+            let mut o = json!({ "type": "http" });
+            if let Some(u) = &node.username {
+                o["username"] = json!(u);
+            }
+            if let Some(p) = &node.password {
+                o["password"] = json!(p);
+            }
+            merge(&mut o, &base);
+            if node.kind == "https" || node.tls.unwrap_or(false) {
+                o["tls"] = tls_block(node);
+            }
+            (o, None)
+        }
+
         _ => return None,
     };
 
@@ -1518,5 +1610,97 @@ rules:
             "OK: {} nodes all referenced, {} domain-server nodes covered by dns-local rule",
             node_tags.len(), domain_nodes.len()
         );
+    }
+
+    /// 协议补全：Clash wireguard/socks5/http/https 节点必须成功转换为 sing-box
+    /// 出站；WG 裸 IP 自动补 /32、/128 前缀；https 节点带 TLS 块。
+    #[test]
+    fn wireguard_socks_http_nodes_convert() {
+        let clash = r#"
+proxies:
+  - name: WG-01
+    type: wireguard
+    server: 1.2.3.4
+    port: 51820
+    private-key: eHpMh6Hc8S1p...example
+    public-key: bLvT9zWq2fQ...example
+    ip: 10.0.0.2
+    ipv6: fdfe:dcba:9876::2
+    mtu: 1280
+    reserved: [1, 2, 3]
+    preshared-key: psk-example
+  - name: SOCKS-01
+    type: socks5
+    server: 5.6.7.8
+    port: 1080
+    username: alice
+    password: s3cret
+  - name: HTTP-01
+    type: http
+    server: proxy.example.com
+    port: 8080
+    username: bob
+    password: pw
+  - name: HTTPS-01
+    type: https
+    server: secure.example.com
+    port: 8443
+proxy-groups:
+  - name: 节点选择
+    type: select
+    proxies: [WG-01, SOCKS-01, HTTP-01, HTTPS-01]
+rules:
+  - MATCH,节点选择
+"#;
+        let dir = std::env::temp_dir().join("prism-cb-test-protocols");
+        std::fs::create_dir_all(dir.join("kernel")).unwrap();
+        let built = build(
+            &[("https://sub.example".into(), "订阅1".into(), clash.into())],
+            &[],
+            RunMode::SystemProxy,
+            &UserSettings::default(),
+            &dir,
+            &dir.join("kernel"),
+            "127.0.0.1:9090",
+            "secret",
+        )
+        .expect("build must succeed with wg/socks/http nodes");
+
+        let outbounds = built.config["outbounds"].as_array().unwrap();
+        let find = |tag: &str| {
+            outbounds
+                .iter()
+                .find(|o| o["tag"].as_str() == Some(tag))
+                .unwrap_or_else(|| panic!("outbound {tag} must exist"))
+        };
+
+        let wg = find("WG-01");
+        assert_eq!(wg["type"].as_str(), Some("wireguard"));
+        let addrs: Vec<&str> = wg["local_address"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(addrs.contains(&"10.0.0.2/32"), "bare v4 normalized: {addrs:?}");
+        assert!(addrs.contains(&"fdfe:dcba:9876::2/128"), "bare v6 normalized: {addrs:?}");
+        assert_eq!(wg["mtu"].as_u64(), Some(1280));
+        assert_eq!(wg["reserved"][0].as_u64(), Some(1));
+        assert_eq!(wg["pre_shared_key"].as_str(), Some("psk-example"));
+
+        let socks = find("SOCKS-01");
+        assert_eq!(socks["type"].as_str(), Some("socks"));
+        assert_eq!(socks["version"].as_str(), Some("5"));
+        assert_eq!(socks["username"].as_str(), Some("alice"));
+        assert_eq!(socks["password"].as_str(), Some("s3cret"));
+
+        let http = find("HTTP-01");
+        assert_eq!(http["type"].as_str(), Some("http"));
+        assert_eq!(http["username"].as_str(), Some("bob"));
+        assert!(http.get("tls").is_none(), "plain http has no tls block");
+
+        let https = find("HTTPS-01");
+        assert_eq!(https["type"].as_str(), Some("http"));
+        assert!(https.get("tls").is_some(), "https node must carry tls block");
     }
 }

@@ -134,7 +134,7 @@ export default function Dashboard() {
         >
           <Power size={24} className={running ? "text-latency-bad" : "text-accent"} />
           <span className="text-xl font-bold">
-            {running ? "停止内核" : "启动内核"}
+            {running ? "停止" : "启动"}
           </span>
         </button>
 
