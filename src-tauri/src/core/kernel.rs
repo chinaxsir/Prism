@@ -366,10 +366,12 @@ fn read_log_tail(path: &std::path::Path) -> String {
     String::from_utf8_lossy(&bytes[start..]).replace('\n', " | ")
 }
 
-/// 将随包分发的 geoip.db / geosite.db 拷贝到内核工作目录（已存在则跳过）。
-/// 候选来源：内核二进制同级（sidecar 位置）、应用资源目录、源码树 binaries（dev）。
-/// Android 的 resources 位于 APK assets（非真实文件系统），数据库在编译期直接
-/// 内嵌（include_bytes!，CI 构建前 fetch），运行时写入工作目录。
+/// 将 geoip.db / geosite.db 落到内核工作目录（已存在则跳过）。
+/// 桌面候选来源：内核二进制同级（sidecar 位置）、应用资源目录、源码树 binaries（dev）。
+/// iOS / Android 无真实文件系统资源可依赖（实测 Tauri iOS 不会把 bundle
+/// resources 打进 .app，APK assets 亦非真实文件系统），数据库在编译期直接
+/// 内嵌（include_bytes!，CI 构建前 fetch；文件缺失即编译失败，等于硬校验），
+/// 运行时写入工作目录。
 ///
 /// 硬性原则：任一数据库最终仍不可用即返回错误，**绝不放内核去联网下载**。
 fn ensure_geo_databases(config: &KernelConfig, app_handle: &AppHandle) -> Result<()> {
@@ -407,8 +409,8 @@ fn ensure_geo_databases(config: &KernelConfig, app_handle: &AppHandle) -> Result
             }
         }
 
-        // Android：候选路径位于 APK 内（非真实文件系统），写编译期内嵌副本
-        #[cfg(target_os = "android")]
+        // iOS / Android：无真实文件系统资源，写编译期内嵌副本
+        #[cfg(any(target_os = "ios", target_os = "android"))]
         if !provisioned {
             let bytes: &[u8] = match db {
                 "geoip.db" => include_bytes!("../../binaries/geoip.db").as_slice(),

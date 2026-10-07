@@ -383,14 +383,17 @@ jobs:
           echo "--- Frameworks as shipped by tauri --no-sign ---"
           ls -1 "$APP/Frameworks" 2>/dev/null || echo "(empty)"
 
-          # geoip/geosite 必须已随 bundle resources 进 .app：缺失时内核启动期
-          # 会尝试从 GitHub 下载（代理未就绪），dial 1.1.1.1:443 i/o timeout
+          # geoip/geosite 不进 bundle resources（实测 Tauri iOS 不会把
+          # resources 打进 .app，数组/映射写法均无效），而是编译期
+          # include_bytes! 内嵌进主二进制——上一步 Rust 构建成功即代表
+          # src-tauri/binaries/*.db 已就位并被内嵌。此处只校验源文件存在，
+          # 防止 CI 缓存/清理导致 fetch 步骤被跳过
           for f in geoip.db geosite.db; do
-            if [ ! -f "$APP/$f" ] && [ ! -f "$APP/binaries/$f" ]; then
-              echo "::error::$f missing from .app bundle resources"
+            if [ ! -f "src-tauri/binaries/$f" ]; then
+              echo "::error::$f missing from src-tauri/binaries (compile-time embedding source)"
               exit 1
             fi
-            echo "bundled: $f"
+            echo "embedded source: $f ($(du -h "src-tauri/binaries/$f" | cut -f1))"
           done
 
           # Swift 运行时解析（修复两轮闪退的最终方案，均由真机 .ips +

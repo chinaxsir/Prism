@@ -2,16 +2,34 @@
 
 本项目版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 每次发布前更新本文件，并在 Git 打对应 tag。
+移动端与桌面端共用同一版本 tag；更新内容按平台分节说明。
 
-## [0.3.1] - 2026-10-07
+## [0.3.2] - 2026-10-07
 
-### 构建修复（0.3.0 移动端构建失败）
-- **iOS**：`kernel.rs` 中 `clear_kernel_pid(self.pid)` 缺少 `not(ios, android)` 门控，
-  导致 iOS 编译报 `cannot find function clear_kernel_pid`。已加 cfg 门控。
-- **Android**：Go 在 android 目标不支持 `-buildmode=c-archive`（报
-  `c-archive not supported on android/arm64`）。改用 `-buildmode=c-shared` 产出
-  `.so`，`build.rs` 链接方式由 `static` 改为 `dylib`，并在 CI 中将四架构 `.so`
-  拷入 `gen/android/app/src/main/jniLibs/<abi>/` 供 APK 打包与运行时加载。
+> 0.3.1 因移动端构建失败未发布，其 tag 作废，全部内容并入本版本。
+
+### 移动端（iOS / Android）
+- **修复 0.3.1 构建失败**（此前 0.3.0 起移动端无法出包）：
+  - iOS：`kernel.rs` 中 `clear_kernel_pid(self.pid)` 缺少 `not(ios, android)`
+    门控，导致 iOS 编译报 `cannot find function clear_kernel_pid`
+  - Android：Go 在 android 目标不支持 `-buildmode=c-archive`，改用
+    `-buildmode=c-shared` 产出四架构 `.so`（arm64-v8a / armeabi-v7a /
+    x86 / x86_64），`build.rs` 以 dylib 链接，CI 拷入 `jniLibs/<abi>/` 随 APK 打包
+- **geo 数据库改为编译期内嵌**（iOS + Android 统一方案）：实测 Tauri iOS
+  不会把 bundle resources 打进 .app（数组/映射写法均无效），APK assets
+  亦非真实文件系统；改用 `include_bytes!` 内嵌进主二进制，启动时写入
+  工作目录。数据库文件缺失即编译失败，天然成为构建期硬校验
+- Android 内嵌内核完整落地：sing-box 1.11.3 进程内运行，四架构全覆盖
+
+### 桌面端（Windows / macOS / Linux）
+- 本版本桌面端无功能变更，随同一 tag 正常出包
+- 沿用 0.3.0 的零运行时下载方案：内核 sidecar + geo 数据库随包分发，
+  缺失直接报错（应用不联网下载任何内核文件），CI 打包前硬校验
+
+## [0.3.1] - 2026-10-07（构建失败，未发布）
+
+- 尝试修复 0.3.0 移动端构建失败（iOS cfg 门控 + Android c-shared），
+  但 iOS geo 数据库 bundle 问题未在此版本内解决，tag 作废。
 
 ## [0.3.0] - 2026-10-07
 
