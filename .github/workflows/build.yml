@@ -80,6 +80,6 @@ jobs:
           prerelease: false
           args: --target ${{ matrix.target }}
 
-  # Android APK / TrollStore IPA 由 mobile.yml（push main）构建并上传 artifact，
-  # 发布 Release 时手动以 release asset 附上（mobile.yml 含内核与 TrollStore 修复）。
+  # Android APK / TrollStore IPA 由 mobile.yml 构建；同一 tag 触发时
+  # mobile.yml 会将其产物作为 Release asset 上传到本 workflow 创建的 Release。
 

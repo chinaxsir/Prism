@@ -1,10 +1,15 @@
 name: Mobile Build
 
-# 推送 main 或手动触发：产出 Android APK 与 TrollStore（巨魔）未签名 IPA
+# 推送 main / tag v* / 手动触发：产出 Android APK 与 TrollStore（巨魔）未签名 IPA
+# tag 触发时额外把 APK/IPA 作为 Release asset 上传，与桌面端（build.yml）共用同一 Release
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   android:
@@ -281,6 +286,13 @@ jobs:
           name: Prism-android-apk
           path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
+
+      # tag 构建时把 APK 作为 Release asset 上传（与桌面端 build.yml 共用同一 Release）
+      - name: Upload APK to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
 
   ios:
     name: Build TrollStore IPA
@@ -559,3 +571,10 @@ jobs:
           name: Prism-TrollStore-ipa
           path: Prism-*-TrollStore.ipa
           if-no-files-found: error
+
+      # tag 构建时把 IPA 作为 Release asset 上传（与桌面端共用同一 Release）
+      - name: Upload IPA to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Prism-*-TrollStore.ipa

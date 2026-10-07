@@ -4,6 +4,17 @@
 每次发布前更新本文件，并在 Git 打对应 tag。
 移动端与桌面端共用同一版本 tag；更新内容按平台分节说明。
 
+## [0.3.3] - 2026-10-07
+
+### 移动端（iOS / Android）
+- **修复 v0.3.2 Release 缺失移动端产物**：`mobile.yml` 此前仅在 push main 时
+  构建为 workflow artifact（不进 Release），导致 tag Release 只有桌面端。
+  现改为 tag 触发，并将已签名 Android APK 与 TrollStore IPA 通过
+  `softprops/action-gh-release` 上传到同一 Release。
+
+### 桌面端（Windows / macOS / Linux）
+- 无功能变更，随同一 tag `v0.3.3` 出包。
+
 ## [0.3.2] - 2026-10-07
 
 > 0.3.1 因移动端构建失败未发布，其 tag 作废，全部内容并入本版本。
