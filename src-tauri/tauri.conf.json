@@ -54,11 +54,12 @@
     "windows": [
       {
         "title": "Prism Proxy",
-        "width": 1200,
-        "height": 780,
-        "minWidth": 720,
-        "minHeight": 540,
-        "resizable": true,
+        "width": 1100,
+        "height": 720,
+        "minWidth": 1100,
+        "minHeight": 720,
+        "resizable": false,
+        "maximizable": false,
         "fullscreen": false,
         "transparent": true,
         "decorations": false,

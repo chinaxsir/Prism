@@ -550,7 +550,7 @@ pub fn build(
     });
 
     if total_nodes == 0 && total_groups == 0 {
-        bail!("订阅中没有任何节点或策略组");
+        bail!("订阅内容未解析到任何节点或策略组：请确认订阅返回的是 Clash 格式（含 proxies / proxy-groups），或更新订阅后重试");
     }
 
     Ok(BuiltConfig {

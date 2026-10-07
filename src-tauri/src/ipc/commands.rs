@@ -104,7 +104,13 @@ async fn prepare_start(
     // 读取全部启用订阅的 profile（多订阅模型；旧版单 profile.yaml 自动兼容）
     let profiles = load_enabled_profiles(state);
     if profiles.is_empty() {
-        return Err("尚未导入订阅：请先在“订阅”页添加订阅".into());
+        let has_records =
+            !crate::core::store::load_subscriptions(&state.data_dir).is_empty();
+        return Err(if has_records {
+            "订阅内容缺失（本地缓存不存在）：请在「订阅」页点击更新，成功后再启动内核".into()
+        } else {
+            "尚未导入订阅：请先在「订阅」页添加订阅".into()
+        });
     }
 
     // 确保内核二进制就位：缺失则首启自动下载（进度走 kernel-download://progress）
@@ -235,23 +241,51 @@ async fn do_start(app: &AppHandle, state: &State<'_, AppState>) -> Result<(), St
 /// 元素：(订阅URL, 展示名, profile内容)
 fn load_enabled_profiles(state: &AppState) -> Vec<(String, String, String)> {
     let records = crate::core::store::load_subscriptions(&state.data_dir);
+    let enabled: Vec<_> = records.iter().filter(|r| r.enabled).cloned().collect();
     let mut profiles = Vec::new();
-    for (i, record) in records.iter().filter(|r| r.enabled).enumerate() {
+
+    // 旧版（单订阅时代）内容落盘位置，仅用于一次性迁移
+    let legacy_candidates = [
+        state.data_dir.join("profile.yaml"),
+        state.work_dir().join("profile.yaml"),
+    ];
+    let legacy_text: Option<String> = legacy_candidates
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok());
+
+    for (i, record) in enabled.iter().enumerate() {
         let path = crate::core::store::profile_path(&state.data_dir, &record.url);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let name = record
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("订阅{}", i + 1));
-                profiles.push((record.url.clone(), name, text));
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(_) => {
+                // 新版按 URL 哈希落盘；旧版本内容在 data_dir/profile.yaml 或
+                // kernel/profile.yaml——首次升级时迁移到哈希路径，后续逻辑统一
+                if let Some(text) = &legacy_text {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if std::fs::write(&path, text).is_ok() {
+                        tracing::info!("migrated legacy profile.yaml -> {}", path.display());
+                        text.clone()
+                    } else {
+                        tracing::warn!("profile missing and legacy migration failed: {}", path.display());
+                        continue;
+                    }
+                } else {
+                    tracing::warn!("read profile failed for {}: file missing", record.url);
+                    continue;
+                }
             }
-            Err(e) => tracing::warn!("read profile failed for {}: {e}", record.url),
-        }
+        };
+        let name = record
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("订阅{}", i + 1));
+        profiles.push((record.url.clone(), name, text));
     }
-    // 旧版迁移：subscriptions.json 无记录但存在单订阅时代的 profile.yaml
+    // 无任何启用记录时，旧版单 profile.yaml 仍可兜底
     if profiles.is_empty()
-        && let Ok(text) = std::fs::read_to_string(state.work_dir().join("profile.yaml"))
+        && let Some(text) = legacy_text
     {
         profiles.push((String::new(), "默认".to_string(), text));
     }

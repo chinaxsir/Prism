@@ -1,7 +1,7 @@
-import { Minus, Square, X } from "lucide-react";
+import { Minus, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-/// 无边框窗口的自定义标题栏：可拖动区域 + 最小化/最大化/关闭
+/// 无边框窗口的自定义标题栏：可拖动区域 + 最小化/关闭（窗口固定尺寸，无最大化）
 export default function TitleBar() {
   // Conditionally render the TitleBar only if running in Tauri environment
   if (typeof window !== 'undefined' && !(window as any).__TAURI__) {
@@ -29,13 +29,6 @@ export default function TitleBar() {
           title="最小化"
         >
           <Minus size={14} />
-        </button>
-        <button
-          onClick={() => appWindow.toggleMaximize()}
-          className="p-1.5 rounded-md hover:bg-surface-hover text-gray-400 hover:text-gray-200 transition-colors"
-          title="最大化"
-        >
-          <Square size={12} />
         </button>
         <button
           onClick={() => appWindow.close()}
