@@ -1,0 +1,206 @@
+// Prism iOS 网络扩展：NEPacketTunnelProvider。
+// 参考 sing-box 官方 SFI Extension（PacketTunnelProvider / PlatformInterface）。
+//
+// 启动流程（主 App 经 NETunnelProviderManager 发起）：
+//   配置 JSON 由 providerConfiguration["config"] 传入；
+//   geoip/geosite 从扩展 Bundle 拷入工作目录；
+//   注册 Go libbox 回调后 PrismVPNStart → OpenTun → setTunnelNetworkSettings + TUN fd。
+
+import Foundation
+import NetworkExtension
+
+// Go 线程回调时需要访问当前扩展实例
+private var prismProviderRef: PacketTunnelProvider?
+
+final class PacketTunnelProvider: NEPacketTunnelProvider {
+
+    override func startTunnel(
+        options: [String: NSObject]?,
+        completionHandler: @escaping (Error?) -> Void
+    ) {
+        prismProviderRef = self
+
+        guard let config = (protocolConfiguration as? NETunnelProviderProtocol)?
+            .providerConfiguration?["config"] as? String
+        else {
+            completionHandler(NSError(
+                domain: "PrismVPN", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "缺少配置（providerConfiguration.config）"]
+            ))
+            return
+        }
+
+        let workDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        do {
+            try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+            try copyGeoDatabases(to: workDir)
+
+            let callbacks = prism_vpn_cbs(
+                open_tun: prismOpenTun,
+                protect_socket: prismProtectSocket,
+                under_extension: prismUnderExtension
+            )
+            PrismVPNSetCallbacks(callbacks)
+
+            let errorPtr = PrismVPNStart(config, workDir.path)
+            if let errorPtr = errorPtr {
+                let message = String(cString: errorPtr)
+                PrismKernelFree(errorPtr)
+                throw NSError(
+                    domain: "PrismVPN", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: message]
+                )
+            }
+
+            completionHandler(nil)
+        } catch {
+            completionHandler(error)
+        }
+    }
+
+    override func stopTunnel(
+        with reason: NEProviderStopReason,
+        completionHandler: @escaping () -> Void
+    ) {
+        PrismVPNStop()
+        completionHandler()
+    }
+
+    // MARK: - OpenTun（Go libbox 回调进入，在 Go 线程执行）
+
+    fileprivate func openTun(optionsJSON: String) -> Int32 {
+        guard let data = optionsJSON.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return -1
+        }
+
+        let mtu = (json["mtu"] as? NSNumber)?.int32Value ?? 9000
+        let dnsServer = json["dns_server"] as? String ?? ""
+
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
+        settings.mtu = NSNumber(value: mtu)
+
+        if !dnsServer.isEmpty {
+            settings.dnsSettings = NEDNSSettings(servers: [dnsServer])
+        }
+
+        // IPv4：地址 + includedRoutes
+        let v4Addresses = prefixes(json["inet4_address"])
+        if !v4Addresses.isEmpty {
+            let ipv4 = NEIPv4Settings(
+                addresses: v4Addresses.map(\.address),
+                subnetMasks: v4Addresses.map { subnetMask(prefix: $0.prefix) }
+            )
+            let v4Routes = prefixes(json["inet4_route_address"])
+            if v4Routes.isEmpty {
+                ipv4.includedRoutes = [NEIPv4Route.default()]
+            } else {
+                ipv4.includedRoutes = v4Routes.map {
+                    NEIPv4Route(destinationAddress: $0.address, subnetMask: subnetMask(prefix: $0.prefix))
+                }
+            }
+            settings.ipv4Settings = ipv4
+        }
+
+        // IPv6（可选）
+        let v6Addresses = prefixes(json["inet6_address"])
+        if !v6Addresses.isEmpty {
+            let ipv6 = NEIPv6Settings(
+                addresses: v6Addresses.map(\.address),
+                networkPrefixLengths: v6Addresses.map { NSNumber(value: $0.prefix) }
+            )
+            let v6Routes = prefixes(json["inet6_route_address"])
+            if v6Routes.isEmpty {
+                ipv6.includedRoutes = [NEIPv6Route.default()]
+            } else {
+                ipv6.includedRoutes = v6Routes.map {
+                    NEIPv6Route(destinationAddress: $0.address, networkPrefixLength: NSNumber(value: $0.prefix))
+                }
+            }
+            settings.ipv6Settings = ipv6
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var settingsError: Error?
+        setTunnelNetworkSettings(settings) { error in
+            settingsError = error
+            semaphore.signal()
+        }
+        semaphore.wait()
+
+        if settingsError != nil {
+            return -1
+        }
+
+        // 取 packetFlow 文件描述符（与 SFI 相同的 KVC 路径）
+        if let fd = packetFlow.value(forKeyPath: "socket.fileDescriptor") as? Int32 {
+            return fd
+        }
+        return -1
+    }
+
+    // MARK: - Geo 数据库
+
+    private func copyGeoDatabases(to workDir: URL) throws {
+        for name in ["geoip.db", "geosite.db"] {
+            guard let src = Bundle.main.url(forResource: name, withExtension: nil) else {
+                throw NSError(
+                    domain: "PrismVPN", code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "扩展包内缺少 \(name)"]
+                )
+            }
+            let dst = workDir.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: dst.path) {
+                continue
+            }
+            try FileManager.default.copyItem(at: src, to: dst)
+        }
+    }
+}
+
+// MARK: - 地址前缀解析
+
+private struct Prefix {
+    let address: String
+    let prefix: Int
+}
+
+private func prefixes(_ raw: Any?) -> [Prefix] {
+    guard let array = raw as? [[String: Any]] else { return [] }
+    return array.compactMap { item in
+        guard let address = item["address"] as? String,
+              let prefix = item["prefix"] as? Int
+        else { return nil }
+        return Prefix(address: address, prefix: prefix)
+    }
+}
+
+private func subnetMask(prefix: Int) -> String {
+    var mask = [UInt8](repeating: 0, count: 4)
+    let bits = min(max(prefix, 0), 32)
+    for i in 0..<bits {
+        mask[i / 8] |= 0x80 >> (i % 8)
+    }
+    return mask.map { String($0) }.joined(separator: ".")
+}
+
+// MARK: - Go C 回调（@_cdecl）
+
+@_cdecl("prism_open_tun")
+private func prismOpenTun(_ json: UnsafePointer<CChar>) -> Int32 {
+    guard let provider = prismProviderRef else { return -1 }
+    return provider.openTun(optionsJSON: String(cString: json))
+}
+
+@_cdecl("prism_protect_socket")
+private func prismProtectSocket(_ fd: Int32) -> Int32 {
+    // iOS 网络扩展的底层接口选择由 UsePlatformAutoDetectInterfaceControl
+    // 之外的系统机制处理；protect 在 iOS 为 no-op（与 SFI 一致）
+    return 0
+}
+
+@_cdecl("prism_under_extension")
+private func prismUnderExtension() -> Int32 {
+    return 1
+}

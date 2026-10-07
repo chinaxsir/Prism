@@ -43,10 +43,30 @@
 ### 移动端（iOS / Android）
 - 设置页隐藏移动端不成立的选项：「系统代理」接入模式、「设置系统代理」
   开关、「开机自启动」及「以管理员身份运行」提示；接入模式仅保留 TUN。
-- **已知架构限制（将在后续版本解决）**：移动端系统不存在 HTTP 代理通道，
-  普通 App 无法把自身设为系统代理，只有创建系统 VPN（Android VpnService /
-  iOS NEPacketTunnelProvider）才能真正接管流量。当前移动端启动后仅在本地
-  监听代理端口，系统流量不会经过它；需增加 VPN 扩展（基于 sing-box libbox）。
+- **实现真正的系统级 VPN 代理（重大架构升级）**：移动端启动内核时建立
+  系统 VPN 接管全局流量，与商业代理软件（SFA/SFI）同款技术路线——
+  - 内核侧集成 sing-box **libbox**（官方移动端承载层）：新增
+    `PrismVPNStart/PrismVPNStop/PrismVPNSetCallbacks` 导出，
+    `PlatformInterface` 实现 OpenTun / AutoDetectInterfaceControl（protect）/
+    WriteLog 等完整回调链；TUN 选项（地址/路由/DNS/MTU/分应用）序列化为
+    JSON 传给宿主原生层。
+  - **Android**：新增前台 `PrismVpnService`（VpnService.Builder →
+    `establish()` 返回 TUN fd 交予内核；`protect()` 保护底层拨号 socket
+    防止路由回环；`onRevoke` 撤销后自动停止代理并通知前端；常驻通知栏；
+    13+ systemExempted 前台服务类型；本 App 流量排除出隧道）。Rust 经
+    JNI（jni crate）驱动 Kotlin `PrismVpnBridge`，启动前先经系统弹窗
+    请求 VPN 授权（`VpnService.prepare`）。
+  - **iOS**：新增 `PrismVPN` Network Extension（NEPacketTunnelProvider），
+    内核运行于扩展进程内：`setTunnelNetworkSettings` 配置地址/路由/DNS，
+    `packetFlow` 文件描述符交予内核；主 App 通过 NETunnelProviderManager
+    启停隧道（PrismTunnelController.swift）。CI 经 xcodeproj 注入扩展
+    target（链接 libprismkernel.a、打包 geo 数据库）并嵌入主 App。
+  - 配置构建器：移动端配置始终包含 TUN 入站（原仅桌面 TUN 模式）；
+    TUN 地址迁移到 sing-box 1.10+ 合并后的 `address` 字段（legacy
+    `inet4_address` 在 1.11 会 FATAL）。
+- 启动前统一进行系统 VPN 授权预检；未授权时给出明确提示。
+- 前端监听系统 VPN 撤销事件（用户在系统设置关闭/其他 VPN 抢占）：
+  自动停止内核并对齐状态，弹窗提示。
 
 ### 桌面端（Windows / macOS / Linux）
 - **移除节点页重复的「启动内核」按钮**：启停入口统一收敛到仪表盘，
@@ -57,6 +77,8 @@
   （含全部节点）；实测 `CB节点 10` 437ms、`UCN优选12` 1093ms。
 - 新协议配置通过 `sing-box check` 运行期校验（wireguard/socks/http 出站）。
 - 五目标交叉编译：Windows x64、macOS x64/ARM、iOS、Android 全部通过。
+- Go 内核（libbox VPN 集成）本地完整编译 + go vet 通过（含移动端构建标签）。
+- TUN 入站配置（`address` 合并字段）通过 `sing-box check` 运行期校验。
 - 个别节点返回 503 为节点服务端当下不可用（机场节点质量问题），非客户端问题。
 
 ## [0.3.6] - 2026-10-07

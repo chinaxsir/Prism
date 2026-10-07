@@ -31,34 +31,34 @@ pub const PREFERRED_API_ADDR: &str = "127.0.0.1:9090";
 #[cfg(any(target_os = "ios", target_os = "android"))]
 pub const EMBEDDED_VERSION: &str = "1.11.3";
 
-/// iOS/Android 内嵌内核 FFI（sing-box c-archive，见 src-tauri/ios-kernel/main.go）。
-/// 进程内运行：无子进程、无 pid；clash_api 与桌面 sidecar 完全一致。
+/// iOS/Android 内嵌内核 FFI（sing-box c-archive，见 src-tauri/ios-kernel/）。
+///
+/// 移动端真正的系统级代理：libbox BoxService 启动时回调
+/// PlatformInterface.OpenTun，由宿主原生层建立系统 VPN 并返回 TUN fd。
+/// Android 上宿主是本进程 Kotlin VpnService（经 Rust 注册 C 回调）；
+/// iOS 上内核运行于独立的 NEPacketTunnelProvider 扩展，回调由 Swift 注册，
+/// Rust 侧仅在启动隧道前用到 PrismKernelCheck。
 #[cfg(any(target_os = "ios", target_os = "android"))]
 mod mobile_ffi {
     use std::ffi::{CStr, CString};
-    use std::os::raw::c_char;
+    use std::os::raw::{c_char, c_int};
     use std::path::Path;
+
+    /// libbox PlatformInterface 回调表（Go vpn.go 的 prism_vpn_cbs）
+    #[repr(C)]
+    pub struct VpnCallbacks {
+        pub open_tun: extern "C" fn(*const c_char) -> c_int,
+        pub protect_socket: extern "C" fn(c_int) -> c_int,
+        pub under_extension: extern "C" fn() -> c_int,
+    }
 
     // edition 2024：extern 块必须声明为 unsafe（内部函数调用仍需 unsafe {}）
     unsafe extern "C" {
-        fn PrismKernelStart(config_path: *const c_char, work_dir: *const c_char) -> *mut c_char;
         fn PrismKernelCheck(config_path: *const c_char, work_dir: *const c_char) -> *mut c_char;
-        fn PrismKernelStop();
         fn PrismKernelFree(p: *mut c_char);
-    }
-
-    pub fn start(config_path: &Path, work_dir: &Path) -> Result<(), String> {
-        let cp = CString::new(config_path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
-        let wd = CString::new(work_dir.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
-        unsafe {
-            let err = PrismKernelStart(cp.as_ptr(), wd.as_ptr());
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                PrismKernelFree(err);
-                return Err(msg);
-            }
-        }
-        Ok(())
+        fn PrismVPNSetCallbacks(callbacks: VpnCallbacks);
+        fn PrismVPNStart(config_content: *const c_char, work_dir: *const c_char) -> *mut c_char;
+        fn PrismVPNStop();
     }
 
     pub fn check(config_path: &Path, work_dir: &Path) -> Result<(), String> {
@@ -75,9 +75,38 @@ mod mobile_ffi {
         Ok(())
     }
 
-    pub fn stop() {
-        unsafe { PrismKernelStop() }
+    /// 注册 PlatformInterface C 回调（Android：由平台初始化调用一次）
+    pub fn set_vpn_callbacks(callbacks: VpnCallbacks) {
+        unsafe { PrismVPNSetCallbacks(callbacks) }
     }
+
+    /// 启动 libbox VPN 承载（Android：进程内直接执行）
+    pub fn vpn_start(config_content: &str, work_dir: &Path) -> Result<(), String> {
+        let cc = CString::new(config_content).map_err(|e| e.to_string())?;
+        let wd = CString::new(work_dir.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
+        unsafe {
+            let err = PrismVPNStart(cc.as_ptr(), wd.as_ptr());
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                PrismKernelFree(err);
+                return Err(msg);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn vpn_stop() {
+        unsafe { PrismVPNStop() }
+    }
+}
+
+/// Android 平台经此向 libbox 注册 PlatformInterface 回调
+#[cfg(target_os = "android")]
+pub(crate) type MobileVpnCallbacks = mobile_ffi::VpnCallbacks;
+
+#[cfg(target_os = "android")]
+pub(crate) fn mobile_register_vpn_callbacks(callbacks: mobile_ffi::VpnCallbacks) {
+    mobile_ffi::set_vpn_callbacks(callbacks);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,7 +143,7 @@ impl KernelHandle {
         let config_path = config.work_dir.join("config.json");
         let config_bytes = serde_json::to_vec_pretty(&config.runtime_config)
             .context("failed to serialize kernel config")?;
-        std::fs::write(&config_path, config_bytes)
+        std::fs::write(&config_path, &config_bytes)
             .context("failed to write kernel config.json")?;
 
         // 2. 清空旧内核日志，接管子进程 stdout/stderr（Go 日志默认写 stderr）
@@ -127,15 +156,29 @@ impl KernelHandle {
         // 原则：任何必需文件缺失都直接报错，绝不允许内核运行时联网下载
         ensure_geo_databases(&config, &app_handle)?;
 
-        // 3. 启动内核：iOS/Android 进程内嵌（c-archive FFI），其他平台 spawn sidecar
-        // ENABLE_DEPRECATED_GEOIP/GEOSITE：Clash 订阅常见 GEOIP/GEOSITE 规则，
-        // 目前转换为 sing-box legacy geoip/geosite 字段；1.11 起需显式环境变量启用。
-        // TODO(内核升级)：迁移到 rule_set（.srs 规则集）后移除这两个环境变量
-        #[cfg(any(target_os = "ios", target_os = "android"))]
+        // 3. 启动内核：
+        //   Android —— libbox 进程内启动（Go 回调 → Rust → Kotlin VpnService 建立 VPN）
+        //   iOS     —— 请求 NEPacketTunnelProvider 扩展启动（Swift 控制，内核在扩展内）
+        //   其他平台 —— spawn sidecar 进程
+        #[cfg(target_os = "android")]
         let (child, pid): (Option<Child>, u32) = {
-            mobile_ffi::start(&config_path, &config.work_dir)
-                .map_err(|e| anyhow::anyhow!("内嵌内核启动失败: {e}"))?;
-            tracing::info!("sing-box embedded kernel started in-process");
+            let content = std::str::from_utf8(&config_bytes)
+                .map_err(|e| anyhow::anyhow!("内核配置编码错误: {e}"))?;
+            // 先建立前台 VpnService，libbox 才能经回调拿到 TUN fd
+            crate::platform::android::start_service_and_wait()
+                .map_err(|e| anyhow::anyhow!("VPN 服务启动失败: {e}"))?;
+            mobile_ffi::vpn_start(content, &config.work_dir)
+                .map_err(|e| anyhow::anyhow!("VPN 启动失败: {e}"))?;
+            tracing::info!("sing-box libbox VPN started in-process");
+            (None, std::process::id())
+        };
+        #[cfg(target_os = "ios")]
+        let (child, pid): (Option<Child>, u32) = {
+            let content = std::str::from_utf8(&config_bytes)
+                .map_err(|e| anyhow::anyhow!("内核配置编码错误: {e}"))?;
+            crate::platform::ios::start_tunnel(content)
+                .map_err(|e| anyhow::anyhow!("VPN 启动失败: {e}"))?;
+            tracing::info!("iOS packet tunnel extension start requested");
             (None, std::process::id())
         };
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -197,8 +240,13 @@ impl KernelHandle {
 
         if !ready {
             // 启动失败则回收内核并落盘错误上下文，避免残留
-            #[cfg(any(target_os = "ios", target_os = "android"))]
-            mobile_ffi::stop();
+            #[cfg(target_os = "android")]
+            {
+                mobile_ffi::vpn_stop();
+                crate::platform::android::stop_service();
+            }
+            #[cfg(target_os = "ios")]
+            crate::platform::ios::stop_tunnel();
             #[cfg(not(any(target_os = "ios", target_os = "android")))]
             {
                 if let Some(mut c) = child {
@@ -261,8 +309,14 @@ impl KernelHandle {
             }
         }
 
-        #[cfg(any(target_os = "ios", target_os = "android"))]
-        mobile_ffi::stop();
+        #[cfg(target_os = "android")]
+        {
+            mobile_ffi::vpn_stop();
+            crate::platform::android::stop_service();
+        }
+
+        #[cfg(target_os = "ios")]
+        crate::platform::ios::stop_tunnel();
 
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
         clear_kernel_pid(self.pid);

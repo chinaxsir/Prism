@@ -12,6 +12,35 @@ pub mod windows;
 pub mod macos;
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "android")]
+pub mod android;
+#[cfg(target_os = "ios")]
+pub mod ios;
+
+/// 移动端平台初始化（Tauri setup 调用；桌面端 no-op）：
+/// Android 注册 JNI/libbox 回调；iOS 无需在此初始化（Swift 侧自管理）
+pub fn mobile_init(app: &tauri::AppHandle) -> anyhow::Result<()> {
+    #[cfg(target_os = "android")]
+    {
+        android::init(app.clone())?;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+    }
+    Ok(())
+}
+
+/// Android：检查系统 VPN 授权。false 表示需用户在系统弹窗中允许；
+/// iOS 的授权由 NETunnelProviderManager 流程内部处理
+pub fn ensure_vpn_permission() -> anyhow::Result<bool> {
+    #[cfg(target_os = "android")]
+    {
+        return Ok(android::ensure_permission()?);
+    }
+    #[cfg(not(target_os = "android"))]
+    Ok(true)
+}
 
 /// 系统代理备份（停止时恢复原设置，实现独占性）。
 /// 类型统一定义在此，各平台模块通过 `super::ProxyBackup` 引用，

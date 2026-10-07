@@ -4,14 +4,14 @@ import { listen } from "@tauri-apps/api/event";
 import Sidebar from "@/components/Sidebar";
 import TitleBar from "@/components/TitleBar";
 import BottomNav from "@/components/BottomNav";
-import ToastViewport from "@/components/ui/Toast";
+import ToastViewport, { toast } from "@/components/ui/Toast";
 import Dashboard from "@/pages/Dashboard";
 import Subscription from "@/pages/Subscription";
 import Analytics from "@/pages/Analytics";
 import Settings from "@/pages/Settings";
 import { useCoreStore, type CoreStatus, type RunMode } from "@/stores/core";
 import { useProStore } from "@/stores/pro";
-import type { Entitlement } from "@/api/ipc";
+import { stopCore, type Entitlement } from "@/api/ipc";
 import ProxiesHub from "@/pages/ProxiesHub";
 
 export default function App() {
@@ -45,6 +45,24 @@ export default function App() {
       store.setStatus(status);
       store.setMode(mode);
       store.setUptime(uptimeSecs);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // 系统 VPN 被撤销（Android onRevoke：用户在系统设置关闭 / 其他 VPN 抢占）
+  // → 停止内核并对齐前端状态
+  useEffect(() => {
+    const unlisten = listen("pro://vpn-revoked", () => {
+      stopCore()
+        .then(() => {
+          const store = useCoreStore.getState();
+          store.setStatus("stopped");
+          store.setUptime(0);
+        })
+        .catch(() => undefined);
+      toast.error("系统 VPN 已被关闭，代理已停止");
     });
     return () => {
       unlisten.then((fn) => fn());

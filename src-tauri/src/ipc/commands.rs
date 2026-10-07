@@ -87,16 +87,15 @@ async fn prepare_start(
     let mode = *state.mode.read();
     let settings = state.settings.read().clone();
 
-    // TUN 提权预检：内核要创建虚拟网卡，非管理员/root 时 sing-box tun inbound
-    // 必然失败，且错误表现为"15 秒未就绪"，提前给出可操作的明确错误
-    #[cfg(target_os = "ios")]
-    if mode == RunMode::Tun {
-        return Err(
-            "iOS 版暂不支持 TUN 模式（系统级 VPN 需 NetworkExtension，后续版本提供），请使用代理模式"
-                .into(),
-        );
+    // 提权/授权预检：
+    // - 桌面 TUN 模式：非管理员/root 时 tun inbound 必然失败，提前报错
+    // - 移动端：系统 VPN 授权（Android VpnService.prepare）。
+    //   未授权时返回 false，前端提示用户在系统弹窗中允许后重试
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    if !crate::platform::ensure_vpn_permission().map_err(|e| e.to_string())? {
+        return Err("需要系统 VPN 授权：请在弹出的系统对话框中点击「允许」，然后再次点击启动".into());
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     if mode == RunMode::Tun && !crate::platform::has_elevated_privilege() {
         return Err(
             "TUN 模式需要管理员/root 权限：请完全退出 Prism 后以管理员身份重新运行（macOS/Linux 使用 sudo）"

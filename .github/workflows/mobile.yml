@@ -120,6 +120,11 @@ jobs:
       - name: Init Android project
         run: npx tauri android init
 
+      # 注入系统 VPN 原生组件：PrismVpnBridge / PrismVpnService（Kotlin）、
+      # MainActivity 桥接与 AndroidManifest 权限/Service 声明（幂等）
+      - name: Inject Android VPN components
+        run: node scripts/inject-android-vpn.cjs
+
       # tauri android init 只放置模板自带图标，不会把 src-tauri/icons/android
       # 同步进 gen 工程；这里用定制的满幅海军蓝图标覆盖 mipmap/values/anydpi
       - name: Sync Android launcher icons
@@ -371,6 +376,12 @@ jobs:
           echo "appiconset: $ICONSET"
           cp -fv src-tauri/icons/ios/*.png "$ICONSET"/
           echo "icons synced: $(ls "$ICONSET"/*.png | wc -l | tr -d ' ')"
+
+      # 注入系统 VPN 网络扩展（PacketTunnelProvider target + 主 App 隧道控制器）
+      - name: Inject iOS VPN extension
+        run: |
+          gem list xcodeproj -i >/dev/null 2>&1 || sudo gem install xcodeproj --no-document
+          ruby scripts/inject-ios-vpn.rb
 
       # 官方未签名路径（CLI 2.12+）：--no-sign 先构建未签名 archive，
       # 再直接从 archive 内的 .app 产出未签名 IPA；

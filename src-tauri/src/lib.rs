@@ -63,6 +63,12 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir).ok();
             app.manage(core::state::AppState::new(data_dir.clone(), app.handle().clone()));
 
+            // 移动端平台初始化：Android 注册 libbox/JNI VPN 回调
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            if let Err(e) = platform::mobile_init(app.handle()) {
+                tracing::error!("mobile platform init failed: {e:#}");
+            }
+
             // 启动后台联网校验授权：结果写回内存并广播；失败（离线）不阻塞启动
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

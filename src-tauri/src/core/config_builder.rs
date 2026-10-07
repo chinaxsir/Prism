@@ -622,21 +622,26 @@ pub fn build(
         "listen_port": settings.mixed_port,
     })];
 
-    if mode == RunMode::Tun {
-        let mut tun = json!({
+    // 桌面端仅 TUN 模式加 TUN 入站；移动端（iOS/Android）必须始终包含：
+    // 普通 App 无法设置系统代理，libbox 经 tun 入站回调 PlatformInterface.OpenTun
+    // 向系统 VPN（VpnService / NEPacketTunnelProvider）索要 TUN fd
+    if mode == RunMode::Tun || cfg!(any(target_os = "ios", target_os = "android")) {
+        // 1.10 起 inet4_address/inet6_address 合并为 address（legacy 字段
+        // 需 ENABLE_DEPRECATED_TUN_ADDRESS_X env，check/run 均会 FATAL）
+        let mut tun_addresses = vec!["198.18.0.1/30"];
+        if settings.ipv6 {
+            tun_addresses.push("fdfe:dcba:9876::1/126");
+        }
+        let tun = json!({
             "type": "tun",
             "tag": TUN_TAG,
             "interface_name": "prism-tun",
-            "inet4_address": "198.18.0.1/30",
+            "address": tun_addresses,
             "mtu": 9000,
             "auto_route": true,
             "strict_route": true,
             "stack": "gvisor",
         });
-        // IPv6 开启时 TUN 同时接管 v6 流量（关闭时 DNS 层已 ipv4_only，双保险）
-        if settings.ipv6 {
-            tun["inet6_address"] = json!("fdfe:dcba:9876::1/126");
-        }
         inbounds.push(tun);
     }
 
