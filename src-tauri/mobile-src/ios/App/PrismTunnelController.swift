@@ -79,7 +79,8 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
         let groupOk = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: "group.com.prism.proxy") != nil
         let diag = PrismTunnelController.diagnosePackaging()
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) PlugIns: \(diag)"
+        let sig = PrismTunnelController.diagnoseAppexEntitlements()
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) PlugIns: \(diag) ; appex签名: \(sig)"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -140,6 +141,73 @@ final class PrismTunnelController {
             }
         }
         return nil
+    }
+
+    /// 解析 appex 可执行文件内嵌代码签名（CS Superblob），报告
+    /// legacy entitlements（槽位5）与 DER entitlements（槽位7）是否存在
+    /// 及关键键值。用于确认 TrollStore 重签后扩展权限是否真实存活：
+    /// nesessionmanager 解析 provider 时校验这些，缺失即报 code=14
+    static func diagnoseAppexEntitlements() -> String {
+        guard let pluginsURL = Bundle.main.builtInPlugInsURL,
+              let entries = try? FileManager.default.contentsOfDirectory(
+                atPath: pluginsURL.path),
+              let appexName = entries.first(where: { $0.hasSuffix(".appex") }),
+              let bundle = Bundle(url: pluginsURL.appendingPathComponent(appexName)),
+              let execURL = bundle.executableURL,
+              let data = try? Data(contentsOf: execURL)
+        else { return "无法读取 appex 可执行文件" }
+
+        func u8(_ off: Int) -> Int {
+            guard off >= 0, off < data.count else { return 0 }
+            return Int(data[data.index(data.startIndex, offsetBy: off)])
+        }
+        func be32(_ off: Int) -> Int {
+            (u8(off) << 24) | (u8(off + 1) << 16) | (u8(off + 2) << 8) | u8(off + 3)
+        }
+
+        // MH_MAGIC_64 = 0xfeedfacf，文件内小端 cf fa ed fe
+        guard u8(0) == 0xcf, u8(1) == 0xfa, u8(2) == 0xed, u8(3) == 0xfe else {
+            return "非 arm64 Mach-O"
+        }
+        let ncmds = be32(16)
+        var off = 32
+        var sigOff = -1
+        for _ in 0..<min(ncmds, 128) {
+            let cmd = be32(off)
+            let size = be32(off + 4)
+            if cmd == 0x1d { sigOff = be32(off + 8) }  // LC_CODE_SIGNATURE.dataoff
+            if size <= 0 { break }
+            off += size
+        }
+        guard sigOff > 0, sigOff < data.count, be32(sigOff) == 0xfade0cc0 else {
+            return "无内嵌代码签名(LC_CODE_SIGNATURE 不可用)"
+        }
+
+        let count = min(be32(sigOff + 8), 20)
+        var entPlist = ""
+        var derFound = false
+        for i in 0..<count {
+            let slot = be32(sigOff + 12 + i * 8)
+            let blobOff = sigOff + be32(sigOff + 12 + i * 8 + 4)
+            if slot == 5, be32(blobOff) == 0xfade7171 {  // CSMAGIC_EMBEDDED_ENTITLEMENTS
+                let len = be32(blobOff + 4)
+                if len > 8, blobOff + len <= data.count {
+                    let lo = data.index(data.startIndex, offsetBy: blobOff + 8)
+                    let hi = data.index(data.startIndex, offsetBy: blobOff + len)
+                    entPlist = String(decoding: data[lo..<hi], as: UTF8.self)
+                }
+            } else if slot == 7 {
+                derFound = true
+            }
+        }
+
+        if entPlist.isEmpty {
+            return "legacy entitlements 槽位缺失! der=\(derFound ? "有" : "无")"
+        }
+        let appID = entPlist.contains("TROLLTROLL.com.prism.proxy.PrismVPN") ? "ok" : "异常"
+        let ne = entPlist.contains("packet-tunnel-provider") ? "ok" : "缺"
+        let group = entPlist.contains("group.com.prism.proxy") ? "ok" : "缺"
+        return "appID=\(appID) ne=\(ne) group=\(group) der=\(derFound ? "有" : "无")"
     }
 
     /// 打包诊断：列出 PlugIns 下每个 appex 的 bundle ID 与扩展点。
