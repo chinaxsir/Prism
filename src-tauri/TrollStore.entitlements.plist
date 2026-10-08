@@ -11,6 +11,13 @@
 	<string>TROLLTROLL.com.prism.proxy</string>
 	<key>com.apple.developer.team-identifier</key>
 	<string>TROLLTROLL</string>
+	<!-- NETunnelProviderManager 调用方必须内嵌此权限，否则
+	     loadAllFromPreferences / startVPNTunnel 报 -1。
+	     TrollStore 重签会保留（与扩展端 entitlement 一致）。 -->
+	<key>com.apple.developer.networking.networkextension</key>
+	<array>
+		<string>packet-tunnel-provider</string>
+	</array>
 	<key>keychain-access-groups</key>
 	<array>
 		<string>TROLLTROLL.com.prism.proxy</string>
