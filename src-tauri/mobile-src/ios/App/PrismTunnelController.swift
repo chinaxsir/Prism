@@ -194,23 +194,13 @@ final class PrismTunnelController {
             case .connected:
                 finish(nil)
             case .disconnected:
-                // 捕获真实断开原因，否则用户只看到无意义的「立即断开」。
-                // 注意 API 区别：
-                // - NEVPNConnection 没有同步 lastDisconnectError 属性，
-                //   iOS 16+ 才提供异步 fetchLastDisconnectError(completionHandler:)
-                // - NETunnelProviderSession.lastError 自 iOS 9 起即包含扩展
-                //   startTunnel completionHandler 返回的错误（工程部署目标 14）
-                var desc = "扩展启动后立即断开（status=disconnected）"
-                if let session = connection as? NETunnelProviderSession,
-                   let err = session.lastError
-                {
-                    desc = PrismTunnelController.describe(error: err)
-                    NSLog("[PrismVPN] session.lastError: \(desc)")
+                // 解析真实断开原因（共享错误文件 → iOS16 系统 API → 通用描述）
+                self.describeDisconnect(connection: connection) { desc in
+                    finish(NSError(
+                        domain: "PrismVPN", code: -2,
+                        userInfo: [NSLocalizedDescriptionKey: desc]
+                    ))
                 }
-                finish(NSError(
-                    domain: "PrismVPN", code: -2,
-                    userInfo: [NSLocalizedDescriptionKey: desc]
-                ))
             case .invalid:
                 finish(NSError(
                     domain: "PrismVPN", code: -3,
@@ -230,6 +220,50 @@ final class PrismTunnelController {
             ))
         }
         RunLoop.main.add(timer!, forMode: .common)
+    }
+
+    /// 解析 VPN 断开原因，三级回退：
+    /// 1. App Group「prism_error.txt」：扩展 startTunnel 失败时写入，
+    ///    含内核返回的精确错误原文，兼容所有 iOS 版本
+    /// 2. iOS 16+ 系统 API fetchLastDisconnectError（扩展进程崩溃等
+    ///    来不及写文件的场景）
+    /// 3. 通用描述
+    private func describeDisconnect(
+        connection: NEVPNConnection,
+        completion: @escaping (String) -> Void
+    ) {
+        let generic = "扩展启动后立即断开（status=disconnected）"
+
+        // 1. 共享错误文件
+        if let groupURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: prismAppGroupID
+        ) {
+            let errFile = groupURL.appendingPathComponent("prism_error.txt")
+            if let text = try? String(contentsOf: errFile, encoding: .utf8),
+               !text.isEmpty
+            {
+                NSLog("[PrismVPN] 读到共享错误: \(text)")
+                completion(text)
+                return
+            }
+        }
+
+        // 2. iOS 16+ 系统 API。completionHandler 可能在后台线程回调，
+        // 统一切回主线程，避免与超时计时器产生 finish 竞态
+        if #available(iOS 16, *) {
+            connection.fetchLastDisconnectError { err in
+                let desc = err.map {
+                    PrismTunnelController.describe(error: $0)
+                } ?? generic
+                if let err = err {
+                    NSLog("[PrismVPN] fetchLastDisconnectError: \(desc)")
+                }
+                DispatchQueue.main.async { completion(desc) }
+            }
+        } else {
+            // 3. iOS 14/15 无系统 API 且扩展未写文件（如进程被系统直接杀死）
+            completion(generic)
+        }
     }
 
     func stop(completion: @escaping (Error?) -> Void) {

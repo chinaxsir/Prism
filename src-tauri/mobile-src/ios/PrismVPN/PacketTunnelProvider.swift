@@ -16,6 +16,39 @@ private let prismAppGroupID = "group.com.prism.proxy"
 // Go 线程回调时需要访问当前扩展实例
 private var prismProviderRef: PacketTunnelProvider?
 
+// MARK: - 共享错误文件（与主 App 的断开原因传递通道）
+//
+// NEVPNConnection / NETunnelProviderSession 在工程部署目标（iOS 14）上
+// 没有任何同步属性能拿到 startTunnel completionHandler 返回的错误；
+// iOS 16+ 的 fetchLastDisconnectError 还是异步且只给笼统的内部错误。
+// 因此扩展在失败时把精确错误写入 App Group「prism_error.txt」，
+// 主 App 在 status=disconnected 时直接读取——版本无关、信息无损。
+
+private func writeSharedError(_ message: String) {
+    guard let groupURL = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: prismAppGroupID
+    ) else {
+        NSLog("[PrismVPN] App Group 不可用，无法写 prism_error.txt")
+        return
+    }
+    let url = groupURL.appendingPathComponent("prism_error.txt")
+    do {
+        try message.write(to: url, atomically: true, encoding: .utf8)
+        NSLog("[PrismVPN] 已写共享错误: \(message)")
+    } catch {
+        NSLog("[PrismVPN] 写 prism_error.txt 失败: \(error.localizedDescription)")
+    }
+}
+
+private func clearSharedError() {
+    guard let groupURL = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: prismAppGroupID
+    ) else { return }
+    try? FileManager.default.removeItem(
+        at: groupURL.appendingPathComponent("prism_error.txt")
+    )
+}
+
 final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func startTunnel(
@@ -24,6 +57,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     ) {
         prismProviderRef = self
         NSLog("[PrismVPN] startTunnel begin")
+        // 清理上一轮残留错误，避免本次扩展进程崩溃（来不及写新错误）时
+        // 主 App 读到陈旧内容被误导
+        clearSharedError()
 
         // 优先从 providerConfiguration["config_path"] 读路径，再读文件
         // （避免把完整配置塞进 providerConfiguration 触发 512KB 限制）
@@ -38,9 +74,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 NSLog("[PrismVPN] config loaded, length=\(configText.count)")
             } catch {
                 NSLog("[PrismVPN] failed to read config: \(error.localizedDescription)")
+                let msg = "无法读取共享配置文件: \(error.localizedDescription)"
+                writeSharedError(msg)
                 completionHandler(NSError(
                     domain: "PrismVPN", code: 3,
-                    userInfo: [NSLocalizedDescriptionKey: "无法读取共享配置文件: \(error.localizedDescription)"]
+                    userInfo: [NSLocalizedDescriptionKey: msg]
                 ))
                 return
             }
@@ -52,9 +90,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             configText = inlineConfig
         } else {
             NSLog("[PrismVPN] missing config_path in providerConfiguration")
+            let msg = "缺少配置（providerConfiguration.config_path）"
+            writeSharedError(msg)
             completionHandler(NSError(
                 domain: "PrismVPN", code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "缺少配置（providerConfiguration.config_path）"]
+                userInfo: [NSLocalizedDescriptionKey: msg]
             ))
             return
         }
@@ -99,6 +139,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             completionHandler(nil)
         } catch {
             NSLog("[PrismVPN] startTunnel error: \(error.localizedDescription)")
+            // 含 PrismVPNStart 返回的精确内核错误（Go error 原文）
+            writeSharedError(error.localizedDescription)
             completionHandler(error)
         }
     }
