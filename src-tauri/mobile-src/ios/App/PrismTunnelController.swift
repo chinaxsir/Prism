@@ -194,15 +194,18 @@ final class PrismTunnelController {
             case .connected:
                 finish(nil)
             case .disconnected:
-                // 捕获真实断开原因：startTunnel 返回的 NSError 会存到
-                // NETunnelProviderSession.lastDisconnectError，否则用户只看到
-                // 无意义的「立即断开」
+                // 捕获真实断开原因，否则用户只看到无意义的「立即断开」。
+                // 注意 API 区别：
+                // - NEVPNConnection 没有同步 lastDisconnectError 属性，
+                //   iOS 16+ 才提供异步 fetchLastDisconnectError(completionHandler:)
+                // - NETunnelProviderSession.lastError 自 iOS 9 起即包含扩展
+                //   startTunnel completionHandler 返回的错误（工程部署目标 14）
                 var desc = "扩展启动后立即断开（status=disconnected）"
                 if let session = connection as? NETunnelProviderSession,
-                   let err = session.lastDisconnectError
+                   let err = session.lastError
                 {
                     desc = PrismTunnelController.describe(error: err)
-                    NSLog("[PrismVPN] lastDisconnectError: \(desc)")
+                    NSLog("[PrismVPN] session.lastError: \(desc)")
                 }
                 finish(NSError(
                     domain: "PrismVPN", code: -2,
