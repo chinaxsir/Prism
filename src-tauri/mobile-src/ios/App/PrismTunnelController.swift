@@ -5,11 +5,21 @@
 import Foundation
 import NetworkExtension
 
-/// 扩展 Bundle ID = 主 App Bundle ID + ".PrismVPN"
-/// 不写死，避免 tauri ios init 追加后缀导致的不匹配
+/// 扩展 Bundle ID：优先取 App 包 PlugIns 内【实际存在】的
+/// packet-tunnel-provider appex 的真实 CFBundleIdentifier（防构建侧
+/// ID 漂移导致 providerBundleIdentifier 与实际 appex 不一致）；
+/// 取不到时回落 主 App Bundle ID + ".PrismVPN"
 private let extensionBundleIdentifier: String = {
     let main = Bundle.main.bundleIdentifier ?? "com.prism.proxy"
-    return "\(main).PrismVPN"
+    let derived = "\(main).PrismVPN"
+    guard let actual = PrismTunnelController.discoverExtensionBundleID() else {
+        NSLog("[PrismVPN] PlugIns 内未找到 appex, 回落推导 ID=\(derived)")
+        return derived
+    }
+    if actual != derived {
+        NSLog("[PrismVPN] appex 实际 ID=\(actual) 与推导 ID=\(derived) 不同, 采用实际 ID")
+    }
+    return actual
 }()
 
 /// App Group 共享容器 ID（与扩展端一致）
@@ -65,10 +75,13 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
     if result != 0 {
         // 把详细错误写入沙盒 tmp（与 Rust std::env::temp_dir() 同一路径，
         // iOS 沙盒内 /tmp 并不存在，必须用 NSTemporaryDirectory()）
+        let buildId = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        let diag = PrismTunnelController.diagnosePackaging()
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) PlugIns: \(diag)"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
-        NSLog("[PrismVPN] 写错误详情到 \(path): \(errorDesc)")
-        try? errorDesc.write(
+        NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
+        try? full.write(
             toFile: path,
             atomically: true,
             encoding: .utf8
@@ -100,6 +113,47 @@ final class PrismTunnelController {
             "\(k)=\(v)"
         }.joined(separator: "; ")
         return "domain=\(ns.domain) code=\(ns.code) desc=\(ns.localizedDescription) userInfo={\(userInfo)}"
+    }
+
+    /// 遍历 App 包 PlugIns 下的 .appex，返回声明了 packet-tunnel-provider
+    /// 扩展点的那个的真实 CFBundleIdentifier；找不到返回 nil
+    static func discoverExtensionBundleID() -> String? {
+        guard let pluginsURL = Bundle.main.builtInPlugInsURL,
+              let entries = try? FileManager.default.contentsOfDirectory(
+                atPath: pluginsURL.path)
+        else { return nil }
+        for entry in entries.sorted() where entry.hasSuffix(".appex") {
+            guard let bundle = Bundle(url: pluginsURL.appendingPathComponent(entry)),
+                  let info = bundle.infoDictionary
+            else { continue }
+            let point = (info["NSExtension"] as? [String: Any])?["NSExtensionPointIdentifier"] as? String
+            if point == "com.apple.networkextension.packet-tunnel-provider",
+               let bid = info["CFBundleIdentifier"] as? String, !bid.isEmpty {
+                return bid
+            }
+        }
+        return nil
+    }
+
+    /// 打包诊断：列出 PlugIns 下每个 appex 的 bundle ID 与扩展点。
+    /// 随启动失败错误一起输出，用户截图即可远程定位是 IPA 缺扩展
+    /// 还是系统/配置层问题
+    static func diagnosePackaging() -> String {
+        guard let pluginsURL = Bundle.main.builtInPlugInsURL else {
+            return "PlugIns 目录不存在(builtInPlugInsURL=nil)"
+        }
+        let entries = (try? FileManager.default.contentsOfDirectory(
+            atPath: pluginsURL.path)) ?? []
+        let appexes = entries.filter { $0.hasSuffix(".appex") }
+        if appexes.isEmpty {
+            return "PlugIns 下无 .appex(扩展未打包!)"
+        }
+        return appexes.map { name in
+            let bundle = Bundle(url: pluginsURL.appendingPathComponent(name))
+            let bid = bundle?.infoDictionary?["CFBundleIdentifier"] as? String ?? "?"
+            let point = ((bundle?.infoDictionary?["NSExtension"] as? [String: Any])?["NSExtensionPointIdentifier"] as? String) ?? "?"
+            return "\(name): id=\(bid) point=\(point)"
+        }.joined(separator: " | ")
     }
 
     // MARK: 失效配置识别

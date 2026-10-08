@@ -35,6 +35,10 @@ def inject
   # 避免 Debug/Release 主 App bundle ID 不一致时 appex 固定跟随第一个配置
   app_bundle_id = app_target.build_configurations.first.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] || 'com.prism.proxy'
   version = JSON.parse(File.read(File.join(ROOT, 'src-tauri', 'tauri.conf.json')))['version']
+  # CI 构建把 commit 短 SHA 写入 CFBundleVersion，App 启动失败时输出，
+  # 用于远程确认用户实际安装的是哪个构建（排除装到旧 IPA 的歧义）
+  build_sha = ENV['GITHUB_SHA']
+  current_project_version = build_sha && build_sha.length >= 7 ? build_sha[0, 7] : '1'
 
   # ---- 1. 拷贝扩展源文件 ----
   ext_dir = File.join(GEN_APPLE, EXT_NAME)
@@ -79,7 +83,7 @@ def inject
     'TARGETED_DEVICE_FAMILY' => '1,2',
     'SKIP_INSTALL' => 'YES',
     'MARKETING_VERSION' => version.to_s,
-    'CURRENT_PROJECT_VERSION' => '1',
+    'CURRENT_PROJECT_VERSION' => current_project_version,
     # Go c-archive 头文件与静态库
     'HEADER_SEARCH_PATHS' => "$(inherited)\n\"#{KERNEL_DIR}\"",
     'LIBRARY_SEARCH_PATHS' => "$(inherited)\n\"#{KERNEL_DIR}\"",
