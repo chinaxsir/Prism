@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Zap, Gauge, RefreshCw, ChevronRight } from "lucide-react";
+import { Zap, Gauge, RefreshCw, ChevronRight, Search } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { Link } from "react-router-dom";
 
@@ -28,14 +28,6 @@ interface ProxyEntry {
 
 const GROUP_TYPES = ["Selector", "URLTest", "Fallback", "LoadBalance"];
 
-const GROUP_TYPE_LABEL: Record<string, string> = {
-  Selector: "手动选择",
-  URLTest: "自动测速",
-  Fallback: "故障转移",
-  LoadBalance: "负载均衡",
-};
-
-/// 节点协议显示标签（与 sing-box outbound type 对齐）
 const PROTOCOL_LABEL: Record<string, string> = {
   Vless: "VLESS",
   VMess: "VMess",
@@ -57,23 +49,23 @@ const protocolTag = (type: string): string =>
 
 export default function Proxies() {
   const coreStatus = useCoreStore((s) => s.status);
-  const [proxiesMap, setProxiesMap] = useState<Record<string, ProxyEntry>>(
-    {}
-  );
-  const [groups, setGroups] = useState<ProxyEntry[]>([]);
-  const [activeGroup, setActiveGroup] = useState("");
+  const [mainSelectorName, setMainSelectorName] = useState("");
+  const [current, setCurrent] = useState<string>("");
+  const [nodes, setNodes] = useState<ProxyEntry[]>([]);
   const [testing, setTesting] = useState(false);
-  /// 上一轮组测速中失败（未出现在结果 map）的节点，展示为「超时」
+  /// 上一轮组测速中失败的节点（显示为「超时」）
   const [failed, setFailed] = useState<Set<string>>(new Set());
-  /// 主选择组（route.final 链上最深的 selector）：默认落在此 tab，选择才真实生效
-  const [mainSelector, setMainSelector] = useState("");
+  /// 最新一轮测速结果（用于实时刷新延迟显示，避免等 loadProxies 往返）
+  const [delays, setDelays] = useState<Record<string, number>>({});
+  /// 用户手动选择标记：一旦用户点选过某节点，不再自动切换到最低延迟
+  const [userTouched, setUserTouched] = useState(false);
+  const [keyword, setKeyword] = useState("");
 
   useEffect(() => {
     getCoreStatus()
       .then((d) => {
-        const ms = d.mainSelector ?? "";
-        setMainSelector(ms);
-        loadProxies(ms);
+        setMainSelectorName(d.mainSelector ?? "");
+        loadProxies(d.mainSelector ?? "");
       })
       .catch(() => loadProxies());
 
@@ -92,50 +84,71 @@ export default function Proxies() {
         proxies?: Record<string, ProxyEntry>;
       };
       const map = resp.proxies ?? {};
-      setProxiesMap(map);
 
-      const groupList = Object.values(map).filter(
-        (g) => GROUP_TYPES.includes(g.type) && g.name !== "GLOBAL"
-      );
-      setGroups(groupList);
+      const groupName = preferred || mainSelectorName;
+      const group = map[groupName];
+      if (!group) return;
 
-      setActiveGroup(
-        (prev) =>
-          (prev && map[prev] && prev) ||
-          (preferred && map[preferred] && preferred) ||
-          (mainSelector && map[mainSelector] && mainSelector) ||
-          groupList[0]?.name ||
-          ""
-      );
+      const all = (group.all ?? [])
+        .map((item) => (typeof item === "string" ? map[item] : item))
+        .filter((item): item is ProxyEntry => Boolean(item))
+        .filter((item) => !GROUP_TYPES.includes(item.type));
+      setNodes(all);
+      setCurrent(group.now ?? "");
+
+      // 未选默认延迟最低：now 为空或不在节点列表中，且用户未手动操作过
+      const nowValid = group.now && all.some((n) => n.name === group.now);
+      if (!nowValid && !userTouched && all.length > 0) {
+        // 先测速再选最快
+        autoSelectFastest(groupName);
+      }
     } catch (e) {
       console.error("load proxies failed:", e);
     }
   };
 
-  const current = groups.find((g) => g.name === activeGroup);
+  const autoSelectFastest = async (groupName: string) => {
+    try {
+      const result = (await urlTest(groupName)) as Record<
+        string,
+        number
+      > | null;
+      if (!result || Object.keys(result).length === 0) return;
+      const entries = Object.entries(result).filter(
+        ([, d]) => d > 0
+      );
+      if (entries.length === 0) return;
+      entries.sort((a, b) => a[1] - b[1]);
+      const fastest = entries[0][0];
+      if (fastest) {
+        await selectProxy(groupName, fastest);
+        setCurrent(fastest);
+        toast.info(`已自动选择延迟最低节点：${fastest}`);
+        await loadProxies();
+      }
+    } catch (e) {
+      console.error("auto select failed:", e);
+    }
+  };
 
-  const nodes: ProxyEntry[] = (current?.all ?? [])
-    .map((item) => (typeof item === "string" ? proxiesMap[item] : item))
-    .filter((item): item is ProxyEntry => Boolean(item))
-    .filter((item) => !GROUP_TYPES.includes(item.type));
-
-  /// 0 = 超时；undefined = 未测速
   const lastDelay = (node: ProxyEntry): Delay => {
     if (failed.has(node.name)) return 0;
+    // 优先用最新测速结果
+    if (node.name in delays) return delays[node.name];
     const history = node.history ?? [];
     if (history.length === 0) return undefined;
     return history[history.length - 1].delay;
   };
 
-  const handleTestGroup = async () => {
-    if (!activeGroup || testing) return;
+  const handleTest = async () => {
+    if (!mainSelectorName || testing) return;
     if (nodes.length === 0) {
-      toast.error("当前策略组没有可测速的节点");
+      toast.error("当前没有可测速的节点");
       return;
     }
     setTesting(true);
     try {
-      const result = (await urlTest(activeGroup)) as Record<
+      const result = (await urlTest(mainSelectorName)) as Record<
         string,
         number
       > | null;
@@ -143,7 +156,7 @@ export default function Proxies() {
       setFailed(
         new Set(nodes.map((n) => n.name).filter((n) => !ok.has(n)))
       );
-      await loadProxies();
+      setDelays(result ?? {});
     } catch (e) {
       console.error("url test failed:", e);
       toast.error(`测速失败：${String(e)}`);
@@ -153,28 +166,36 @@ export default function Proxies() {
   };
 
   const handleSelect = async (name: string) => {
-    if (current?.now === name) return;
+    if (current === name) return;
+    setUserTouched(true);
     try {
-      await selectProxy(activeGroup, name);
+      await selectProxy(mainSelectorName, name);
+      setCurrent(name);
       await loadProxies();
     } catch (e) {
       console.error("select proxy failed:", e);
     }
   };
 
-  if (groups.length === 0) {
+  const filtered = keyword.trim()
+    ? nodes.filter((n) =>
+        n.name.toLowerCase().includes(keyword.trim().toLowerCase())
+      )
+    : nodes;
+
+  if (nodes.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-white/10 bg-surface-card/50 py-16 px-6 text-center">
         <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-accent/10 text-accent">
           <Gauge size={26} />
         </div>
         <h3 className="text-base font-semibold text-gray-200">
-          {coreStatus === "running" ? "暂无策略组" : "内核未运行"}
+          {coreStatus === "running" ? "暂无节点" : "内核未运行"}
         </h3>
         <p className="mt-2 max-w-sm text-sm leading-relaxed text-gray-500">
           {coreStatus === "running"
-            ? "当前订阅没有可展示的策略组，请尝试更新订阅。"
-            : "请在仪表盘点击「启动」，启动后将自动加载订阅中的节点与策略组，可在此测速、切换节点。"}
+            ? "当前订阅没有可展示的节点，请尝试更新订阅。"
+            : "请在仪表盘点击「启动」，启动后将自动加载订阅中的节点，可在此测速、切换节点。"}
         </p>
         <div className="mt-6 flex items-center gap-3">
           {coreStatus !== "running" && (
@@ -200,114 +221,89 @@ export default function Proxies() {
 
   return (
     <div className="space-y-4">
-      {/* 顶部策略组横向 chips */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-1 -mx-1 px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        {groups.map((g) => (
-          <button
-            key={g.name}
-            onClick={() => {
-              setActiveGroup(g.name);
-              setFailed(new Set());
-            }}
-            className={clsx(
-              "shrink-0 px-3.5 py-1.5 rounded-full text-xs font-medium transition-colors",
-              g.name === activeGroup
-                ? "bg-accent text-white"
-                : "bg-surface-card text-gray-400 hover:text-gray-200 border border-white/5"
-            )}
-          >
-            {g.name}
-          </button>
-        ))}
-        <div className="shrink-0 w-px h-5 bg-white/10 mx-1" />
+      {/* 顶部工具栏：搜索 + 测速 */}
+      <div className="flex items-center gap-2">
+        <div className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg bg-surface-card border border-white/5">
+          <Search size={14} className="text-gray-500" />
+          <input
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            placeholder="搜索节点…"
+            className="flex-1 bg-transparent text-sm outline-none placeholder:text-gray-600"
+          />
+        </div>
         <button
-          onClick={handleTestGroup}
+          onClick={handleTest}
           disabled={testing}
-          className="shrink-0 flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-medium bg-surface-card border border-white/5 hover:border-white/15 disabled:opacity-50"
+          className="shrink-0 flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-accent text-white text-xs font-medium disabled:opacity-50"
         >
           <Zap size={13} className={testing ? "animate-pulse" : ""} />
           {testing ? "测速中" : "测速"}
         </button>
       </div>
 
-      {/* 当前组信息条 */}
-      {current && (
-        <div className="flex items-center justify-between px-1">
-          <div className="flex items-center gap-2 text-xs text-gray-400">
-            <span className="text-gray-200 text-sm font-medium">
-              {current.name}
-            </span>
-            <span className="text-gray-600">·</span>
-            <span>{GROUP_TYPE_LABEL[current.type] ?? current.type}</span>
-            <span className="text-gray-600">·</span>
-            <span>
-              当前：
-              <span className="text-accent">{current.now ?? "—"}</span>
-            </span>
-            <span className="text-gray-600">·</span>
-            <span>{nodes.length} 节点</span>
-          </div>
-        </div>
-      )}
+      {/* 当前选中节点信息 */}
+      <div className="flex items-center justify-between px-1 text-xs text-gray-400">
+        <span>
+          当前：
+          <span className="text-accent">{current || "未选择"}</span>
+        </span>
+        <span>{filtered.length} 节点</span>
+      </div>
 
       {/* 节点列表流（Shadowrocket 风格） */}
-      {current && (
-        <div className="rounded-2xl bg-surface-card overflow-hidden border border-white/5">
-          {nodes.map((node, idx) => {
-            const delay = lastDelay(node);
-            const selected = current.now === node.name;
-            return (
-              <button
-                key={node.name}
-                onClick={() => handleSelect(node.name)}
+      <div className="rounded-2xl bg-surface-card overflow-hidden border border-white/5">
+        {filtered.map((node, idx) => {
+          const delay = lastDelay(node);
+          const selected = current === node.name;
+          return (
+            <button
+              key={node.name}
+              onClick={() => handleSelect(node.name)}
+              className={clsx(
+                "w-full flex items-center gap-3 px-4 py-3 text-left transition-colors",
+                selected ? "bg-accent/10" : "hover:bg-white/[0.03]",
+                idx !== filtered.length - 1 && "border-b border-white/5"
+              )}
+            >
+              {/* 选中指示器 */}
+              <span
                 className={clsx(
-                  "w-full flex items-center gap-3 px-4 py-3 text-left transition-colors",
-                  selected ? "bg-accent/10" : "hover:bg-white/[0.03]",
-                  idx !== nodes.length - 1 && "border-b border-white/5"
+                  "shrink-0 w-2 h-2 rounded-full transition-colors",
+                  selected ? "bg-accent" : "bg-transparent"
+                )}
+              />
+
+              {/* 节点名 */}
+              <span
+                className={clsx(
+                  "flex-1 truncate text-sm",
+                  selected ? "text-gray-100 font-medium" : "text-gray-300"
                 )}
               >
-                {/* 选中指示器 */}
-                <span
-                  className={clsx(
-                    "shrink-0 w-2 h-2 rounded-full transition-colors",
-                    selected ? "bg-accent" : "bg-transparent"
-                  )}
-                />
+                {node.name}
+              </span>
 
-                {/* 节点名 */}
-                <span
-                  className={clsx(
-                    "flex-1 truncate text-sm",
-                    selected ? "text-gray-100 font-medium" : "text-gray-300"
-                  )}
-                >
-                  {node.name}
-                </span>
+              {/* 协议标签 */}
+              <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase tracking-wide bg-white/5 text-gray-400">
+                {protocolTag(node.type)}
+              </span>
 
-                {/* 协议标签 */}
-                <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase tracking-wide bg-white/5 text-gray-400">
-                  {protocolTag(node.type)}
-                </span>
+              {/* 延迟 */}
+              <span
+                className={clsx(
+                  "shrink-0 w-14 text-right text-xs font-mono",
+                  delayClass(delay)
+                )}
+              >
+                {delayText(delay)}
+              </span>
 
-                {/* 延迟 */}
-                <span
-                  className={clsx(
-                    "shrink-0 w-14 text-right text-xs font-mono",
-                    delayClass(delay)
-                  )}
-                >
-                  {delayText(delay)}
-                </span>
-
-                <ChevronRight
-                  size={14}
-                  className="shrink-0 text-gray-600"
-                />
-              </button>
-            );
-          })}
-        </div>
-      )}
+              <ChevronRight size={14} className="shrink-0 text-gray-600" />
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

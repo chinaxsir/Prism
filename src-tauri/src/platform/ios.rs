@@ -21,9 +21,18 @@ pub fn start_tunnel(config_content: &str) -> Result<()> {
     if rc == 0 {
         Ok(())
     } else {
-        Err(anyhow!(
-            "NETunnelProviderManager 启动失败（代码 {rc}）：请检查系统 VPN 授权与扩展安装"
-        ))
+        // Swift 侧把 NSError 完整描述写入 /tmp/prism_vpn_start_error.txt
+        let detail = std::fs::read_to_string("/tmp/prism_vpn_start_error.txt")
+            .unwrap_or_default();
+        if detail.is_empty() {
+            Err(anyhow!(
+                "NETunnelProviderManager 启动失败（代码 {rc}）：请检查系统 VPN 授权与扩展安装"
+            ))
+        } else {
+            Err(anyhow!(
+                "VPN 启动失败（代码 {rc}）：{detail}"
+            ))
+        }
     }
 }
 
