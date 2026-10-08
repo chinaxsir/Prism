@@ -505,6 +505,21 @@ jobs:
             fi
           done < "$LIST"
 
+          # 对每个 appex【bundle】整体重签（Apple DTS：签 bundled
+          # 代码时应直接签 bundle，而非只签内部二进制）。上面的循环只
+          # 重签了 appex 内部二进制，CodeResources 对 geoip/geosite
+          # 资源与主二进制的 seal 会因此不一致；对 .appex 整体签名会
+          # 重新嵌入 entitlements 并重建资源 seal，pluginkit 才能正常
+          # 注册/加载扩展（否则 code=14 “VPN app not installed”）。
+          find "$APP/PlugIns" -maxdepth 1 -name "*.appex" -type d \
+            | while IFS= read -r appex; do
+                codesign --force --sign - \
+                  --entitlements "$PWD/src-tauri/gen/apple/PrismVPN/PrismVPN.entitlements.plist" \
+                  "$appex"
+                echo "--- appex bundle entitlements: $appex ---"
+                codesign -d --entitlements - "$appex" 2>/dev/null | head -30
+              done
+
           echo "--- main executable entitlements ---"
           codesign -d --entitlements - "$APP/$EXEC" 2>&1 | head -40 || true
 
@@ -558,7 +573,15 @@ jobs:
             echo "::error::appex binary lacks application-groups entitlement"
             exit 1
           }
-          echo "appex OK: point=$EP entitlement=present group=present"
+          # Team Prefix 必须与主 App 相同（code=14 “Developer must update”
+          # 的根因回归保护）：appex application-identifier 的前缀必须
+          # 与主 App 的 TROLLTROLL 一致，否则 pluginkit 拒绝关联宿主
+          codesign -d --entitlements - "$APPEX/$APP_EXEC" 2>/dev/null \
+            | grep -q "TROLLTROLL.com.prism.proxy.PrismVPN" || {
+            echo "::error::appex application-identifier team prefix mismatches main app (would cause NEVPN code=14)"
+            exit 1
+          }
+          echo "appex OK: point=$EP entitlement=present group=present team=matched"
 
           # 硬校验 1：/usr/lib/swift 必须是【第一条】LC_RPATH，
           # 否则 iOS 16.5 会先加载 back-deploy 嵌入副本触发 checkVersion abort

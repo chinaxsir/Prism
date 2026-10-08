@@ -2,6 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- 签名身份必须与主 App（TrollStore.entitlements.plist）完全一致。
+         Apple DTS 明确要求：内嵌扩展与宿主 App 的 Team Prefix 必须相同，
+         否则 pluginkit 无法把扩展关联到宿主，启动隧道时报
+         NEVPNConnectionErrorDomain code=14 / “Developer must update app”。
+         TrollStore 重签会保留二进制中嵌入的这些 entitlements。 -->
+    <key>application-identifier</key>
+    <string>TROLLTROLL.com.prism.proxy.PrismVPN</string>
+    <key>com.apple.developer.team-identifier</key>
+    <string>TROLLTROLL</string>
     <key>com.apple.developer.networking.networkextension</key>
     <array>
         <string>packet-tunnel-provider</string>
