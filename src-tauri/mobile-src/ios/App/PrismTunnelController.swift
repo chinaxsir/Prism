@@ -33,8 +33,11 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
     semaphore.wait()
 
     if result != 0 {
-        // 把详细错误写入临时文件，Rust 侧读出回传前端
-        let path = "/tmp/prism_vpn_start_error.txt"
+        // 把详细错误写入沙盒 tmp（与 Rust std::env::temp_dir() 同一路径，
+        // iOS 沙盒内 /tmp 并不存在，必须用 NSTemporaryDirectory()）
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("prism_vpn_start_error.txt")
+        NSLog("[PrismVPN] 写错误详情到 \(path): \(errorDesc)")
         try? errorDesc.write(
             toFile: path,
             atomically: true,

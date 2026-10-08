@@ -524,6 +524,31 @@ jobs:
           fi
           echo "no restricted entitlements; Developer Mode not required"
 
+          # 硬校验 0：VPN 扩展必须真的打进 PlugIns，否则主 App 启动隧道
+          # 时 NETunnelProviderManager 找不到 provider 直接报 -1
+          APPEX=$(find "$APP/PlugIns" -maxdepth 1 -name "*.appex" -type d 2>/dev/null | head -1)
+          if [ -z "$APPEX" ]; then
+            echo "::error::PrismVPN.appex missing from PlugIns (NETunnelProviderManager would fail with -1)"
+            exit 1
+          fi
+          echo "--- extension bundle check: $APPEX ---"
+          ls -la "$APPEX"
+          # 扩展的 Info.plist 必须声明 packet-tunnel-provider 扩展点
+          EP=$( /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" \
+            "$APPEX/Info.plist" 2>/dev/null || true )
+          if [ "$EP" != "com.apple.networkextension.packet-tunnel-provider" ]; then
+            echo "::error::appex NSExtensionPointIdentifier wrong: '$EP'"
+            exit 1
+          fi
+          # 扩展二进制必须内嵌 packet-tunnel-provider entitlement
+          APP_EXEC=$( /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APPEX/Info.plist" )
+          codesign -d --entitlements - "$APPEX/$APP_EXEC" 2>/dev/null \
+            | grep -q "packet-tunnel-provider" || {
+            echo "::error::appex binary lacks packet-tunnel-provider entitlement"
+            exit 1
+          }
+          echo "appex OK: point=$EP entitlement=present"
+
           # 硬校验 1：/usr/lib/swift 必须是【第一条】LC_RPATH，
           # 否则 iOS 16.5 会先加载 back-deploy 嵌入副本触发 checkVersion abort
           FIRST_RPATH=$(otool -l "$APP/$EXEC" | awk '
