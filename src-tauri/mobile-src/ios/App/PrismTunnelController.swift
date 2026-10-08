@@ -195,9 +195,12 @@ final class PrismTunnelController {
                 finish(nil)
             case .disconnected:
                 // 捕获真实断开原因：startTunnel 返回的 NSError 会存到
-                // lastDisconnectError，否则用户只看到无意义的「立即断开」
+                // NETunnelProviderSession.lastDisconnectError，否则用户只看到
+                // 无意义的「立即断开」
                 var desc = "扩展启动后立即断开（status=disconnected）"
-                if let err = connection.lastDisconnectError {
+                if let session = connection as? NETunnelProviderSession,
+                   let err = session.lastDisconnectError
+                {
                     desc = PrismTunnelController.describe(error: err)
                     NSLog("[PrismVPN] lastDisconnectError: \(desc)")
                 }
