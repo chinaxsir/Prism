@@ -97,6 +97,12 @@ export const closeAllConnections = () =>
 export const getRules = () => invoke("get_rules");
 export const getProxyGroups = () => invoke("get_proxy_groups");
 
+/// 内核未运行时从订阅缓存读取节点列表（节点页预览）
+export const getCachedProxies = () =>
+  invoke<Array<{ name: string; kind: string; server: string; port: number; fromSubscription: string }>>(
+    "get_cached_proxies"
+  );
+
 export const getSettings = () => invoke<UserSettings>("get_settings");
 export const saveSettings = (settings: UserSettings) =>
   invoke("save_settings", { settings });

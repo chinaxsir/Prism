@@ -6,6 +6,7 @@ import { Link } from "react-router-dom";
 import {
   getCoreStatus,
   getProxyGroups,
+  getCachedProxies,
   selectProxy,
   urlTest,
 } from "@/api/ipc";
@@ -24,6 +25,8 @@ interface ProxyEntry {
   now?: string;
   all?: Array<ProxyEntry | string>;
   history?: DelaySample[];
+  /// 订阅缓存预览用：服务器地址
+  server?: string;
 }
 
 const GROUP_TYPES = ["Selector", "URLTest", "Fallback", "LoadBalance"];
@@ -80,30 +83,58 @@ export default function Proxies() {
 
   const loadProxies = async (preferred?: string) => {
     try {
-      const resp = (await getProxyGroups()) as {
-        proxies?: Record<string, ProxyEntry>;
-      };
-      const map = resp.proxies ?? {};
+      // 内核运行：从 clash API 拿实时延迟与选中态
+      if (coreStatus === "running") {
+        const resp = (await getProxyGroups()) as {
+          proxies?: Record<string, ProxyEntry>;
+        };
+        const map = resp.proxies ?? {};
 
-      const groupName = preferred || mainSelectorName;
-      const group = map[groupName];
-      if (!group) return;
+        const groupName = preferred || mainSelectorName;
+        const group = map[groupName];
+        if (!group) {
+          // 主选择组未就绪，回落到缓存预览
+          await loadCached();
+          return;
+        }
 
-      const all = (group.all ?? [])
-        .map((item) => (typeof item === "string" ? map[item] : item))
-        .filter((item): item is ProxyEntry => Boolean(item))
-        .filter((item) => !GROUP_TYPES.includes(item.type));
-      setNodes(all);
-      setCurrent(group.now ?? "");
+        const all = (group.all ?? [])
+          .map((item) => (typeof item === "string" ? map[item] : item))
+          .filter((item): item is ProxyEntry => Boolean(item))
+          .filter((item) => !GROUP_TYPES.includes(item.type));
+        setNodes(all);
+        setCurrent(group.now ?? "");
 
-      // 未选默认延迟最低：now 为空或不在节点列表中，且用户未手动操作过
-      const nowValid = group.now && all.some((n) => n.name === group.now);
-      if (!nowValid && !userTouched && all.length > 0) {
-        // 先测速再选最快
-        autoSelectFastest(groupName);
+        // 未选默认延迟最低：now 为空或不在节点列表中，且用户未手动操作过
+        const nowValid = group.now && all.some((n) => n.name === group.now);
+        if (!nowValid && !userTouched && all.length > 0) {
+          autoSelectFastest(groupName);
+        }
+      } else {
+        // 内核未运行：从订阅缓存预览（商业 APP 行为）
+        await loadCached();
       }
     } catch (e) {
       console.error("load proxies failed:", e);
+    }
+  };
+
+  /// 从订阅缓存读取节点列表（内核未运行时使用）
+  const loadCached = async () => {
+    try {
+      const list = await getCachedProxies();
+      const entries: ProxyEntry[] = list.map((p) => ({
+        name: p.name,
+        type: p.kind,
+        server: p.server,
+      }));
+      setNodes(entries);
+      setCurrent("");
+      setDelays({});
+      setFailed(new Set());
+    } catch (e) {
+      console.error("load cached proxies failed:", e);
+      setNodes([]);
     }
   };
 
@@ -190,30 +221,28 @@ export default function Proxies() {
           <Gauge size={26} />
         </div>
         <h3 className="text-base font-semibold text-gray-200">
-          {coreStatus === "running" ? "暂无节点" : "内核未运行"}
+          暂无节点
         </h3>
         <p className="mt-2 max-w-sm text-sm leading-relaxed text-gray-500">
-          {coreStatus === "running"
-            ? "当前订阅没有可展示的节点，请尝试更新订阅。"
-            : "请在仪表盘点击「启动」，启动后将自动加载订阅中的节点，可在此测速、切换节点。"}
+          请导入订阅或更新已导入的订阅；启动内核后可在此测速、切换节点。
         </p>
         <div className="mt-6 flex items-center gap-3">
+          <Link
+            to="/subscription"
+            className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-hover"
+          >
+            <RefreshCw size={14} />
+            管理订阅
+          </Link>
           {coreStatus !== "running" && (
             <Link
               to="/dashboard"
-              className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-hover"
+              className="flex items-center gap-2 rounded-lg border border-white/10 px-5 py-2.5 text-sm text-gray-300 transition-colors hover:border-white/20"
             >
               <Gauge size={15} />
               前往仪表盘启动
             </Link>
           )}
-          <Link
-            to="/subscription"
-            className="flex items-center gap-2 rounded-lg border border-white/10 px-5 py-2.5 text-sm text-gray-300 transition-colors hover:border-white/20"
-          >
-            <RefreshCw size={14} />
-            管理订阅
-          </Link>
         </div>
       </div>
     );
@@ -234,8 +263,9 @@ export default function Proxies() {
         </div>
         <button
           onClick={handleTest}
-          disabled={testing}
-          className="shrink-0 flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-accent text-white text-xs font-medium disabled:opacity-50"
+          disabled={testing || coreStatus !== "running"}
+          className="shrink-0 flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-accent text-white text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+          title={coreStatus !== "running" ? "启动内核后可测速" : "测速"}
         >
           <Zap size={13} className={testing ? "animate-pulse" : ""} />
           {testing ? "测速中" : "测速"}
@@ -247,6 +277,9 @@ export default function Proxies() {
         <span>
           当前：
           <span className="text-accent">{current || "未选择"}</span>
+          {coreStatus !== "running" && (
+            <span className="text-gray-600 ml-2">· 内核未运行（预览模式）</span>
+          )}
         </span>
         <span>{filtered.length} 节点</span>
       </div>
@@ -260,9 +293,11 @@ export default function Proxies() {
             <button
               key={node.name}
               onClick={() => handleSelect(node.name)}
+              disabled={coreStatus !== "running"}
               className={clsx(
                 "w-full flex items-center gap-3 px-4 py-3 text-left transition-colors",
                 selected ? "bg-accent/10" : "hover:bg-white/[0.03]",
+                coreStatus !== "running" && "cursor-default opacity-80",
                 idx !== filtered.length - 1 && "border-b border-white/5"
               )}
             >

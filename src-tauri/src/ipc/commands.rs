@@ -979,6 +979,67 @@ fn count_profile_nodes(text: &str) -> Option<usize> {
     value.get("proxies")?.as_sequence().map(|s| s.len())
 }
 
+/// 节点简表（内核未运行时从订阅缓存读取，供节点页预览）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedProxyDto {
+    pub name: String,
+    pub kind: String,
+    pub server: String,
+    pub port: u16,
+    /// 来源订阅 URL（用于 UI 分组）
+    pub from_subscription: String,
+}
+
+/// 内核未运行时从订阅缓存读取节点列表（节点页预览）
+/// 内核运行时优先用 get_proxy_groups（含实时延迟）
+#[tauri::command]
+pub async fn get_cached_proxies(
+    state: State<'_, AppState>,
+) -> Result<Vec<CachedProxyDto>, String> {
+    let records = crate::core::store::load_subscriptions(&state.data_dir);
+    let mut out: Vec<CachedProxyDto> = Vec::new();
+    for r in records {
+        if !r.enabled {
+            continue;
+        }
+        let path = crate::core::store::profile_path(&state.data_dir, &r.url);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let value: serde_yaml::Value = match serde_yaml::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let proxies = match value.get("proxies").and_then(|v| v.as_sequence()) {
+            Some(s) => s,
+            None => continue,
+        };
+        for p in proxies {
+            let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let kind = p.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let server = p.get("server").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let port = p.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            if name.is_empty() || server.is_empty() {
+                continue;
+            }
+            // 跳过机场提示节点（127.x / localhost）
+            if server.starts_with("127.") || server == "localhost" {
+                continue;
+            }
+            out.push(CachedProxyDto {
+                name,
+                kind,
+                server,
+                port,
+                from_subscription: r.url.clone(),
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// 获取自定义规则（规则页编辑器；Clash 行格式，顺序即优先级）
 #[tauri::command]
 pub async fn get_custom_rules(state: State<'_, AppState>) -> Result<Vec<String>, String> {
