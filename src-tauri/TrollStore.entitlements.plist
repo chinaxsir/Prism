@@ -18,6 +18,13 @@
 	<array>
 		<string>packet-tunnel-provider</string>
 	</array>
+	<!-- App Group 共享容器：主 App 写配置到 group container，
+	     扩展从同一路径读取（避开 providerConfiguration 512KB 限制）。
+	     TrollStore 可签任意 group ID，无需 Apple 注册。 -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.prism.proxy</string>
+	</array>
 	<key>keychain-access-groups</key>
 	<array>
 		<string>TROLLTROLL.com.prism.proxy</string>

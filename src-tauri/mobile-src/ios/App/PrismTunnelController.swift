@@ -12,6 +12,10 @@ private let extensionBundleIdentifier: String = {
     return "\(main).PrismVPN"
 }()
 
+/// App Group 共享容器 ID（与扩展端一致）
+/// TrollStore 可签任意 entitlement，App Group 不需要 Apple 注册
+private let prismAppGroupID = "group.com.prism.proxy"
+
 private let managerServerTag = "Prism"
 
 // MARK: - C ABI 入口（供 Rust 调用）
@@ -19,11 +23,37 @@ private let managerServerTag = "Prism"
 @_cdecl("prism_ios_vpn_start")
 func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
     let configText = String(cString: config)
+
+    // 写到 App Group 共享容器，避开 NETunnelProviderManager
+    // providerConfiguration 512KB 限制（用户配置 2.47MB）
+    let configPath: String
+    if let groupURL = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: prismAppGroupID
+    ) {
+        configPath = groupURL.appendingPathComponent("prism_config.json").path
+        NSLog("[PrismVPN] App Group 可用: \(configPath)")
+    } else {
+        // 回落到主 App tmp（与扩展进程不共享，仅小配置场景可用）
+        configPath = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("prism_config.json")
+        NSLog("[PrismVPN] App Group 不可用, 回落 tmp: \(configPath) (扩展可能读不到)")
+    }
+    do {
+        try configText.write(toFile: configPath, atomically: true, encoding: .utf8)
+    } catch {
+        NSLog("[PrismVPN] 写共享配置失败: \(error.localizedDescription)")
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("prism_vpn_start_error.txt")
+        try? "写共享配置失败: \(error.localizedDescription)"
+            .write(toFile: path, atomically: true, encoding: .utf8)
+        return -1
+    }
+
     let semaphore = DispatchSemaphore(value: 0)
     var result: Int32 = 0
     var errorDesc: String = ""
 
-    PrismTunnelController.shared.start(config: configText) { error in
+    PrismTunnelController.shared.start(configPath: configPath) { error in
         if let error = error {
             result = -1
             errorDesc = PrismTunnelController.describe(error: error)
@@ -72,7 +102,7 @@ final class PrismTunnelController {
         return "domain=\(ns.domain) code=\(ns.code) desc=\(ns.localizedDescription) userInfo={\(userInfo)}"
     }
 
-    func start(config: String, completion: @escaping (Error?) -> Void) {
+    func start(configPath: String, completion: @escaping (Error?) -> Void) {
         loadOrCreateManager { result in
             switch result {
             case .failure(let error):
@@ -82,7 +112,9 @@ final class PrismTunnelController {
                 proto.providerBundleIdentifier = extensionBundleIdentifier
                 proto.serverAddress = managerServerTag
                 proto.disconnectOnSleep = false
-                proto.providerConfiguration = ["config": config]
+                // 只传路径（短），避开 NETunnelProviderManager
+                // providerConfiguration 512KB 限制
+                proto.providerConfiguration = ["config_path": configPath]
 
                 manager.protocolConfiguration = proto
                 manager.isEnabled = true

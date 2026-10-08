@@ -547,7 +547,18 @@ jobs:
             echo "::error::appex binary lacks packet-tunnel-provider entitlement"
             exit 1
           }
-          echo "appex OK: point=$EP entitlement=present"
+          # 主 App + 扩展都必须内嵌相同的 App Group（共享配置文件）
+          codesign -d --entitlements - "$APP/$EXEC" 2>/dev/null \
+            | grep -q "group.com.prism.proxy" || {
+            echo "::error::main app lacks com.apple.security.application-groups entitlement"
+            exit 1
+          }
+          codesign -d --entitlements - "$APPEX/$APP_EXEC" 2>/dev/null \
+            | grep -q "group.com.prism.proxy" || {
+            echo "::error::appex binary lacks application-groups entitlement"
+            exit 1
+          }
+          echo "appex OK: point=$EP entitlement=present group=present"
 
           # 硬校验 1：/usr/lib/swift 必须是【第一条】LC_RPATH，
           # 否则 iOS 16.5 会先加载 back-deploy 嵌入副本触发 checkVersion abort

@@ -2,12 +2,16 @@
 // 参考 sing-box 官方 SFI Extension（PacketTunnelProvider / PlatformInterface）。
 //
 // 启动流程（主 App 经 NETunnelProviderManager 发起）：
-//   配置 JSON 由 providerConfiguration["config"] 传入；
+//   主 App 把配置 JSON 写到 App Group 共享容器 prism_config.json，
+//   providerConfiguration 只传 "config_path"（路径很短，避开 512KB 限制）；
 //   geoip/geosite 从扩展 Bundle 拷入工作目录；
 //   注册 Go libbox 回调后 PrismVPNStart → OpenTun → setTunnelNetworkSettings + TUN fd。
 
 import Foundation
 import NetworkExtension
+
+/// App Group 共享容器 ID（主 App 与扩展共用，TrollStore 可签任意 group）
+private let prismAppGroupID = "group.com.prism.proxy"
 
 // Go 线程回调时需要访问当前扩展实例
 private var prismProviderRef: PacketTunnelProvider?
@@ -20,12 +24,31 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     ) {
         prismProviderRef = self
 
-        guard let config = (protocolConfiguration as? NETunnelProviderProtocol)?
+        // 优先从 providerConfiguration["config_path"] 读路径，再读文件
+        // （避免把完整配置塞进 providerConfiguration 触发 512KB 限制）
+        let configText: String
+        if let configPath = (protocolConfiguration as? NETunnelProviderProtocol)?
+            .providerConfiguration?["config_path"] as? String,
+           !configPath.isEmpty
+        {
+            do {
+                configText = try String(contentsOfFile: configPath, encoding: .utf8)
+            } catch {
+                completionHandler(NSError(
+                    domain: "PrismVPN", code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "无法读取共享配置文件: \(error.localizedDescription)"]
+                ))
+                return
+            }
+        } else if let inlineConfig = (protocolConfiguration as? NETunnelProviderProtocol)?
             .providerConfiguration?["config"] as? String
-        else {
+        {
+            // 兼容旧路径（小配置场景）：直接内嵌
+            configText = inlineConfig
+        } else {
             completionHandler(NSError(
                 domain: "PrismVPN", code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "缺少配置（providerConfiguration.config）"]
+                userInfo: [NSLocalizedDescriptionKey: "缺少配置（providerConfiguration.config_path）"]
             ))
             return
         }
