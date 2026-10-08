@@ -493,12 +493,10 @@ jobs:
             else
               case "$bin" in
                 "$APP"/PlugIns/*.appex/*)
-                  # NetworkExtension 隧道提供方二进制必须内嵌
-                  # packet-tunnel-provider entitlement，否则系统拒绝加载扩展；
-                  # TrollStore 安装重签时保留二进制已有签名中的 entitlements
-                  codesign --force --sign - \
-                    --entitlements "$PWD/src-tauri/gen/apple/PrismVPN/PrismVPN.entitlements.plist" \
-                    "$bin" ;;
+                  # 扩展跳过 codesign——真机诊断证实 codesign ad-hoc 签名
+                  # 会被 TrollStore 重签管线剥掉（设备上无内嵌签名 → code=14），
+                  # 改由下方 ldid -S 统一签名（TrollStore 生态兼容格式）
+                  : ;;
                 *)
                   codesign --force --sign - "$bin" ;;
               esac
@@ -511,13 +509,20 @@ jobs:
           # 资源与主二进制的 seal 会因此不一致；对 .appex 整体签名会
           # 重新嵌入 entitlements 并重建资源 seal，pluginkit 才能正常
           # 注册/加载扩展（否则 code=14 “VPN app not installed”）。
+          #
+          # 关键：改用 ldid -S 而非 codesign。真机诊断证实设备上 appex
+          # “无内嵌代码签名(LC_CODE_SIGNATURE 不可用)”——codesign 的
+          # ad-hoc 签名会被 TrollStore 重签管线剥掉，ldid -S 才是
+          # TrollStore 生态兼容的签名格式（Egern 等可用 App 即如此）。
+          brew install ldid-procursus 2>/dev/null || brew install ldid || true
+          LDID=$(command -v ldid || true)
+          [ -n "$LDID" ] || { echo "::error::ldid not available"; exit 1; }
           find "$APP/PlugIns" -maxdepth 1 -name "*.appex" -type d \
             | while IFS= read -r appex; do
-                codesign --force --sign - \
-                  --entitlements "$PWD/src-tauri/gen/apple/PrismVPN/PrismVPN.entitlements.plist" \
-                  "$appex"
-                echo "--- appex bundle entitlements: $appex ---"
-                codesign -d --entitlements - "$appex" 2>/dev/null | head -30
+                "$LDID" -S"$PWD/src-tauri/gen/apple/PrismVPN/PrismVPN.entitlements.plist" \
+                  "$appex/$(plutil -extract CFBundleExecutable raw "$appex/Info.plist")"
+                echo "--- appex ldid entitlements: $appex ---"
+                "$LDID" -e "$appex/$(plutil -extract CFBundleExecutable raw "$appex/Info.plist")" | head -30
               done
 
           echo "--- main executable entitlements ---"
@@ -556,8 +561,10 @@ jobs:
             exit 1
           fi
           # 扩展二进制必须内嵌 packet-tunnel-provider entitlement
+          # 注意：扩展已由 ldid 签名，codesign 可能读不出 entitlements，
+          # 这里必须用 ldid -e 读取
           APP_EXEC=$( /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APPEX/Info.plist" )
-          codesign -d --entitlements - "$APPEX/$APP_EXEC" 2>/dev/null \
+          "$LDID" -e "$APPEX/$APP_EXEC" 2>/dev/null \
             | grep -q "packet-tunnel-provider" || {
             echo "::error::appex binary lacks packet-tunnel-provider entitlement"
             exit 1
@@ -568,7 +575,7 @@ jobs:
             echo "::error::main app lacks com.apple.security.application-groups entitlement"
             exit 1
           }
-          codesign -d --entitlements - "$APPEX/$APP_EXEC" 2>/dev/null \
+          "$LDID" -e "$APPEX/$APP_EXEC" 2>/dev/null \
             | grep -q "group.com.prism.proxy" || {
             echo "::error::appex binary lacks application-groups entitlement"
             exit 1
@@ -576,7 +583,7 @@ jobs:
           # Team Prefix 必须与主 App 相同（code=14 “Developer must update”
           # 的根因回归保护）：appex application-identifier 的前缀必须
           # 与主 App 的 TROLLTROLL 一致，否则 pluginkit 拒绝关联宿主
-          codesign -d --entitlements - "$APPEX/$APP_EXEC" 2>/dev/null \
+          "$LDID" -e "$APPEX/$APP_EXEC" 2>/dev/null \
             | grep -q "TROLLTROLL.com.prism.proxy.PrismVPN" || {
             echo "::error::appex application-identifier team prefix mismatches main app (would cause NEVPN code=14)"
             exit 1
