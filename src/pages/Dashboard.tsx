@@ -123,94 +123,125 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <h1 className="text-2xl font-bold">仪表盘</h1>
 
-      {/* 状态卡片 */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-        <button
-          onClick={toggle}
-          className={`rounded-xl p-5 flex flex-col items-start justify-between h-28 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-ring ${running ? "bg-latency-bad/20 hover:bg-latency-bad/30" : "bg-accent/20 hover:bg-accent/30"}`}
-        >
-          <Power size={24} className={running ? "text-latency-bad" : "text-accent"} />
-          <span className="text-xl font-bold">
+      {/* Hero 状态卡（Shadowrocket 风格：满宽，左状态右按钮） */}
+      <div
+        className={`rounded-2xl p-5 border transition-colors ${
+          running
+            ? "bg-latency-good/10 border-latency-good/30"
+            : "bg-surface-card border-white/5"
+        }`}
+      >
+        <div className="flex items-center justify-between">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-xs text-gray-400 mb-1">
+              <span
+                className={`inline-block w-2 h-2 rounded-full ${
+                  running ? "bg-latency-good" : "bg-gray-500"
+                } ${running ? "animate-pulse" : ""}`}
+              />
+              {running ? "已连接" : "未连接"}
+            </div>
+            <div className="text-2xl font-bold text-gray-100">
+              {running ? formatUptime(uptimeSecs) : "Prism"}
+            </div>
+            <div className="text-xs text-gray-500 mt-1">
+              {running ? `运行模式 · ${MODE_LABEL[mode]}` : "点击右侧按钮启动代理"}
+            </div>
+          </div>
+          <button
+            onClick={toggle}
+            className={`shrink-0 flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-semibold transition-all ${
+              running
+                ? "bg-latency-bad/20 text-latency-bad hover:bg-latency-bad/30"
+                : "bg-accent text-white hover:bg-accent-hover"
+            }`}
+          >
+            <Power size={16} />
             {running ? "停止" : "启动"}
-          </span>
-        </button>
-
-        <StatCard
-          icon={<Gauge size={20} className="text-accent" />}
-          label="运行模式"
-          value={MODE_LABEL[mode]}
-        />
-        <StatCard
-          icon={<Timer size={20} className="text-accent" />}
-          label="运行时长"
-          value={running ? formatUptime(uptimeSecs) : "—"}
-        />
-        {mobile ? (
-          <StatCard
-            icon={<BarChart3 size={20} className="text-accent" />}
-            label="今日流量"
-            value={running ? formatBytes(sessionTraffic) : "—"}
-          />
-        ) : (
-          <StatCard
-            icon={<Cpu size={20} className="text-accent" />}
-            label="内存占用"
-            value={running && memoryUsage > 0 ? formatBytes(memoryUsage) : "—"}
-          />
-        )}
+          </button>
+        </div>
       </div>
 
       {/* 启动/停止错误提示 */}
       {errorMsg && (
-        <div className="rounded-xl p-4 text-sm shadow-md bg-latency-bad/20 text-red-300 border border-red-500/30">
+        <div className="rounded-xl p-4 text-sm bg-latency-bad/10 text-red-300 border border-red-500/20">
           <div className="font-semibold mb-1">操作失败</div>
           <div className="text-xs break-all text-red-200">{errorMsg}</div>
         </div>
       )}
 
-      {/* 实时速率 */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="bg-surface-card rounded-xl p-5">
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <Activity size={16} className="text-latency-good" />
-            下载速率
+      {/* 状态指标行（3 列） */}
+      <div className="grid grid-cols-3 gap-3">
+        <StatChip
+          icon={<Timer size={14} className="text-gray-400" />}
+          label="运行时长"
+          value={running ? formatUptime(uptimeSecs) : "—"}
+        />
+        {mobile ? (
+          <StatChip
+            icon={<BarChart3 size={14} className="text-gray-400" />}
+            label="今日流量"
+            value={running ? formatBytes(sessionTraffic) : "—"}
+          />
+        ) : (
+          <StatChip
+            icon={<Cpu size={14} className="text-gray-400" />}
+            label="内存占用"
+            value={running && memoryUsage > 0 ? formatBytes(memoryUsage) : "—"}
+          />
+        )}
+        <StatChip
+          icon={<Gauge size={14} className="text-gray-400" />}
+          label="运行模式"
+          value={MODE_LABEL[mode]}
+        />
+      </div>
+
+      {/* 实时速率（合并卡片，左右分布） */}
+      <div className="bg-surface-card rounded-2xl p-5 border border-white/5">
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <div className="flex items-center gap-1.5 text-xs text-gray-400">
+              <Activity size={13} className="text-latency-good" />
+              下载
+            </div>
+            <div className="text-xl font-bold text-latency-good mt-1.5 font-mono">
+              {running ? formatSpeed(downSpeed) : "—"}
+            </div>
           </div>
-          <div className="text-2xl font-bold text-latency-good mt-2">
-            {running ? formatSpeed(downSpeed) : "—"}
-          </div>
-        </div>
-        <div className="bg-surface-card rounded-xl p-5">
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <Activity size={16} className="text-accent" />
-            上传速率
-          </div>
-          <div className="text-2xl font-bold text-accent mt-2">
-            {running ? formatSpeed(upSpeed) : "—"}
+          <div className="border-l border-white/5 pl-4">
+            <div className="flex items-center gap-1.5 text-xs text-gray-400">
+              <Activity size={13} className="text-accent" />
+              上传
+            </div>
+            <div className="text-xl font-bold text-accent mt-1.5 font-mono">
+              {running ? formatSpeed(upSpeed) : "—"}
+            </div>
           </div>
         </div>
       </div>
 
       {/* 流量曲线图 */}
-      <div className="bg-surface-card rounded-xl p-5 shadow-md">
-        <h2 className="text-lg font-semibold mb-4 text-gray-100">实时流量（最近 60 秒）</h2>
-        <ResponsiveContainer width="100%" height={280}>
+      <div className="bg-surface-card rounded-2xl p-5 border border-white/5">
+        <h2 className="text-sm font-semibold mb-4 text-gray-200">实时流量（最近 60 秒）</h2>
+        <ResponsiveContainer width="100%" height={240}>
           <LineChart data={traffic} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
             <XAxis
               dataKey="time"
               stroke="#9ca3af"
-              fontSize={11}
+              fontSize={10}
               tickLine={false}
               minTickGap={48}
             />
             <YAxis
               stroke="#9ca3af"
-              fontSize={11}
+              fontSize={10}
               tickLine={false}
-              width={72}
+              width={60}
               tickFormatter={(v) => formatBytes(Number(v))}
             />
             <Tooltip
@@ -230,7 +261,7 @@ export default function Dashboard() {
             />
             <Legend
               formatter={(v) => (v === "down" ? "下载" : "上传")}
-              wrapperStyle={{ paddingTop: '16px' }}
+              wrapperStyle={{ paddingTop: '12px', fontSize: 11 }}
             />
             <Line
               type="monotone"
@@ -255,7 +286,7 @@ export default function Dashboard() {
   );
 }
 
-function StatCard({
+function StatChip({
   icon,
   label,
   value,
@@ -265,12 +296,14 @@ function StatCard({
   value: string;
 }) {
   return (
-    <div className="bg-surface-card rounded-xl p-5 h-28 flex flex-col justify-between shadow-md">
-      <div className="flex items-center gap-2 text-sm text-gray-400">
+    <div className="bg-surface-card rounded-xl p-3 border border-white/5">
+      <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
         {icon}
-        <span className="font-medium">{label}</span>
+        <span>{label}</span>
       </div>
-      <div className="text-2xl font-bold text-gray-100">{value}</div>
+      <div className="text-sm font-semibold text-gray-100 mt-1 truncate">
+        {value}
+      </div>
     </div>
   );
 }
