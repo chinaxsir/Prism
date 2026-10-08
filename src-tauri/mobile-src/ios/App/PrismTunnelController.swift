@@ -76,8 +76,10 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
         // 把详细错误写入沙盒 tmp（与 Rust std::env::temp_dir() 同一路径，
         // iOS 沙盒内 /tmp 并不存在，必须用 NSTemporaryDirectory()）
         let buildId = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        let groupOk = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.com.prism.proxy") != nil
         let diag = PrismTunnelController.diagnosePackaging()
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) PlugIns: \(diag)"
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) PlugIns: \(diag)"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -105,6 +107,11 @@ final class PrismTunnelController {
     static let shared = PrismTunnelController()
 
     private init() {}
+
+    /// 最近一次 loadAllFromPreferences 可见的配置数。诊断用：
+    /// 若系统设置里存在旧 Prism 条目而此处为 0，说明该条目属于
+    /// 旧签名身份，App 内 API 不可见/不可删，必须去系统设置手动删除
+    static var lastManagerCount = -1
 
     /// 把 NSError 完整描述（domain/code/userInfo）输出，便于真机定位
     static func describe(error: Error) -> String {
@@ -515,6 +522,7 @@ final class PrismTunnelController {
                 return
             }
             let all = managers ?? []
+            PrismTunnelController.lastManagerCount = all.count
             NSLog("[PrismVPN] loadAllFromPreferences 成功, 找到 \(all.count) 个 manager")
 
             // 主动清理（覆盖升级后 code=14 的第一道防线）：

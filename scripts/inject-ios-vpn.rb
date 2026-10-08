@@ -40,6 +40,20 @@ def inject
   build_sha = ENV['GITHUB_SHA']
   current_project_version = build_sha && build_sha.length >= 7 ? build_sha[0, 7] : '1'
 
+  # 主 App 也同步打标 CFBundleVersion，App 内诊断输出 build= 即真实
+  # 构建 SHA（此前只改了扩展 target，主 App 仍显示 0.3.7 无法辨识构建）
+  app_target.build_configurations.each do |config|
+    config.build_settings['CURRENT_PROJECT_VERSION'] = current_project_version
+  end
+
+  # 主 App 的 CFBundleVersion 静态写在生成的 Info.plist 里（build
+  # setting 不覆盖静态 plist），直接用 PlistBuddy 改写才能生效
+  app_plist = File.join(GEN_APPLE, 'ios', 'App', 'Info.plist')
+  if File.exist?(app_plist)
+    system('/usr/libexec/PlistBuddy', '-c',
+           "Set :CFBundleVersion #{current_project_version}", app_plist)
+  end
+
   # ---- 1. 拷贝扩展源文件 ----
   ext_dir = File.join(GEN_APPLE, EXT_NAME)
   FileUtils.mkdir_p(ext_dir)
