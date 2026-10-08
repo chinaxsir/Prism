@@ -80,7 +80,8 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
             forSecurityApplicationGroupIdentifier: "group.com.prism.proxy") != nil
         let diag = PrismTunnelController.diagnosePackaging()
         let sig = PrismTunnelController.diagnoseAppexEntitlements()
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) PlugIns: \(diag) ; appex签名: \(sig)"
+        let preflight = PrismTunnelController.diagnoseAppexPreflight()
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -143,10 +144,30 @@ final class PrismTunnelController {
         return nil
     }
 
+    /// 对 appex bundle 做系统级完整性预检（不加载扩展进程）：
+    /// preflightCheck 会校验代码签名与资源 seal，失败时返回系统真实理由
+    static func diagnoseAppexPreflight() -> String {
+        guard let pluginsURL = Bundle.main.builtInPlugInsURL,
+              let entries = try? FileManager.default.contentsOfDirectory(
+                atPath: pluginsURL.path),
+              let appexName = entries.first(where: { $0.hasSuffix(".appex") }),
+              let bundle = Bundle(url: pluginsURL.appendingPathComponent(appexName))
+        else { return "appex bundle 不可定位" }
+        do {
+            try bundle.preflightCheck()
+            return "ok"
+        } catch {
+            return describe(error: error)
+        }
+    }
+
     /// 解析 appex 可执行文件内嵌代码签名（CS Superblob），报告
     /// legacy entitlements（槽位5）与 DER entitlements（槽位7）是否存在
     /// 及关键键值。用于确认 TrollStore 重签后扩展权限是否真实存活：
-    /// nesessionmanager 解析 provider 时校验这些，缺失即报 code=14
+    /// nesessionmanager 解析 provider 时校验这些，缺失即报 code=14。
+    ///
+    /// 字节序注意（曾因此误报）：Mach-O 头与 Load Command 是小端序；
+    /// 代码签名 Superblob 内部是大端（网络）序；FAT 头是大端序。
     static func diagnoseAppexEntitlements() -> String {
         guard let pluginsURL = Bundle.main.builtInPlugInsURL,
               let entries = try? FileManager.default.contentsOfDirectory(
@@ -161,34 +182,57 @@ final class PrismTunnelController {
             guard off >= 0, off < data.count else { return 0 }
             return Int(data[data.index(data.startIndex, offsetBy: off)])
         }
+        func le32(_ off: Int) -> Int {
+            u8(off) | (u8(off + 1) << 8) | (u8(off + 2) << 16) | (u8(off + 3) << 24)
+        }
         func be32(_ off: Int) -> Int {
             (u8(off) << 24) | (u8(off + 1) << 16) | (u8(off + 2) << 8) | u8(off + 3)
         }
 
-        // MH_MAGIC_64 = 0xfeedfacf，文件内小端 cf fa ed fe
-        guard u8(0) == 0xcf, u8(1) == 0xfa, u8(2) == 0xed, u8(3) == 0xfe else {
-            return "非 arm64 Mach-O"
+        // 定位 Mach-O slice：FAT(大端 ca fe ba be/bf) 或 thin(小端 cf fa ed fe)
+        var base = 0
+        if u8(0) == 0xcf, u8(1) == 0xfa, u8(2) == 0xed, u8(3) == 0xfe {
+            base = 0  // MH_MAGIC_64 thin
+        } else if u8(0) == 0xca, u8(1) == 0xfe,
+                  (u8(2) == 0xba && (u8(3) == 0xbe || u8(3) == 0xbf)) {
+            // FAT_MAGIC / FAT_MAGIC_64：找 arm64(0x0100000c) slice
+            let nfat = be32(4)
+            var found = -1
+            for i in 0..<min(nfat, 16) {
+                let aoff = 8 + i * 20
+                if be32(aoff) == 0x0100000c { found = be32(aoff + 8) }  // arch.offset
+            }
+            guard found > 0 else { return "FAT 内无 arm64 slice" }
+            base = found
+        } else {
+            return "非 arm64 Mach-O (magic=\(String(format: "%02x%02x%02x%02x", u8(0), u8(1), u8(2), u8(3)))"
         }
-        let ncmds = be32(16)
-        var off = 32
-        var sigOff = -1
-        for _ in 0..<min(ncmds, 128) {
-            let cmd = be32(off)
-            let size = be32(off + 4)
-            if cmd == 0x1d { sigOff = be32(off + 8) }  // LC_CODE_SIGNATURE.dataoff
+
+        guard u8(base) == 0xcf, u8(base + 1) == 0xfa,
+              u8(base + 2) == 0xed, u8(base + 3) == 0xfe else {
+            return "slice magic 异常"
+        }
+        let ncmds = le32(base + 16)
+        var off = base + 32
+        var sigFileOff = -1
+        for _ in 0..<min(ncmds, 256) {
+            let cmd = le32(off)
+            let size = le32(off + 4)
+            if cmd == 0x1d { sigFileOff = le32(off + 8) }  // LC_CODE_SIGNATURE.dataoff
             if size <= 0 { break }
             off += size
         }
-        guard sigOff > 0, sigOff < data.count, be32(sigOff) == 0xfade0cc0 else {
+        guard sigFileOff > 0, sigFileOff < data.count,
+              be32(sigFileOff) == 0xfade0cc0 else {
             return "无内嵌代码签名(LC_CODE_SIGNATURE 不可用)"
         }
 
-        let count = min(be32(sigOff + 8), 20)
+        let count = min(be32(sigFileOff + 8), 32)
         var entPlist = ""
         var derFound = false
         for i in 0..<count {
-            let slot = be32(sigOff + 12 + i * 8)
-            let blobOff = sigOff + be32(sigOff + 12 + i * 8 + 4)
+            let slot = be32(sigFileOff + 12 + i * 8)
+            let blobOff = sigFileOff + be32(sigFileOff + 12 + i * 8 + 4)
             if slot == 5, be32(blobOff) == 0xfade7171 {  // CSMAGIC_EMBEDDED_ENTITLEMENTS
                 let len = be32(blobOff + 4)
                 if len > 8, blobOff + len <= data.count {
@@ -227,7 +271,8 @@ final class PrismTunnelController {
             let bundle = Bundle(url: pluginsURL.appendingPathComponent(name))
             let bid = bundle?.infoDictionary?["CFBundleIdentifier"] as? String ?? "?"
             let point = ((bundle?.infoDictionary?["NSExtension"] as? [String: Any])?["NSExtensionPointIdentifier"] as? String) ?? "?"
-            return "\(name): id=\(bid) point=\(point)"
+            let ver = bundle?.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+            return "\(name): id=\(bid) point=\(point) extbuild=\(ver)"
         }.joined(separator: " | ")
     }
 

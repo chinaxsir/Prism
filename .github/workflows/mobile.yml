@@ -403,6 +403,13 @@ jobs:
           EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
           echo "app: $APP  exec: $EXEC"
 
+          # 构建后打标：tauri build 会把主 App CFBundleVersion 覆盖为版本号
+          # （恒为 0.3.7，无法辨识具体构建）；此处写入 GITHUB_SHA 短 SHA，
+          # 后续 codesign 会重新 seal。App 启动失败诊断行 build= 即真实构建
+          BUILD_SHA=${GITHUB_SHA::7}
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_SHA" "$APP/Info.plist"
+          echo "build tag: $BUILD_SHA"
+
           echo "--- Frameworks as shipped by tauri --no-sign ---"
           ls -1 "$APP/Frameworks" 2>/dev/null || echo "(empty)"
 
