@@ -129,13 +129,17 @@ async fn prepare_start(
     #[cfg(any(target_os = "ios", target_os = "android"))]
     let binary_path = std::path::PathBuf::new();
 
-    // 端口预检，避免与本机其他代理内核冲突
-    let listen_host = if settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" };
-    if !is_port_free(listen_host, settings.mixed_port) {
-        return Err(format!(
-            "混合端口 {} 已被占用，请在“设置”中更换端口后重试",
-            settings.mixed_port
-        ));
+    // 端口预检，避免与本机其他代理内核冲突。
+    // 移动端 mixed 入站已移除（流量全走 TUN），无需检查混合端口。
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        let listen_host = if settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" };
+        if !is_port_free(listen_host, settings.mixed_port) {
+            return Err(format!(
+                "混合端口 {} 已被占用，请在“设置”中更换端口后重试",
+                settings.mixed_port
+            ));
+        }
     }
 
     // clash_api 动态选址/密钥；仅在本地持有，apply_prepared 时才写入状态
@@ -633,9 +637,13 @@ pub async fn update_subscription(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    // 内核运行中时，直连失败的最终兜底是经本地 mixed 入站转发
+    // 内核运行中时，直连失败的最终兜底是经本地 mixed 入站转发。
+    // 移动端 mixed 入站已移除，流量全走 TUN，无需本地代理兜底。
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let local_proxy = (*state.status.read() == CoreStatus::Running)
         .then(|| state.settings.read().mixed_port);
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let local_proxy: Option<u16> = None;
     let mut text = fetch_remote_text(&url, local_proxy).await?;
 
     // base64 包裹：明文不含 YAML/JSON 结构时尝试解码
@@ -872,8 +880,12 @@ async fn refresh_providers(state: &AppState, sub_url: &str, profile_text: &str) 
             }
         };
 
+    // 移动端 mixed 入站已移除，流量全走 TUN，无需本地代理兜底。
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let local_proxy = (*state.status.read() == CoreStatus::Running)
         .then(|| state.settings.read().mixed_port);
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let local_proxy: Option<u16> = None;
 
     // 收集所有可下载任务后并发执行：原 for 循环串行下载，N 个 provider
     // 的耗时是 N 倍 RTT（各带 30s 超时），这是多 provider 订阅导入慢的

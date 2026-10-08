@@ -615,12 +615,16 @@ pub fn build(
     }
 
     // 4. 入站
-    let mut inbounds = vec![json!({
+    // 移动端（iOS/Android）所有流量经 TUN 接管，mixed 入站非必需且可能在
+    // NetworkExtension 沙箱内绑定端口失败导致内核启动失败，故移动端不包含。
+    let mut inbounds: Vec<Value> = Vec::new();
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    inbounds.push(json!({
         "type": "mixed",
         "tag": MIXED_TAG,
         "listen": if settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
         "listen_port": settings.mixed_port,
-    })];
+    }));
 
     // 桌面端仅 TUN 模式加 TUN 入站；移动端（iOS/Android）必须始终包含：
     // 普通 App 无法设置系统代理，libbox 经 tun 入站回调 PlatformInterface.OpenTun

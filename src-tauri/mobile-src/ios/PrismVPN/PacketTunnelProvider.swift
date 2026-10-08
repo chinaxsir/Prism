@@ -23,6 +23,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         completionHandler: @escaping (Error?) -> Void
     ) {
         prismProviderRef = self
+        NSLog("[PrismVPN] startTunnel begin")
 
         // 优先从 providerConfiguration["config_path"] 读路径，再读文件
         // （避免把完整配置塞进 providerConfiguration 触发 512KB 限制）
@@ -31,9 +32,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             .providerConfiguration?["config_path"] as? String,
            !configPath.isEmpty
         {
+            NSLog("[PrismVPN] reading config from path: \(configPath)")
             do {
                 configText = try String(contentsOfFile: configPath, encoding: .utf8)
+                NSLog("[PrismVPN] config loaded, length=\(configText.count)")
             } catch {
+                NSLog("[PrismVPN] failed to read config: \(error.localizedDescription)")
                 completionHandler(NSError(
                     domain: "PrismVPN", code: 3,
                     userInfo: [NSLocalizedDescriptionKey: "无法读取共享配置文件: \(error.localizedDescription)"]
@@ -44,8 +48,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             .providerConfiguration?["config"] as? String
         {
             // 兼容旧路径（小配置场景）：直接内嵌
+            NSLog("[PrismVPN] using inline config, length=\(inlineConfig.count)")
             configText = inlineConfig
         } else {
+            NSLog("[PrismVPN] missing config_path in providerConfiguration")
             completionHandler(NSError(
                 domain: "PrismVPN", code: 1,
                 userInfo: [NSLocalizedDescriptionKey: "缺少配置（providerConfiguration.config_path）"]
@@ -54,9 +60,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         let workDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        NSLog("[PrismVPN] workDir=\(workDir.path)")
         do {
             try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
             try copyGeoDatabases(to: workDir)
+            NSLog("[PrismVPN] geo databases ready")
 
             let callbacks = prism_vpn_cbs(
                 open_tun: prismOpenTun,
@@ -64,6 +72,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 under_extension: prismUnderExtension
             )
             PrismVPNSetCallbacks(callbacks)
+            NSLog("[PrismVPN] callbacks set, calling PrismVPNStart")
 
             // Go 导出签名是 char*（Swift 侧为 UnsafeMutablePointer<CChar>），
             // String 只能隐式桥接到 UnsafePointer，需显式 mutating 转换；
@@ -79,14 +88,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             if let errorPtr = errorPtr {
                 let message = String(cString: errorPtr)
                 PrismKernelFree(errorPtr)
+                NSLog("[PrismVPN] PrismVPNStart failed: \(message)")
                 throw NSError(
                     domain: "PrismVPN", code: 2,
                     userInfo: [NSLocalizedDescriptionKey: message]
                 )
             }
 
+            NSLog("[PrismVPN] PrismVPNStart succeeded, tunnel ready")
             completionHandler(nil)
         } catch {
+            NSLog("[PrismVPN] startTunnel error: \(error.localizedDescription)")
             completionHandler(error)
         }
     }
@@ -102,14 +114,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - OpenTun（Go libbox 回调进入，在 Go 线程执行）
 
     fileprivate func openTun(optionsJSON: String) -> Int32 {
+        NSLog("[PrismVPN] openTun called with options: \(optionsJSON)")
         guard let data = optionsJSON.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
+            NSLog("[PrismVPN] openTun: failed to parse options JSON")
             return -1
         }
 
         let mtu = (json["mtu"] as? NSNumber)?.int32Value ?? 9000
         let dnsServer = json["dns_server"] as? String ?? ""
+        NSLog("[PrismVPN] openTun: mtu=\(mtu) dns=\(dnsServer)")
 
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
         settings.mtu = NSNumber(value: mtu)
@@ -162,15 +177,25 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         semaphore.wait()
 
-        if settingsError != nil {
+        if let settingsError = settingsError {
+            NSLog("[PrismVPN] openTun: setTunnelNetworkSettings failed: \(settingsError.localizedDescription)")
             return -1
         }
+        NSLog("[PrismVPN] openTun: setTunnelNetworkSettings succeeded")
 
-        // 取 packetFlow 文件描述符（与 SFI 相同的 KVC 路径）
-        if let fd = packetFlow.value(forKeyPath: "socket.fileDescriptor") as? Int32 {
-            return fd
+        // 取 packetFlow 文件描述符（与 SFI 相同的 KVC 路径）。
+        // iOS 不同版本 KVC 键可能不同，依次尝试常见路径。
+        let fd: Int32? = (
+            packetFlow.value(forKeyPath: "socket.fileDescriptor") as? Int32
+        ) ?? (
+            packetFlow.value(forKeyPath: "socket.socketDescriptor") as? Int32
+        )
+        guard let fd = fd, fd >= 0 else {
+            NSLog("[PrismVPN] openTun: failed to get packetFlow fileDescriptor (tried socket.fileDescriptor / socket.socketDescriptor)")
+            return -1
         }
-        return -1
+        NSLog("[PrismVPN] openTun: got packetFlow fd=\(fd)")
+        return fd
     }
 
     // MARK: - Geo 数据库

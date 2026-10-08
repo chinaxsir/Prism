@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Zap, Gauge, RefreshCw, ChevronRight, Search } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { Link } from "react-router-dom";
@@ -64,6 +64,15 @@ export default function Proxies() {
   const [userTouched, setUserTouched] = useState(false);
   const [keyword, setKeyword] = useState("");
 
+  // 用 ref 保存最新值，避免 useEffect([]) 闭包捕获到初始值（stale closure）。
+  // loadProxies 由 core://status / proxies::changed 事件触发，必须读到最新状态。
+  const coreStatusRef = useRef(coreStatus);
+  const mainSelectorRef = useRef(mainSelectorName);
+  const userTouchedRef = useRef(userTouched);
+  useEffect(() => { coreStatusRef.current = coreStatus; }, [coreStatus]);
+  useEffect(() => { mainSelectorRef.current = mainSelectorName; }, [mainSelectorName]);
+  useEffect(() => { userTouchedRef.current = userTouched; }, [userTouched]);
+
   useEffect(() => {
     getCoreStatus()
       .then((d) => {
@@ -83,14 +92,16 @@ export default function Proxies() {
 
   const loadProxies = async (preferred?: string) => {
     try {
-      // 内核运行：从 clash API 拿实时延迟与选中态
-      if (coreStatus === "running") {
+      // 内核运行：从 clash API 拿实时延迟与选中态。
+      // 注意：必须读 ref，否则闭包捕获的是初始 "stopped"，导致内核运行时
+      // 仍走 loadCached 分支，节点页永远显示「暂无节点」。
+      if (coreStatusRef.current === "running") {
         const resp = (await getProxyGroups()) as {
           proxies?: Record<string, ProxyEntry>;
         };
         const map = resp.proxies ?? {};
 
-        const groupName = preferred || mainSelectorName;
+        const groupName = preferred || mainSelectorRef.current;
         const group = map[groupName];
         if (!group) {
           // 主选择组未就绪，回落到缓存预览
@@ -107,7 +118,7 @@ export default function Proxies() {
 
         // 未选默认延迟最低：now 为空或不在节点列表中，且用户未手动操作过
         const nowValid = group.now && all.some((n) => n.name === group.now);
-        if (!nowValid && !userTouched && all.length > 0) {
+        if (!nowValid && !userTouchedRef.current && all.length > 0) {
           autoSelectFastest(groupName);
         }
       } else {
@@ -172,14 +183,32 @@ export default function Proxies() {
   };
 
   const handleTest = async () => {
-    if (!mainSelectorName || testing) return;
+    if (testing) return;
+    // 测速前确保拿到最新主选择组名（事件触发时可能尚未同步到 state）
+    const groupName = mainSelectorRef.current;
+    if (!groupName) {
+      // 兜底：重新拉取一次状态，拿到 mainSelector 后再测
+      try {
+        const d = await getCoreStatus();
+        if (d.mainSelector) {
+          setMainSelectorName(d.mainSelector);
+          mainSelectorRef.current = d.mainSelector;
+        }
+      } catch {
+        /* ignore */
+      }
+      if (!mainSelectorRef.current) {
+        toast.error("未找到主选择组，请先启动内核");
+        return;
+      }
+    }
     if (nodes.length === 0) {
       toast.error("当前没有可测速的节点");
       return;
     }
     setTesting(true);
     try {
-      const result = (await urlTest(mainSelectorName)) as Record<
+      const result = (await urlTest(mainSelectorRef.current)) as Record<
         string,
         number
       > | null;
@@ -200,7 +229,7 @@ export default function Proxies() {
     if (current === name) return;
     setUserTouched(true);
     try {
-      await selectProxy(mainSelectorName, name);
+      await selectProxy(mainSelectorRef.current, name);
       setCurrent(name);
       await loadProxies();
     } catch (e) {
