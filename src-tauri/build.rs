@@ -24,6 +24,14 @@ fn main() {
             for lib in ["resolv", "z"] {
                 println!("cargo:rustc-link-lib={lib}");
             }
+            // prism_ios_vpn_start/stop 由主 App Swift（@_cdecl）实现，在 Xcode
+            // 最终链接 staticlib 时才存在；crate-type 里的 cdylib 会单独链接
+            // libprism_proxy_lib.dylib（CI run 37707763501 实证 Undefined
+            // symbols → exit 65）。用 ld64 -U 只放行这两个符号（dylib 在 iOS
+            // 真机构建中从不被加载，真实解析仍由 Xcode 链接期强校验）
+            for sym in ["_prism_ios_vpn_start", "_prism_ios_vpn_stop"] {
+                println!("cargo:rustc-link-arg=-Wl,-U,{sym}");
+            }
             println!(
                 "cargo:rerun-if-changed={}",
                 kernel_dir.join("libprismkernel.a").display()
