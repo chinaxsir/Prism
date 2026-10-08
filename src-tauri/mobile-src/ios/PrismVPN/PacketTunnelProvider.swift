@@ -68,7 +68,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // Go 导出签名是 char*（Swift 侧为 UnsafeMutablePointer<CChar>），
             // String 只能隐式桥接到 UnsafePointer，需显式 mutating 转换；
             // Go 侧在调用期间立即 C.GoString 拷贝，指针仅在调用期内有效
-            let errorPtr = config.withCString { configPtr in
+            let errorPtr = configText.withCString { configPtr in
                 workDir.path.withCString { dirPtr in
                     PrismVPNStart(
                         UnsafeMutablePointer(mutating: configPtr),
