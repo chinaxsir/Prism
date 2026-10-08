@@ -136,7 +136,15 @@ final class PrismTunnelController {
                             do {
                                 try saved.connection.startVPNTunnel()
                                 NSLog("[PrismVPN] startVPNTunnel 调用成功")
-                                completion(nil)
+
+                                // 等待 NEVPNStatus.connected，最多 20s
+                                // startVPNTunnel 仅发起启动请求；扩展需异步拉起
+                                // libbox 内核、setTunnelNetworkSettings、注册路由，
+                                // 全部完成才进入 connected。主 App 立即返回 Running
+                                // 会导致前端 clash API 调用失败（节点页空白）。
+                                self.waitForConnected(connection: saved.connection, timeout: 20) { err in
+                                    completion(err)
+                                }
                             } catch {
                                 NSLog("[PrismVPN] startVPNTunnel 失败: \(PrismTunnelController.describe(error: error))")
                                 completion(error)
@@ -148,6 +156,69 @@ final class PrismTunnelController {
         }
     }
 
+    /// 监听 NEVPNStatusDidChange，直到 connected / disconnected / 超时
+    private func waitForConnected(
+        connection: NEVPNConnection,
+        timeout: TimeInterval,
+        completion: @escaping (Error?) -> Void
+    ) {
+        var observer: NSObjectProtocol?
+        var completed = false
+        var timer: Timer?
+
+        let finish: (Error?) -> Void = { error in
+            guard !completed else { return }
+            completed = true
+            if let o = observer {
+                NotificationCenter.default.removeObserver(o)
+            }
+            timer?.invalidate()
+            completion(error)
+        }
+
+        // 立即检查当前状态
+        if connection.status == .connected {
+            NSLog("[PrismVPN] 状态已是 connected")
+            finish(nil)
+            return
+        }
+
+        observer = NotificationCenter.default.addObserver(
+            forName: NSNotification.Name.NEVPNStatusDidChange,
+            object: connection,
+            queue: .main
+        ) { note in
+            let status = connection.status
+            NSLog("[PrismVPN] NEVPNStatusDidChange: \(status.rawValue)")
+            switch status {
+            case .connected:
+                finish(nil)
+            case .disconnected:
+                finish(NSError(
+                    domain: "PrismVPN", code: -2,
+                    userInfo: [NSLocalizedDescriptionKey: "扩展启动后立即断开（status=disconnected）"]
+                ))
+            case .invalid:
+                finish(NSError(
+                    domain: "PrismVPN", code: -3,
+                    userInfo: [NSLocalizedDescriptionKey: "VPN 配置无效（status=invalid）"]
+                ))
+            default:
+                break // connecting / reasserting / disconnecting 继续等
+            }
+        }
+
+        // 超时计时器
+        timer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { _ in
+            finish(NSError(
+                domain: "PrismVPN", code: -4,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "VPN 启动超时（\(Int(timeout))s），扩展未进入 connected 状态；当前 status=\(connection.status.rawValue)"]
+            ))
+        }
+        RunLoop.main.add(timer!, forMode: .common)
+    }
+
     func stop(completion: @escaping (Error?) -> Void) {
         loadOrCreateManager { result in
             switch result {
@@ -155,9 +226,56 @@ final class PrismTunnelController {
                 completion(error)
             case .success(let manager):
                 manager.connection.stopVPNTunnel()
-                completion(nil)
+                // 等待 disconnected 确认（与 start 对称）
+                self.waitForDisconnected(connection: manager.connection, timeout: 10) { _ in
+                    completion(nil)
+                }
             }
         }
+    }
+
+    /// 监听 NEVPNStatusDidChange，直到 disconnected / invalid / 超时
+    private func waitForDisconnected(
+        connection: NEVPNConnection,
+        timeout: TimeInterval,
+        completion: @escaping (Error?) -> Void
+    ) {
+        var observer: NSObjectProtocol?
+        var completed = false
+        var timer: Timer?
+
+        let finish: (Error?) -> Void = { error in
+            guard !completed else { return }
+            completed = true
+            if let o = observer { NotificationCenter.default.removeObserver(o) }
+            timer?.invalidate()
+            completion(error)
+        }
+
+        if connection.status == .disconnected || connection.status == .invalid {
+            finish(nil)
+            return
+        }
+
+        observer = NotificationCenter.default.addObserver(
+            forName: NSNotification.Name.NEVPNStatusDidChange,
+            object: connection,
+            queue: .main
+        ) { _ in
+            let status = connection.status
+            NSLog("[PrismVPN] stop status change: \(status.rawValue)")
+            if status == .disconnected || status == .invalid {
+                finish(nil)
+            }
+        }
+
+        timer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { _ in
+            finish(NSError(
+                domain: "PrismVPN", code: -5,
+                userInfo: [NSLocalizedDescriptionKey: "VPN 停止超时（\(Int(timeout))s）"]
+            ))
+        }
+        RunLoop.main.add(timer!, forMode: .common)
     }
 
     // MARK: - Manager 持久化
