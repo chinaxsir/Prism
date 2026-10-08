@@ -31,6 +31,8 @@ def inject
   app_target = project.targets.find { |t| t.product_type == 'com.apple.product-type.application' }
   abort '[inject-ios-vpn] 未找到主 App target' unless app_target
 
+  # 默认值仅用于日志；真正的扩展 bundle ID 在下面按各构建配置分别匹配，
+  # 避免 Debug/Release 主 App bundle ID 不一致时 appex 固定跟随第一个配置
   app_bundle_id = app_target.build_configurations.first.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] || 'com.prism.proxy'
   version = JSON.parse(File.read(File.join(ROOT, 'src-tauri', 'tauri.conf.json')))['version']
 
@@ -65,6 +67,7 @@ def inject
 
   common_settings = {
     'PRODUCT_NAME' => EXT_NAME,
+    # 占位值，下面按各构建配置对应的主 App bundle ID 逐个覆盖
     'PRODUCT_BUNDLE_IDENTIFIER' => "#{app_bundle_id}.#{EXT_NAME}",
     'INFOPLIST_FILE' => "#{EXT_NAME}/Info.plist",
     'GENERATE_INFOPLIST_FILE' => 'NO',
@@ -88,6 +91,14 @@ def inject
   }
   ext_target.build_configurations.each do |cfg|
     cfg.build_settings.merge!(common_settings)
+    # 扩展 bundle ID 必须与【同名构建配置】的主 App bundle ID 对齐：
+    # 运行时主 App 以 Bundle.main.bundleIdentifier + ".PrismVPN"
+    # 作为 providerBundleIdentifier，任何不一致都会触发系统
+    # NEVPNConnectionErrorDomain code=14（VPN app not installed）
+    app_cfg = app_target.build_configurations.find { |c| c.name == cfg.name } ||
+              app_target.build_configurations.first
+    cfg_bundle_id = app_cfg.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] || 'com.prism.proxy'
+    cfg.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] = "#{cfg_bundle_id}.#{EXT_NAME}"
   end
 
   # ---- 3. 主 App：隧道控制器 + NetworkExtension 框架 ----
