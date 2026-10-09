@@ -106,7 +106,8 @@ def inject
     # 与 build.rs 主 App 链接一致的内核依赖
     'OTHER_LDFLAGS' => '$(inherited) -lprismkernel -lresolv -lz ' \
                        '-framework Security -framework Foundation ' \
-                       '-framework CoreFoundation -framework SystemConfiguration',
+                       '-framework CoreFoundation -framework SystemConfiguration ' \
+                       '-framework CoreServices',
     'LD_RUNPATH_SEARCH_PATHS' => '$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks',
   }
   ext_target.build_configurations.each do |cfg|
