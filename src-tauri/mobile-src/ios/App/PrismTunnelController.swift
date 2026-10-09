@@ -363,19 +363,78 @@ final class PrismTunnelController {
         // 陈旧 prism_error.txt 而误判断开原因
         clearSharedErrorFile()
 
-        loadOrCreateManager { result in
-            switch result {
-            case .failure(let error):
-                self.recoverOrFinish(
-                    error, configPath: configPath,
-                    attemptsRemaining: attemptsRemaining, completion: completion
-                )
-            case .success(let manager):
-                self.configureSaveAndStart(
-                    manager: manager, configPath: configPath,
-                    attemptsRemaining: attemptsRemaining, completion: completion
-                )
+        // 主动 pre-clean + 版本同步（同时解决三个问题）：
+        //
+        // 1) 解决"Prism - 需要更新"红色提示：iOS 在 VPN 配置里记录了
+        //    App 安装时的版本号/签名时间戳；每次 TrollStore 重装会更新
+        //    签名但 VPN 配置里的版本号不自动同步，iOS 因此认为配置
+        //    指向"过时"的 App。loadOrCreateManager 找到已存配置后，
+        //    主动 saveToPreferences 一次即可让 iOS 把当前 App 的真实
+        //    版本号/时间戳写进 VPN 配置，消除系统设置里的红色提示
+        //
+        // 2) 清理旧 TrollStore 重装留下的残留条目：providerBundleIdentifier
+        //    是老签名/老版本的 .PrismVPN，新 App loadAllFromPreferences
+        //    返回空数组（配置指向的扩展 App ID 与签名不匹配），但系统
+        //    设置里残留为只读条目，用户看起来就是"需要 2 次添加"
+        //
+        // 3) 确保第一次 saveToPreferences 时 providerBundleIdentifier
+        //    与当前真实 appex 完全一致——万一 discoverExtensionBundleID
+        //    失败回落硬编码 fallback，这里也能二次校验
+        preCleanAndSyncVersion {
+            self.loadOrCreateManager { result in
+                switch result {
+                case .failure(let error):
+                    self.recoverOrFinish(
+                        error, configPath: configPath,
+                        attemptsRemaining: attemptsRemaining, completion: completion
+                    )
+                case .success(let manager):
+                    self.configureSaveAndStart(
+                        manager: manager, configPath: configPath,
+                        attemptsRemaining: attemptsRemaining, completion: completion
+                    )
+                }
             }
+        }
+    }
+
+    /// 启动前一次性预处理：遍历全部 VPN 配置，
+    /// - 旧签名/旧 bundle 的 Prism 条目 → removeFromPreferences
+    /// - 找到与当前 extensionBundleIdentifier 匹配的条目 → 主动 saveToPreferences
+    ///   让 iOS 把当前 App 版本号/签名时间戳同步进 VPN 配置（消除"需要更新"提示）
+    private func preCleanAndSyncVersion(completion: @escaping () -> Void) {
+        NETunnelProviderManager.loadAllFromPreferences { managers, error in
+            guard let managers = managers else {
+                if let error = error {
+                    NSLog("[PrismVPN] preClean loadAllFromPreferences 失败: \(error.localizedDescription)")
+                }
+                completion()
+                return
+            }
+            let group = DispatchGroup()
+            var matched: NETunnelProviderManager?
+            for manager in managers {
+                guard let proto = manager.protocolConfiguration
+                    as? NETunnelProviderProtocol else { continue }
+                let isOurs = proto.providerBundleIdentifier?.hasSuffix(".PrismVPN") == true
+                guard isOurs else { continue }
+                if proto.providerBundleIdentifier == extensionBundleIdentifier {
+                    matched = manager
+                } else {
+                    // 旧签名/旧 bundle ID 的残留条目 → 删除
+                    NSLog("[PrismVPN] 删除旧签名残留配置: \(proto.providerBundleIdentifier ?? "?")")
+                    group.enter()
+                    manager.removeFromPreferences { _ in group.leave() }
+                }
+            }
+            // 找到匹配条目 → 主动 saveToPreferences，
+            // 让 iOS 同步当前 App 版本号（消除"需要更新"红色提示）
+            if let matched = matched {
+                NSLog("[PrismVPN] 主动 save 同步 VPN 配置版本号")
+                group.enter()
+                matched.saveToPreferences { _ in group.leave() }
+            }
+            group.notify(queue: .main) { completion() }
         }
     }
 
@@ -428,43 +487,130 @@ final class PrismTunnelController {
                 return
             }
             NSLog("[PrismVPN] saveToPreferences 成功, extBundleId=\(extensionBundleIdentifier)")
-            // save 后重新加载，使 connection 指向持久化后的配置
-            self.reload(manager: manager) { reloadResult in
-                switch reloadResult {
-                case .failure(let error):
-                    NSLog("[PrismVPN] reload 失败: \(PrismTunnelController.describe(error: error))")
+
+            // 关键修复（TrollStore 环境 code=14 根因）：
+            // saveToPreferences completion 只保证偏好文件写入磁盘，
+            // 但 nesessionmanager 异步处理配置变更（校验扩展 bundle、
+            // 注册路径、加载签名），紧接着的 startVPNTunnel 会触发
+            // 系统扩展校验，此时 bundle 还没注册 → code=14
+            // "The VPN app used by the VPN configuration is not installed"。
+            //
+            // 正确做法：等 NEVPNConfigurationChangeNotification
+            // （系统完成配置变更处理后发出）再 reload+start；
+            // 2s 兜底定时器防止通知丢失（极端 iOS 版本）。
+            self.waitForConfigChangeThenStart(
+                attemptsRemaining: attemptsRemaining,
+                completion: completion
+            )
+        }
+    }
+
+    /// 等待系统配置变更通知后，再 reload 并 startVPNTunnel。
+    /// 2 秒内若通知未到，直接兜底 start（正常情况下 save 后配置应已生效）
+    private func waitForConfigChangeThenStart(
+        attemptsRemaining: Int,
+        completion: @escaping (Error?) -> Void
+    ) {
+        var observer: NSObjectProtocol?
+        var fired = false
+        var timer: Timer?
+
+        let fireOnce: () -> Void = { [weak self] in
+            guard !fired, let self = self else { return }
+            fired = true
+            if let o = observer {
+                NotificationCenter.default.removeObserver(o)
+            }
+            timer?.invalidate()
+            self.reloadAndStart(
+                attemptsRemaining: attemptsRemaining,
+                completion: completion
+            )
+        }
+
+        observer = NotificationCenter.default.addObserver(
+            forName: NSNotification.Name.NEVPNConfigurationChange,
+            object: nil,
+            queue: .main,
+            using: { _ in
+                NSLog("[PrismVPN] 收到 NEVPNConfigurationChange，准备 reload+start")
+                fireOnce()
+            }
+        )
+
+        // 兜底：2 秒内系统未发变更通知（如首次 save 后通知不触发的
+        // 边缘场景），直接走 reload+start。总等待时间 2s，不会明显拖慢
+        // 正常启动路径（正常 save 后通知应在 100~300ms 内到达）
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { _ in
+            NSLog("[PrismVPN] NEVPNConfigurationChange 未在 2s 内到达，兜底 reload+start")
+            fireOnce()
+        }
+        RunLoop.main.add(timer!, forMode: .common)
+    }
+
+    /// reload（loadAllFromPreferences）找到持久化配置后发起 startVPNTunnel
+    private func reloadAndStart(
+        attemptsRemaining: Int,
+        completion: @escaping (Error?) -> Void
+    ) {
+        self.reloadByServerTag { reloadResult in
+            switch reloadResult {
+            case .failure(let error):
+                NSLog("[PrismVPN] reload 失败: \(PrismTunnelController.describe(error: error))")
+                self.recoverOrFinish(
+                    error, configPath: "",
+                    attemptsRemaining: attemptsRemaining, completion: completion
+                )
+            case .success(let saved):
+                do {
+                    try saved.connection.startVPNTunnel()
+                    NSLog("[PrismVPN] startVPNTunnel 调用成功")
+
+                    self.waitForConnected(connection: saved.connection, timeout: 20) { err in
+                        if let err = err {
+                            self.recoverOrFinish(
+                                err, configPath: "",
+                                attemptsRemaining: attemptsRemaining, completion: completion
+                            )
+                        } else {
+                            completion(nil)
+                        }
+                    }
+                } catch {
+                    NSLog("[PrismVPN] startVPNTunnel 失败: \(PrismTunnelController.describe(error: error))")
                     self.recoverOrFinish(
-                        error, configPath: configPath,
+                        error, configPath: "",
                         attemptsRemaining: attemptsRemaining, completion: completion
                     )
-                case .success(let saved):
-                    do {
-                        try saved.connection.startVPNTunnel()
-                        NSLog("[PrismVPN] startVPNTunnel 调用成功")
-
-                        // 等待 NEVPNStatus.connected，最多 20s
-                        // startVPNTunnel 仅发起启动请求；扩展需异步拉起
-                        // libbox 内核、setTunnelNetworkSettings、注册路由，
-                        // 全部完成才进入 connected。主 App 立即返回 Running
-                        // 会导致前端 clash API 调用失败（节点页空白）。
-                        self.waitForConnected(connection: saved.connection, timeout: 20) { err in
-                            if let err = err {
-                                self.recoverOrFinish(
-                                    err, configPath: configPath,
-                                    attemptsRemaining: attemptsRemaining, completion: completion
-                                )
-                            } else {
-                                completion(nil)
-                            }
-                        }
-                    } catch {
-                        NSLog("[PrismVPN] startVPNTunnel 失败: \(PrismTunnelController.describe(error: error))")
-                        self.recoverOrFinish(
-                            error, configPath: configPath,
-                            attemptsRemaining: attemptsRemaining, completion: completion
-                        )
-                    }
                 }
+            }
+        }
+    }
+
+    /// 简化版 reload：按 server tag（"Prism"）查找持久化配置，
+    /// 供 waitForConfigChangeThenStart 使用（此时已知 save 完成，
+    /// 不再需要在 reload 里校验 providerBundleIdentifier——
+    /// save 时已正确设置）
+    private func reloadByServerTag(
+        completion: @escaping (Result<NETunnelProviderManager, Error>) -> Void
+    ) {
+        NETunnelProviderManager.loadAllFromPreferences { managers, error in
+            if let error = error {
+                completion(.failure(error))
+                return
+            }
+            let saved = managers?.first {
+                ($0.protocolConfiguration as? NETunnelProviderProtocol)?
+                    .serverAddress == managerServerTag
+            }
+            if let saved = saved {
+                NSLog("[PrismVPN] reload 找到持久化配置")
+                completion(.success(saved))
+            } else {
+                completion(.failure(NSError(
+                    domain: "NEVPNErrorDomain", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "reload 未找到持久化 VPN 配置"]
+                )))
             }
         }
     }
