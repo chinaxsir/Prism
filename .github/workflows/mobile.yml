@@ -409,12 +409,11 @@ jobs:
           echo "app: $APP  exec: $EXEC  appex: $APPEX"
 
           # ==================== 1. 深度清理（必须在签名前）====================
-          # 清除所有已存在的残留 _CodeSignature 目录——Tauri --no-sign
-          # 仍可能留下空壳签名目录，后续覆盖签名时哈希冲突导致
-          # CodeResources seal 破损，PluginKit 静态拉黑（Code 14 /
-          # 红色"需要更新" / 无崩溃日志）
-          find "$APP" -name "_CodeSignature" -type d -exec rm -rf {} +
-          echo "Removed all existing _CodeSignature directories"
+          # 【关键】不可删除 _CodeSignature 目录！--no-sign 构建本身不带
+          # 签名目录，但 codesign 签目录时会创建。之前删除后只签二进制
+          # 不签目录，导致 appex 无 _CodeSignature/CodeResources bundle seal，
+          # pluginkit 静态校验失败 → Code 14 "not installed" / 无崩溃日志。
+          # codesign --force 会覆盖旧签名，不需要预删除。
 
           # 严禁插件自带动态库，必须使用主程序库
           if [ -n "$APPEX" ]; then
@@ -526,15 +525,39 @@ jobs:
             fi
           done < "$LIST"
 
-          # 对 appex 二进制本体直接签名（ldid -S 而非 codesign，
-          # TrollStore 生态兼容格式）。【关键】ldid 必须直接作用于
-          # Mach-O 二进制文件，不能作用于 .appex 目录——否则
-          # entitlements 无法嵌入 LC_CODE_SIGNATURE，系统报 Code 14。
+          # 对 appex bundle 进行完整签名（codesign 目录 + ldid 二进制）：
+          #
+          # 【根因修复】之前只对二进制签 ldid，不对目录签 codesign，
+          # 导致 appex 缺少 _CodeSignature/CodeResources bundle seal。
+          # pluginkit 静态校验时发现无 seal → 判定扩展"未安装" →
+          # Code 14 / 无崩溃日志 / 红色"需要更新" / 配置消失。
+          #
+          # 正确做法：
+          # 1) codesign 对 .appex 目录签名 → 创建 _CodeSignature/CodeResources
+          #    （bundle seal）并签名二进制（含 entitlements）
+          # 2) ldid 对二进制本体重签 → 在 LC_CODE_SIGNATURE 中嵌入
+          #    entitlements（TrollStore 生态兼容，已验证存活）
+          #
+          # codesign 的签名可能被 TrollStore 重签管线覆盖，但
+          # _CodeSignature/CodeResources 目录会被保留；ldid 的二进制
+          # 签名已知在 TrollStore 安装后仍存活（诊断证实 entitlements 存在）。
           if [ -n "$APPEX" ] && [ -n "$APPEX_EXEC" ]; then
             chmod +x "$APPEX/$APPEX_EXEC"
+            # 1) codesign 目录：创建 bundle seal
+            codesign --force --sign - \
+              --entitlements "$PWD/src-tauri/gen/apple/PrismVPN/PrismVPN.entitlements.plist" \
+              "$APPEX"
+            echo "--- appex codesign directory: $APPEX ---"
+            # 2) ldid 二进制：嵌入 entitlements（TrollStore 兼容）
             "$LDID" -S"$PWD/src-tauri/gen/apple/PrismVPN/PrismVPN.entitlements.plist" "$APPEX/$APPEX_EXEC"
-            echo "--- appex ldid entitlements: $APPEX/$APPEX_EXEC ---"
+            echo "--- appex ldid binary: $APPEX/$APPEX_EXEC ---"
             "$LDID" -e "$APPEX/$APPEX_EXEC" | head -30
+            # 验证 _CodeSignature/CodeResources 已创建
+            if [ -f "$APPEX/_CodeSignature/CodeResources" ]; then
+              echo "appex CodeResources: OK"
+            else
+              echo "::warning::appex _CodeSignature/CodeResources not found after codesign"
+            fi
           fi
 
           echo "--- main executable entitlements ---"

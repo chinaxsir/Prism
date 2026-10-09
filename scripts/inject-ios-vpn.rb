@@ -37,8 +37,10 @@ def inject
   version = JSON.parse(File.read(File.join(ROOT, 'src-tauri', 'tauri.conf.json')))['version']
   # CI 构建把 commit 短 SHA 写入 CFBundleVersion，App 启动失败时输出，
   # 用于远程确认用户实际安装的是哪个构建（排除装到旧 IPA 的歧义）
-  build_sha = ENV['GITHUB_SHA']
-  current_project_version = build_sha && build_sha.length >= 7 ? build_sha[0, 7] : '1'
+  # CI 构建在 mobile.yml 中用 GITHUB_RUN_NUMBER 覆盖 CFBundleVersion；
+  # 此处设为纯数字 "1" 避免字母（Apple 规范禁止 CFBundleVersion 含字母，
+  # NetworkExtension 底层验证器会静默拒载含字母的插件）
+  current_project_version = '1'
 
   # 主 App 也同步打标 CFBundleVersion，App 内诊断输出 build= 即真实
   # 构建 SHA（此前只改了扩展 target，主 App 仍显示 0.3.7 无法辨识构建）
@@ -46,12 +48,12 @@ def inject
     config.build_settings['CURRENT_PROJECT_VERSION'] = current_project_version
   end
 
-  # 主 App 的 CFBundleVersion 静态写在生成的 Info.plist 里（build
-  # setting 不覆盖静态 plist），直接用 PlistBuddy 改写才能生效
+  # CI 构建在 mobile.yml 中用 GITHUB_RUN_NUMBER 覆盖 CFBundleVersion，
+  # 此处仅设占位纯数字（Apple 规范禁止字母）
   app_plist = File.join(GEN_APPLE, 'ios', 'App', 'Info.plist')
   if File.exist?(app_plist)
     system('/usr/libexec/PlistBuddy', '-c',
-           "Set :CFBundleVersion #{current_project_version}", app_plist)
+           "Set :CFBundleVersion 1", app_plist)
   end
 
   # ---- 1. 拷贝扩展源文件 ----
