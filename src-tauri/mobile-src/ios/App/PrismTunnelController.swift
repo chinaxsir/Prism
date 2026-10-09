@@ -313,18 +313,12 @@ final class PrismTunnelController {
 
     // MARK: - 强制注册扩展
 
-    /// LSRegisterURL 声明（Launch Services 公开 API，iOS 2.0+，
-    /// iOS 15 deprecated 但仍可用）。CoreServices 框架通过
-    /// Foundation 间接链接，符号在链接期可解析。
-    @_silgen_name("LSRegisterURL")
-    private static func _LSRegisterURL(_ url: CFURL, _ update: Bool) -> Int32
-
     /// 强制向 Launch Services 注册 appex bundle。
     /// TrollStore 安装后 pluginkit 可能未注册扩展
     ///（CoreTrust 绕过只影响 FrontBoard，pluginkit 有独立验证），
     /// 导致系统找不到扩展 → NEVPNConnectionErrorDomain code=14。
-    /// LSRegisterURL 调用后系统会扫描 appex 的 Info.plist
-    /// 并向 pluginkit 注册扩展点。
+    /// 通过 dlopen/dlsym 运行时加载 LSRegisterURL（Launch Services
+    /// 公开 API，iOS 2.0+），避免链接期依赖 CoreServices 框架。
     static func registerAppexWithLaunchServices() {
         guard let pluginsURL = Bundle.main.builtInPlugInsURL,
               let entries = try? FileManager.default.contentsOfDirectory(
@@ -335,13 +329,27 @@ final class PrismTunnelController {
         }
         for entry in entries where entry.hasSuffix(".appex") {
             let appexURL = pluginsURL.appendingPathComponent(entry)
-            // 检查 _CodeSignature/CodeResources 是否存在
             let csPath = appexURL.appendingPathComponent("_CodeSignature/CodeResources").path
             let hasSeal = FileManager.default.fileExists(atPath: csPath)
             NSLog("[PrismVPN] appex=\(entry) CodeResources=\(hasSeal ? "有" : "无")")
 
-            let status = _LSRegisterURL(appexURL as CFURL, true)
-            NSLog("[PrismVPN] LSRegisterURL(\(entry)) status=\(status)")
+            // RTLD_LAZY=1 on Apple platforms
+            if let handle = dlopen(
+                "/System/Library/Frameworks/CoreServices.framework/CoreServices",
+                1
+            ) {
+                if let sym = dlsym(handle, "LSRegisterURL") {
+                    typealias Fn = @convention(c) (CFURL, Bool) -> Int32
+                    let fn = unsafeBitCast(sym, to: Fn.self)
+                    let status = fn(appexURL as CFURL, true)
+                    NSLog("[PrismVPN] LSRegisterURL(\(entry)) status=\(status)")
+                } else {
+                    NSLog("[PrismVPN] LSRegisterURL symbol not found")
+                }
+                dlclose(handle)
+            } else {
+                NSLog("[PrismVPN] CoreServices framework not loadable")
+            }
         }
     }
 
