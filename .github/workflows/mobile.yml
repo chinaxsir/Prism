@@ -526,8 +526,10 @@ jobs:
           [ -n "$LDID" ] || { echo "::error::ldid not available"; exit 1; }
           find "$APP/PlugIns" -maxdepth 1 -name "*.appex" -type d \
             | while IFS= read -r appex; do
-                "$LDID" -S"$PWD/src-tauri/gen/apple/PrismVPN/PrismVPN.entitlements.plist" \
-                  "$appex/$(plutil -extract CFBundleExecutable raw "$appex/Info.plist")"
+                # 直接对 .appex 包外壳签名：ldid 读取 Info.plist 定位
+                # 主二进制并签名，同时以 bundle 身份重建整个包的签名
+                # 上下文（TrollStore 生态标准做法），而非裸签 Mach-O
+                "$LDID" -S"$PWD/src-tauri/gen/apple/PrismVPN/PrismVPN.entitlements.plist" "$appex"
                 echo "--- appex ldid entitlements: $appex ---"
                 "$LDID" -e "$appex/$(plutil -extract CFBundleExecutable raw "$appex/Info.plist")" | head -30
               done
@@ -657,6 +659,15 @@ jobs:
           APP_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
           OUT="$PWD/Prism-$APP_VERSION-TrollStore.ipa"
           rm -f "$OUT"
+
+          # install_name_tool / ldid 等二进制改写可能丢失 +x；
+          # zip 不强制要求权限位，但 iOS 安装后无执行权限的可执行文件
+          # 会导致扩展无法加载（code=14）或系统误判“需要更新”
+          chmod +x "$APP/$EXEC"
+          find "$APP/PlugIns" -maxdepth 1 -name "*.appex" -type d | while IFS= read -r appex; do
+            chmod +x "$appex/$(plutil -extract CFBundleExecutable raw "$appex/Info.plist")"
+          done
+
           (cd "$WORK" && zip -qry "$OUT" Payload)
           echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
