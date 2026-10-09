@@ -81,7 +81,17 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
         let diag = PrismTunnelController.diagnosePackaging()
         let sig = PrismTunnelController.diagnoseAppexEntitlements()
         let preflight = PrismTunnelController.diagnoseAppexPreflight()
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)"
+        // 检查 appex bundle seal 是否存在
+        var sealOk = "未检查"
+        if let pluginsURL = Bundle.main.builtInPlugInsURL,
+           let entries = try? FileManager.default.contentsOfDirectory(atPath: pluginsURL.path),
+           let appexName = entries.first(where: { $0.hasSuffix(".appex") })
+        {
+            let sealPath = pluginsURL.appendingPathComponent(appexName)
+                .appendingPathComponent("_CodeSignature/CodeResources").path
+            sealOk = FileManager.default.fileExists(atPath: sealPath) ? "有" : "无"
+        }
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] 如果 Code 14 持续出现，请：1) 设置→隐私与安全性→开发者模式→打开→重启  2) TrollStore 设置→刷新 App 注册  3) 彻底卸载 App 后重启手机再安装"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -301,6 +311,50 @@ final class PrismTunnelController {
         }.joined(separator: " | ")
     }
 
+    // MARK: - 强制注册扩展
+
+    /// 通过 dlsym 动态加载 LSRegisterURL，强制向 Launch Services 注册
+    /// appex bundle。TrollStore 安装后 pluginkit 可能未注册扩展
+    ///（CoreTrust 绕过只影响 FrontBoard，pluginkit 有独立验证），
+    /// 导致系统找不到扩展 → NEVPNConnectionErrorDomain code=14。
+    /// LSRegisterURL 是 Launch Services 公开 API（iOS 2.0+，
+    /// iOS 15 deprecated 但仍可用），调用后系统会扫描 appex
+    /// 的 Info.plist 并向 pluginkit 注册扩展点。
+    static func registerAppexWithLaunchServices() {
+        guard let pluginsURL = Bundle.main.builtInPlugInsURL,
+              let entries = try? FileManager.default.contentsOfDirectory(
+                atPath: pluginsURL.path)
+        else {
+            NSLog("[PrismVPN] registerAppex: PlugIns 目录不存在")
+            return
+        }
+        for entry in entries where entry.hasSuffix(".appex") {
+            let appexURL = pluginsURL.appendingPathComponent(entry)
+            // 检查 _CodeSignature/CodeResources 是否存在
+            let csPath = appexURL.appendingPathComponent("_CodeSignature/CodeResources").path
+            let hasSeal = FileManager.default.fileExists(atPath: csPath)
+            NSLog("[PrismVPN] appex=\(entry) CodeResources=\(hasSeal ? "有" : "无")")
+
+            // 动态加载 LSRegisterURL
+            if let handle = dlopen(
+                "/System/Library/Frameworks/CoreServices.framework/CoreServices",
+                RTLD_LAZY
+            ) {
+                if let sym = dlsym(handle, "LSRegisterURL") {
+                    typealias Fn = @convention(c) (CFURL, Bool) -> Int32
+                    let fn = unsafeBitCast(sym, to: Fn.self)
+                    let status = fn(appexURL as CFURL, true)
+                    NSLog("[PrismVPN] LSRegisterURL(\(entry)) status=\(status)")
+                } else {
+                    NSLog("[PrismVPN] LSRegisterURL symbol not found")
+                }
+                dlclose(handle)
+            } else {
+                NSLog("[PrismVPN] CoreServices framework not loadable")
+            }
+        }
+    }
+
     // MARK: 失效配置识别
 
     /// 判断错误是否表示「系统保存的 VPN 配置已找不到对应扩展」。
@@ -362,6 +416,13 @@ final class PrismTunnelController {
         // clearSharedError；主 App 启动前先清，避免读到上一轮残留的
         // 陈旧 prism_error.txt 而误判断开原因
         clearSharedErrorFile()
+
+        // 【关键修复】TrollStore 的 CoreTrust 绕过让 FrontBoard 接受主 App，
+        // 但 pluginkit（扩展注册守护进程）可能有自己的独立验证。如果
+        // pluginkit 未注册 appex，系统不知道扩展存在 → Code 14。
+        // 通过 dlsym 动态加载 LSRegisterURL，强制向 Launch Services 注册
+        // appex bundle，触发 pluginkit 扫描注册。
+        registerAppexWithLaunchServices()
 
         // 主动 pre-clean + 版本同步（同时解决三个问题）：
         //
