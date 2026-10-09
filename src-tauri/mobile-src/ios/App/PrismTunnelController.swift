@@ -383,12 +383,17 @@ final class PrismTunnelController {
 
     /// 通过 LSApplicationWorkspace 私有 API 注册 appex
     private static func tryLSApplicationWorkspace(appexURL: URL) {
-        guard let wsClass = NSClassFromString("LSApplicationWorkspace")
+        guard let wsAnyClass = NSClassFromString("LSApplicationWorkspace")
         else {
             NSLog("[PrismVPN] LSApplicationWorkspace class not found")
             lsAppWorkspaceResult = "class未找到"
             return
         }
+        // NSClassFromString 返回 AnyClass（元类型），Swift 在元类型上
+        // 直接调用 perform(_:) 会报「no exact matches」「takeUnretainedValue
+        // cannot be resolved without contextual type」。ObjC 类对象本身
+        // 是 NSObject 实例（根元类继承自 NSObject），cast 后即可调用。
+        let wsClass = wsAnyClass as AnyObject
         // [LSApplicationWorkspace defaultWorkspace]
         let defaultSel = NSSelectorFromString("defaultWorkspace")
         guard wsClass.responds(to: defaultSel),
