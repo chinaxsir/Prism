@@ -424,6 +424,32 @@ jobs:
             /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string 14.0" "$APPEX/Info.plist" 2>/dev/null || \
             /usr/libexec/PlistBuddy -c "Set :MinimumOSVersion 14.0" "$APPEX/Info.plist"
             echo "AppEx MinimumOSVersion: $(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APPEX/Info.plist")"
+
+            # ================= 终极防拉黑清理与补全 =================
+            # PluginKit 静态拒载的最后几个嫌疑人：appex 内嵌未签名
+            # 动态库 / Info.plist 缺少 XPC! 声明 / Bundle ID 偏差 /
+            # 扩展点标识缺失。逐项强制清理与补全。
+
+            # 1. 删除 appex 内 Frameworks：App Extension 不允许
+            # 内嵌自己的 Swift 动态库，否则 PluginKit 静态拉黑
+            rm -rf "$APPEX/Frameworks"
+            echo "Removed appex Frameworks (if any)"
+
+            # 2. 强制补全 CFBundlePackageType=XPC!（iOS 后台扩展必须）
+            /usr/libexec/PlistBuddy -c "Set :CFBundlePackageType XPC!" "$APPEX/Info.plist" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string XPC!" "$APPEX/Info.plist"
+            echo "AppEx PackageType: $(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$APPEX/Info.plist")"
+
+            # 3. 强制对齐 Bundle ID = 主 App ID + .PrismVPN
+            MAIN_BUNDLE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist")
+            /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $MAIN_BUNDLE.PrismVPN" "$APPEX/Info.plist" 2>/dev/null || true
+            echo "AppEx BundleID: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APPEX/Info.plist")"
+
+            # 4. 强制指定扩展点标识与入口类
+            /usr/libexec/PlistBuddy -c "Set :NSExtension:NSExtensionPointIdentifier com.apple.networkextension.packet-tunnel-provider" "$APPEX/Info.plist" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Set :NSExtension:NSExtensionPrincipalClass PrismVPN.PacketTunnelProvider" "$APPEX/Info.plist" 2>/dev/null || true
+            echo "AppEx NSExtension: $(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$APPEX/Info.plist") / $(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPrincipalClass' "$APPEX/Info.plist")"
+            # ========================================================
           fi
           
           echo "build tag: $BUILD_NUM"
