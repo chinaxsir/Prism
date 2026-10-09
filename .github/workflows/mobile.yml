@@ -408,6 +408,15 @@ jobs:
           # 后续 codesign 会重新 seal。App 启动失败诊断行 build= 即真实构建
           BUILD_SHA=${GITHUB_SHA::7}
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_SHA" "$APP/Info.plist"
+          
+          # 必须同步修改 VPN 扩展插件的版本号！否则 iOS pluginkit
+          # 因主 App 与 appex 版本不一致而静默拒载扩展，导致 Code 14
+          APPEX=$(find "$APP/PlugIns" -maxdepth 1 -name "*.appex" -type d 2>/dev/null | head -1)
+          if [ -n "$APPEX" ]; then
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_SHA" "$APPEX/Info.plist"
+            echo "Synced AppEx version to: $BUILD_SHA"
+          fi
+          
           echo "build tag: $BUILD_SHA"
 
           echo "--- Frameworks as shipped by tauri --no-sign ---"
