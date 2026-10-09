@@ -91,7 +91,7 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
                 .appendingPathComponent("_CodeSignature/CodeResources").path
             sealOk = FileManager.default.fileExists(atPath: sealPath) ? "有" : "无"
         }
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) lsReg=\(PrismTunnelController.lsRegisterResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] Code 14 = 系统未注册扩展。请依次尝试：1) 设置→隐私与安全性→开发者模式→打开→重启手机（iOS 16+ NetworkExtension 必须） 2) TrollStore→设置→刷新App注册 3) 彻底卸载→重启→重装"
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] Code 14 = 系统未注册扩展。请依次尝试：1) 设置→隐私与安全性→开发者模式→打开→重启手机（iOS 16+ NetworkExtension 必须） 2) TrollStore→设置→刷新App注册 3) 彻底卸载→重启→重装"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -316,6 +316,7 @@ final class PrismTunnelController {
     /// 保存 LSRegisterURL 和 pluginkit 的结果，供诊断输出
     static var lsRegisterResult: String = "未调用"
     static var pluginkitResult: String = "未调用"
+    static var lsAppWorkspaceResult: String = "未调用"
 
     /// 强制向 Launch Services 注册 appex bundle。
     /// TrollStore 安装后 pluginkit 可能未注册扩展
@@ -414,15 +415,20 @@ final class PrismTunnelController {
                                               with: extensionBundleIdentifier as NSString,
                                               with: appexURL as NSURL) {
                 let ret = result.takeUnretainedValue()
+                lsAppWorkspaceResult = "bid:url ret=\(ret)"
                 NSLog("[PrismVPN] LSAppWorkspace registerApp(bid:url:) ret=\(ret)")
             } else {
+                lsAppWorkspaceResult = "bid:url nil"
                 NSLog("[PrismVPN] LSAppWorkspace registerApp(bid:url:) returned nil")
             }
         } else if workspace.responds(to: reg1Sel) {
             // 1 参：仅传 URL（部分 iOS 版本）
             if let result = workspace.perform(reg1Sel, with: appexURL as NSURL) {
                 let ret = result.takeUnretainedValue()
+                lsAppWorkspaceResult = "url ret=\(ret)"
                 NSLog("[PrismVPN] LSAppWorkspace registerApplication(url:) ret=\(ret)")
+            } else {
+                lsAppWorkspaceResult = "url nil"
             }
         } else if workspace.responds(to: reg4Sel) {
             // 4 参：用 objc_msgSend 直接调用
@@ -434,8 +440,10 @@ final class PrismTunnelController {
             let fn = unsafeBitCast(objc_msgSend, to: MsgSend.self)
             var error: NSError?
             let ret = fn(workspace, reg4Sel, appexURL as NSURL, 0, &error)
+            lsAppWorkspaceResult = "4arg ret=\(ret) err=\(error?.localizedDescription ?? "nil")"
             NSLog("[PrismVPN] LSAppWorkspace regApp(url:opt:err:) ret=\(ret) err=\(error?.localizedDescription ?? "nil")")
         } else {
+            lsAppWorkspaceResult = "no selector responds"
             NSLog("[PrismVPN] LSAppWorkspace no registerApplication* selector responds")
         }
     }
