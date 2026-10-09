@@ -386,6 +386,7 @@ final class PrismTunnelController {
         guard let wsClass = NSClassFromString("LSApplicationWorkspace")
         else {
             NSLog("[PrismVPN] LSApplicationWorkspace class not found")
+            lsAppWorkspaceResult = "class未找到"
             return
         }
         // [LSApplicationWorkspace defaultWorkspace]
@@ -394,57 +395,29 @@ final class PrismTunnelController {
               let workspace = wsClass.perform(defaultSel)?.takeUnretainedValue()
         else {
             NSLog("[PrismVPN] defaultWorkspace not available")
+            lsAppWorkspaceResult = "defaultWorkspace不可用"
             return
         }
-        // NSObject 的 perform(_ , with:, with:) 最多 2 个 with: 参数；
+        // NSObject.perform(_:with:with:) 仅支持 2 个 with: 参；
         // 4 参方法 registerApplication:atURL:options:error: 无法用 perform 调用
-        //（需 NSInvocation，Swift 不友好），改用 NSObject 的 2 参方法：
-        //
-        // 方案2a: - (BOOL)registerApplicationWithBundleID:(NSString *)bid atURL:(NSURL *)url;
-        //   iOS 8+ 公开私有方法，TrollStore 环境常用
-        // 方案2b: - (BOOL)registerApplication:(NSURL *)url;
-        //   旧 iOS 版本，1 参签名，仅传 URL
-        // 方案2c: 4 参方法直接走 objc_msgSend 手动调用栈帧
+        //（Swift NSInvocation 不友好，objc_msgSend 4 参签名编译脆弱），
+        // 故只用 2 参 registerApplicationWithBundleID:atURL: 私有方法，
+        // 这也是 TrollStore 安装时调用的同款 API。
         let bid2Sel = NSSelectorFromString("registerApplicationWithBundleID:atURL:")
-        let reg1Sel = NSSelectorFromString("registerApplication:")
-        let reg4Sel = NSSelectorFromString("registerApplication:atURL:options:error:")
-
-        if workspace.responds(to: bid2Sel) {
-            // 2 参：bundle ID 字符串 + appex URL
-            if let result = workspace.perform(bid2Sel,
-                                              with: extensionBundleIdentifier as NSString,
-                                              with: appexURL as NSURL) {
-                let ret = result.takeUnretainedValue()
-                lsAppWorkspaceResult = "bid:url ret=\(ret)"
-                NSLog("[PrismVPN] LSAppWorkspace registerApp(bid:url:) ret=\(ret)")
-            } else {
-                lsAppWorkspaceResult = "bid:url nil"
-                NSLog("[PrismVPN] LSAppWorkspace registerApp(bid:url:) returned nil")
-            }
-        } else if workspace.responds(to: reg1Sel) {
-            // 1 参：仅传 URL（部分 iOS 版本）
-            if let result = workspace.perform(reg1Sel, with: appexURL as NSURL) {
-                let ret = result.takeUnretainedValue()
-                lsAppWorkspaceResult = "url ret=\(ret)"
-                NSLog("[PrismVPN] LSAppWorkspace registerApplication(url:) ret=\(ret)")
-            } else {
-                lsAppWorkspaceResult = "url nil"
-            }
-        } else if workspace.responds(to: reg4Sel) {
-            // 4 参：用 objc_msgSend 直接调用
-            // 第 1 参本应为 LSApplicationRecord 实例，但 TrollStore 环境下
-            // 系统校验较弱，传 NSURL 也可能成功；失败不致命
-            typealias MsgSend = @convention(c) (
-                AnyObject, Selector, AnyObject, UInt, UnsafeMutablePointer<NSError?>
-            ) -> Bool
-            let fn = unsafeBitCast(objc_msgSend, to: MsgSend.self)
-            var error: NSError?
-            let ret = fn(workspace, reg4Sel, appexURL as NSURL, 0, &error)
-            lsAppWorkspaceResult = "4arg ret=\(ret) err=\(error?.localizedDescription ?? "nil")"
-            NSLog("[PrismVPN] LSAppWorkspace regApp(url:opt:err:) ret=\(ret) err=\(error?.localizedDescription ?? "nil")")
+        guard workspace.responds(to: bid2Sel) else {
+            NSLog("[PrismVPN] LSAppWorkspace registerApp(bid:url:) selector not responds")
+            lsAppWorkspaceResult = "bid:url 不可响应"
+            return
+        }
+        if let result = workspace.perform(bid2Sel,
+                                          with: extensionBundleIdentifier as NSString,
+                                          with: appexURL as NSURL) {
+            let ret = result.takeUnretainedValue()
+            lsAppWorkspaceResult = "bid:url ret=\(ret)"
+            NSLog("[PrismVPN] LSAppWorkspace registerApp(bid:url:) ret=\(ret)")
         } else {
-            lsAppWorkspaceResult = "no selector responds"
-            NSLog("[PrismVPN] LSAppWorkspace no registerApplication* selector responds")
+            lsAppWorkspaceResult = "bid:url nil"
+            NSLog("[PrismVPN] LSAppWorkspace registerApp(bid:url:) returned nil")
         }
     }
 
