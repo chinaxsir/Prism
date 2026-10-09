@@ -470,34 +470,34 @@ jobs:
           fi
           echo "build tag: $BUILD_NUM"
 
-          # ==================== 3. RPATH 重排与权限（必须在签名前）====================
+          # ==================== 3. RPATH 重排（仅限主程序！）====================
           # /usr/lib/swift 必须排在所有 @rpath 之前，否则 iOS 16.5 先
-          # 命中 back-deploy 嵌入副本触发 checkVersion abort
-          TARGETS=("$APP/$EXEC")
-          if [ -n "$APPEX" ] && [ -n "$APPEX_EXEC" ]; then
-            TARGETS+=("$APPEX/$APPEX_EXEC")
-          fi
-
-          for bin in "${TARGETS[@]}"; do
-            chmod +x "$bin"
-            echo "Rewriting rpaths for: $bin"
-            RPATHS_RAW=$(mktemp)
-            otool -l "$bin" | awk '
-              /cmd LC_RPATH/ { want=1; next }
-              want && /path / { sub(/^ *path /,""); sub(/ \(offset [0-9]+\).*/,""); print; want=0 }
-            ' > "$RPATHS_RAW"
-            echo "--- rpaths before rewrite ---"; cat "$RPATHS_RAW"
-            while IFS= read -r rp; do
-              install_name_tool -delete_rpath "$rp" "$bin"
-            done < "$RPATHS_RAW"
-            install_name_tool -add_rpath /usr/lib/swift "$bin"
-            while IFS= read -r rp; do
-              [ "$rp" = "/usr/lib/swift" ] && continue
-              install_name_tool -add_rpath "$rp" "$bin"
-            done < "$RPATHS_RAW"
-            echo "--- rpaths after rewrite ---"
-            otool -l "$bin" | grep -A2 LC_RPATH | grep path
-          done
+          # 命中 back-deploy 嵌入副本触发 checkVersion abort。
+          #
+          # 【关键】绝对不可对 appex 使用 install_name_tool！
+          # appex 由 Xcode 原生编译，Mach-O header 非常紧凑（无 padding），
+          # install_name_tool 修改 RPATH 会越界写坏 header，amfid 静态
+          # 判定为"格式损坏的无效二进制"直接拉黑——无崩溃日志、
+          # Code 14、红色"需要更新"、配置丢失。
+          MAIN_EXEC_PATH="$APP/$EXEC"
+          chmod +x "$MAIN_EXEC_PATH"
+          echo "Rewriting rpaths for: $MAIN_EXEC_PATH"
+          RPATHS_RAW=$(mktemp)
+          otool -l "$MAIN_EXEC_PATH" | awk '
+            /cmd LC_RPATH/ { want=1; next }
+            want && /path / { sub(/^ *path /,""); sub(/ \(offset [0-9]+\).*/,""); print; want=0 }
+          ' > "$RPATHS_RAW"
+          echo "--- rpaths before rewrite ---"; cat "$RPATHS_RAW"
+          while IFS= read -r rp; do
+            install_name_tool -delete_rpath "$rp" "$MAIN_EXEC_PATH"
+          done < "$RPATHS_RAW"
+          install_name_tool -add_rpath /usr/lib/swift "$MAIN_EXEC_PATH"
+          while IFS= read -r rp; do
+            [ "$rp" = "/usr/lib/swift" ] && continue
+            install_name_tool -add_rpath "$rp" "$MAIN_EXEC_PATH"
+          done < "$RPATHS_RAW"
+          echo "--- rpaths after rewrite ---"
+          otool -l "$MAIN_EXEC_PATH" | grep -A2 LC_RPATH | grep path
 
           # ==================== 4. 最终签名封印（必须在所有修改完成后）====================
           # 所有文件修改（Info.plist / RPATH / dylib 删除）已完成，
@@ -526,11 +526,14 @@ jobs:
             fi
           done < "$LIST"
 
-          # 对 appex bundle 整体重签（ldid -S 而非 codesign，
-          # TrollStore 生态兼容格式）
-          if [ -n "$APPEX" ]; then
-            "$LDID" -S"$PWD/src-tauri/gen/apple/PrismVPN/PrismVPN.entitlements.plist" "$APPEX"
-            echo "--- appex ldid entitlements: $APPEX ---"
+          # 对 appex 二进制本体直接签名（ldid -S 而非 codesign，
+          # TrollStore 生态兼容格式）。【关键】ldid 必须直接作用于
+          # Mach-O 二进制文件，不能作用于 .appex 目录——否则
+          # entitlements 无法嵌入 LC_CODE_SIGNATURE，系统报 Code 14。
+          if [ -n "$APPEX" ] && [ -n "$APPEX_EXEC" ]; then
+            chmod +x "$APPEX/$APPEX_EXEC"
+            "$LDID" -S"$PWD/src-tauri/gen/apple/PrismVPN/PrismVPN.entitlements.plist" "$APPEX/$APPEX_EXEC"
+            echo "--- appex ldid entitlements: $APPEX/$APPEX_EXEC ---"
             "$LDID" -e "$APPEX/$APPEX_EXEC" | head -30
           fi
 
