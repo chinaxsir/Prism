@@ -4,7 +4,6 @@
 
 import Foundation
 import NetworkExtension
-import Security
 
 /// 扩展 Bundle ID：优先取 App 包 PlugIns 内【实际存在】的
 /// packet-tunnel-provider appex 的真实 CFBundleIdentifier（防构建侧
@@ -419,7 +418,7 @@ final class PrismTunnelController {
 
         let mainBid = Bundle.main.bundleIdentifier ?? "com.prism.proxy"
         let appexBid = extensionBundleIdentifier
-        let mainEnt = readOwnEntitlements()
+        let mainEnt = knownMainEntitlements()
         let appexEnt = knownAppexEntitlements()
 
         // App Group 共享容器（主 App 与 appex 同一组）
@@ -477,36 +476,41 @@ final class PrismTunnelController {
         }
 
         // registerApplicationDictionary: 返回 BOOL（非对象），perform 无法
-        // 可靠取回，用 1 参 objc_msgSend（签名简单安全）。
+        // 可靠取回；而 Swift SDK 将 objc_msgSend 标记为 variadic 不可直接用。
+        // 故通过 dlopen(NULL)/dlsym 运行时拿到 objc_msgSend 指针（libobjc
+        // 已加载，必能找到），再 unsafeBitCast 成 1 参函数指针精确调用。
         typealias RegFn = @convention(c) (AnyObject, Selector, NSDictionary) -> Bool
-        let fn = unsafeBitCast(objc_msgSend, to: RegFn.self)
-        let ok = fn(workspace, regSel, dict as NSDictionary)
-        lsAppWorkspaceResult = "regDict=\(ok)"
-        NSLog("[PrismVPN] registerApplicationDictionary: ret=\(ok)")
+        let h = dlopen(nil, 1) // RTLD_LAZY，NULL 返回全局作用域
+        if let sym = dlsym(h, "objc_msgSend") {
+            let fn = unsafeBitCast(sym, to: RegFn.self)
+            let ok = fn(workspace, regSel, dict as NSDictionary)
+            lsAppWorkspaceResult = "regDict=\(ok)"
+            NSLog("[PrismVPN] registerApplicationDictionary: ret=\(ok)")
+        } else {
+            // dlsym 失败则退回 perform（调用仍会发生，只是拿不到 BOOL）
+            workspace.perform(regSel, with: dict as NSDictionary)
+            lsAppWorkspaceResult = "regDict已调用(perform)"
+            NSLog("[PrismVPN] registerApplicationDictionary: invoked via perform")
+        }
     }
 
-    /// 用 SecTask 读取【本进程】真实签名中的关键 entitlements，
-    /// 供注册字典使用（避免硬编码与实际签名不符）。
-    private static func readOwnEntitlements() -> [String: Any] {
-        var out = [String: Any]()
-        guard let task = SecTaskCreateFromSelf(nil) else { return out }
-        let keys = [
-            "application-identifier",
-            "com.apple.developer.team-identifier",
-            "com.apple.developer.networking.networkextension",
-            "com.apple.security.application-groups",
-            "keychain-access-groups",
+    /// 主 App 应有的 entitlements（与 CI 签入的 TrollStore.entitlements.plist
+    /// 一致）。iOS 上 SecTask* 是未导出的 SPI（Swift 无法引用），故按已知
+    /// 值构造。
+    private static func knownMainEntitlements() -> [String: Any] {
+        let mainBid = Bundle.main.bundleIdentifier ?? "com.prism.proxy"
+        return [
+            "application-identifier": "TROLLTROLL.\(mainBid)",
+            "com.apple.developer.team-identifier": "TROLLTROLL",
+            "com.apple.developer.networking.networkextension":
+                ["packet-tunnel-provider"],
+            "com.apple.security.application-groups": [prismAppGroupID],
+            "keychain-access-groups": ["TROLLTROLL.\(mainBid)"],
         ]
-        for key in keys {
-            if let v = SecTaskCopyValueForEntitlement(task, key as CFString, nil) {
-                out[key] = v
-            }
-        }
-        return out
     }
 
     /// appex 应有的 entitlements（与 CI 签入的 PrismVPN.entitlements.plist
-    /// 一致）。appex 在独立进程，SecTask 只能读本进程，故按已知值构造。
+    /// 一致）。appex 在独立进程，故按已知值构造。
     private static func knownAppexEntitlements() -> [String: Any] {
         let appexBid = extensionBundleIdentifier
         return [
