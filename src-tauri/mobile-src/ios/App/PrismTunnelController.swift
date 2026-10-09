@@ -321,8 +321,9 @@ final class PrismTunnelController {
     /// TrollStore 安装后 pluginkit 可能未注册扩展
     ///（CoreTrust 绕过只影响 FrontBoard，pluginkit 有独立验证），
     /// 导致系统找不到扩展 → NEVPNConnectionErrorDomain code=14。
-    /// 方案1: dlopen/dlsym 运行时加载 LSRegisterURL
-    /// 方案2: posix_spawn 直接调用 pluginkit -a 注册扩展
+    /// 方案1: dlsym 多路径加载 LSRegisterURL（含下划线前缀）
+    /// 方案2: LSApplicationWorkspace 私有 API（TrollStore 允许）
+    /// 方案3: posix_spawn pluginkit -a（需逃逸沙箱，通常失败）
     static func registerAppexWithLaunchServices() {
         guard let pluginsURL = Bundle.main.builtInPlugInsURL,
               let entries = try? FileManager.default.contentsOfDirectory(
@@ -339,30 +340,70 @@ final class PrismTunnelController {
             let hasSeal = FileManager.default.fileExists(atPath: csPath)
             NSLog("[PrismVPN] appex=\(entry) CodeResources=\(hasSeal ? "有" : "无")")
 
-            // 方案1: LSRegisterURL
-            if let handle = dlopen(
+            // 方案1: dlsym 多框架/多符号名尝试
+            // Apple 平台 C 符号在符号表中带下划线前缀：_LSRegisterURL
+            let frameworks = [
                 "/System/Library/Frameworks/CoreServices.framework/CoreServices",
-                1  // RTLD_LAZY
-            ) {
-                if let sym = dlsym(handle, "LSRegisterURL") {
+                "/System/Library/PrivateFrameworks/MobileCoreServices.framework/MobileCoreServices",
+                "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/LaunchServices"
+            ]
+            let symbolNames = ["_LSRegisterURL", "LSRegisterURL"]
+            var lsDone = false
+            for fwPath in frameworks {
+                guard !lsDone,
+                      let handle = dlopen(fwPath, 1)  // RTLD_LAZY
+                else { continue }
+                for symName in symbolNames {
+                    guard !lsDone,
+                          let sym = dlsym(handle, symName)
+                    else { continue }
                     typealias Fn = @convention(c) (CFURL, Bool) -> Int32
                     let fn = unsafeBitCast(sym, to: Fn.self)
                     let status = fn(appexURL as CFURL, true)
-                    lsRegisterResult = "status=\(status)"
-                    NSLog("[PrismVPN] LSRegisterURL(\(entry)) status=\(status)")
-                } else {
-                    lsRegisterResult = "symbol未找到"
-                    NSLog("[PrismVPN] LSRegisterURL symbol not found")
+                    lsRegisterResult = "\(symName)@\((fwPath as NSString).lastPathComponent)=\(status)"
+                    NSLog("[PrismVPN] \(symName) status=\(status)")
+                    lsDone = true
                 }
                 dlclose(handle)
-            } else {
-                lsRegisterResult = "dlopen失败"
-                NSLog("[PrismVPN] CoreServices framework not loadable")
+            }
+            if !lsDone {
+                lsRegisterResult = "所有路径/符号均未找到"
+                NSLog("[PrismVPN] LSRegisterURL not found in any framework")
             }
 
-            // 方案2: posix_spawn 调用 pluginkit -a
-            // TrollStore app 可能有权限执行系统命令
+            // 方案2: LSApplicationWorkspace 私有 API
+            // TrollStore CoreTrust 绕过允许调用私有类
+            tryLSApplicationWorkspace(appexURL: appexURL)
+
+            // 方案3: posix_spawn pluginkit -a（通常因沙箱失败）
             tryPluginkitRegister(appexPath: appexPath)
+        }
+    }
+
+    /// 通过 LSApplicationWorkspace 私有 API 注册 appex
+    private static func tryLSApplicationWorkspace(appexURL: URL) {
+        guard let wsClass = NSClassFromString("LSApplicationWorkspace")
+        else {
+            NSLog("[PrismVPN] LSApplicationWorkspace class not found")
+            return
+        }
+        // [LSApplicationWorkspace defaultWorkspace]
+        let defaultSel = NSSelectorFromString("defaultWorkspace")
+        guard wsClass.responds(to: defaultSel),
+              let workspace = wsClass.perform(defaultSel)?.takeUnretainedValue()
+        else {
+            NSLog("[PrismVPN] defaultWorkspace not available")
+            return
+        }
+        // [workspace registerApplication:atURL:options:error:]
+        // 或 [workspace registerApplication:withOptions:]
+        let registerSel = NSSelectorFromString("registerApplication:atURL:options:error:")
+        if workspace.responds(to: registerSel) {
+            var error: NSError?
+            _ = workspace.perform(registerSel, with: appexURL, with: 0, with: &error)
+            NSLog("[PrismVPN] LSAppWorkspace registerApplication error=\(error?.localizedDescription ?? "nil")")
+        } else {
+            NSLog("[PrismVPN] registerApplication selector not found")
         }
     }
 
