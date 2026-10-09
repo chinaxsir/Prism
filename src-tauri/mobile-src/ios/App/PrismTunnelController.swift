@@ -161,8 +161,8 @@ final class PrismTunnelController {
         else { return "appex bundle 不可定位" }
 
         guard let info = bundle.infoDictionary,
-              let point = (info["NSExtension"] as? [String: Any])?
-                ["NSExtensionPointIdentifier"] as? String,
+              let ext = info["NSExtension"] as? [String: Any],
+              let point = ext["NSExtensionPointIdentifier"] as? String,
               point == "com.apple.networkextension.packet-tunnel-provider"
         else { return "Info.plist 扩展点声明缺失或错误" }
 
