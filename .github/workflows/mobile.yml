@@ -415,6 +415,13 @@ jobs:
           if [ -n "$APPEX" ]; then
             /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_SHA" "$APPEX/Info.plist"
             echo "Synced AppEx version to: $BUILD_SHA"
+
+            # 强制将插件最低系统版本设为 14.0：Xcode 高版本默认生成的
+            # MinimumOSVersion（如 17.0）会让 iOS 16.5 设备直接判定插件
+            # 不兼容，显示红色“需要更新”
+            /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string 14.0" "$APPEX/Info.plist" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Set :MinimumOSVersion 14.0" "$APPEX/Info.plist"
+            echo "AppEx MinimumOSVersion: $(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APPEX/Info.plist")"
           fi
           
           echo "build tag: $BUILD_SHA"
@@ -466,24 +473,39 @@ jobs:
           echo "--- Frameworks swift libs (expect only _Concurrency) ---"
           ls -1 "$APP/Frameworks"/libswift*.dylib
 
-          # 重排 LC_RPATH：全部删除后按 /usr/lib/swift 优先重建，
-          # 必须在重签之前修改（install_name_tool 会使旧签名失效）。
-          RPATHS_RAW=$(mktemp)
-          otool -l "$APP/$EXEC" | awk '
-            /cmd LC_RPATH/ { want=1; next }
-            want && /path / { sub(/^ *path /,""); sub(/ \(offset [0-9]+\).*/,""); print; want=0 }
-          ' > "$RPATHS_RAW"
-          echo "--- rpaths before rewrite ---"; cat "$RPATHS_RAW"
-          while IFS= read -r rp; do
-            install_name_tool -delete_rpath "$rp" "$APP/$EXEC"
-          done < "$RPATHS_RAW"
-          install_name_tool -add_rpath /usr/lib/swift "$APP/$EXEC"
-          while IFS= read -r rp; do
-            [ "$rp" = "/usr/lib/swift" ] && continue
-            install_name_tool -add_rpath "$rp" "$APP/$EXEC"
-          done < "$RPATHS_RAW"
-          echo "--- rpaths after rewrite ---"
-          otool -l "$APP/$EXEC" | grep -A2 LC_RPATH | grep path
+          # ==================== RPATH 修复（主程序 + VPN 插件）====================
+          # 全部删除后按 /usr/lib/swift 优先重建，必须在重签之前修改
+          # （install_name_tool 会使旧签名失效）。
+          # 插件同样依赖 swift 运行时；若只修主程序，dyld 拉起 appex 时
+          # 找不到 libswiftCore 会瞬间崩溃，iOS 随即报 Code 14 /
+          # 红色“需要更新”。
+          APPEX=$(find "$APP/PlugIns" -maxdepth 1 -name "*.appex" -type d 2>/dev/null | head -1)
+          APPEX_EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APPEX/Info.plist" 2>/dev/null || true)
+
+          TARGETS=("$APP/$EXEC")
+          if [ -n "$APPEX" ] && [ -n "$APPEX_EXEC" ]; then
+            TARGETS+=("$APPEX/$APPEX_EXEC")
+          fi
+
+          for bin in "${TARGETS[@]}"; do
+            echo "Rewriting rpaths for: $bin"
+            RPATHS_RAW=$(mktemp)
+            otool -l "$bin" | awk '
+              /cmd LC_RPATH/ { want=1; next }
+              want && /path / { sub(/^ *path /,""); sub(/ \(offset [0-9]+\).*/,""); print; want=0 }
+            ' > "$RPATHS_RAW"
+            echo "--- rpaths before rewrite ---"; cat "$RPATHS_RAW"
+            while IFS= read -r rp; do
+              install_name_tool -delete_rpath "$rp" "$bin"
+            done < "$RPATHS_RAW"
+            install_name_tool -add_rpath /usr/lib/swift "$bin"
+            while IFS= read -r rp; do
+              [ "$rp" = "/usr/lib/swift" ] && continue
+              install_name_tool -add_rpath "$rp" "$bin"
+            done < "$RPATHS_RAW"
+            echo "--- rpaths after rewrite ---"
+            otool -l "$bin" | grep -A2 LC_RPATH | grep path
+          done
 
           # 收集 .app 内全部 Mach-O（主二进制 / Frameworks / 插件）
           # 用临时文件列表而非 mapfile：macOS 自带 bash 3.2 没有 mapfile
