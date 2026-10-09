@@ -91,7 +91,7 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
                 .appendingPathComponent("_CodeSignature/CodeResources").path
             sealOk = FileManager.default.fileExists(atPath: sealPath) ? "有" : "无"
         }
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] 如果 Code 14 持续出现，请：1) 设置→隐私与安全性→开发者模式→打开→重启  2) TrollStore 设置→刷新 App 注册  3) 彻底卸载 App 后重启手机再安装"
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) lsReg=\(PrismTunnelController.lsRegisterResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] Code 14 = 系统未注册扩展。请依次尝试：1) 设置→隐私与安全性→开发者模式→打开→重启手机（iOS 16+ NetworkExtension 必须） 2) TrollStore→设置→刷新App注册 3) 彻底卸载→重启→重装"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -313,43 +313,79 @@ final class PrismTunnelController {
 
     // MARK: - 强制注册扩展
 
+    /// 保存 LSRegisterURL 和 pluginkit 的结果，供诊断输出
+    static var lsRegisterResult: String = "未调用"
+    static var pluginkitResult: String = "未调用"
+
     /// 强制向 Launch Services 注册 appex bundle。
     /// TrollStore 安装后 pluginkit 可能未注册扩展
     ///（CoreTrust 绕过只影响 FrontBoard，pluginkit 有独立验证），
     /// 导致系统找不到扩展 → NEVPNConnectionErrorDomain code=14。
-    /// 通过 dlopen/dlsym 运行时加载 LSRegisterURL（Launch Services
-    /// 公开 API，iOS 2.0+），避免链接期依赖 CoreServices 框架。
+    /// 方案1: dlopen/dlsym 运行时加载 LSRegisterURL
+    /// 方案2: posix_spawn 直接调用 pluginkit -a 注册扩展
     static func registerAppexWithLaunchServices() {
         guard let pluginsURL = Bundle.main.builtInPlugInsURL,
               let entries = try? FileManager.default.contentsOfDirectory(
                 atPath: pluginsURL.path)
         else {
             NSLog("[PrismVPN] registerAppex: PlugIns 目录不存在")
+            lsRegisterResult = "PlugIns不存在"
             return
         }
         for entry in entries where entry.hasSuffix(".appex") {
             let appexURL = pluginsURL.appendingPathComponent(entry)
+            let appexPath = appexURL.path
             let csPath = appexURL.appendingPathComponent("_CodeSignature/CodeResources").path
             let hasSeal = FileManager.default.fileExists(atPath: csPath)
             NSLog("[PrismVPN] appex=\(entry) CodeResources=\(hasSeal ? "有" : "无")")
 
-            // RTLD_LAZY=1 on Apple platforms
+            // 方案1: LSRegisterURL
             if let handle = dlopen(
                 "/System/Library/Frameworks/CoreServices.framework/CoreServices",
-                1
+                1  // RTLD_LAZY
             ) {
                 if let sym = dlsym(handle, "LSRegisterURL") {
                     typealias Fn = @convention(c) (CFURL, Bool) -> Int32
                     let fn = unsafeBitCast(sym, to: Fn.self)
                     let status = fn(appexURL as CFURL, true)
+                    lsRegisterResult = "status=\(status)"
                     NSLog("[PrismVPN] LSRegisterURL(\(entry)) status=\(status)")
                 } else {
+                    lsRegisterResult = "symbol未找到"
                     NSLog("[PrismVPN] LSRegisterURL symbol not found")
                 }
                 dlclose(handle)
             } else {
+                lsRegisterResult = "dlopen失败"
                 NSLog("[PrismVPN] CoreServices framework not loadable")
             }
+
+            // 方案2: posix_spawn 调用 pluginkit -a
+            // TrollStore app 可能有权限执行系统命令
+            tryPluginkitRegister(appexPath: appexPath)
+        }
+    }
+
+    /// 通过 posix_spawn 调用 pluginkit -a 强制注册扩展
+    private static func tryPluginkitRegister(appexPath: String) {
+        var pid: pid_t = 0
+        var argv: [UnsafeMutablePointer<CChar>?] = [
+            strdup("pluginkit"),
+            strdup("-a"),
+            strdup(appexPath),
+            nil
+        ]
+        defer { argv.prefix(while: { $0 != nil }).forEach { free($0) } }
+
+        let spawnResult = posix_spawn(&pid, "/usr/bin/pluginkit", nil, nil, &argv, nil)
+        if spawnResult == 0 {
+            var status: Int32 = 0
+            waitpid(pid, &status, 0)
+            pluginkitResult = "pid=\(pid) exit=\(status)"
+            NSLog("[PrismVPN] pluginkit -a exit=\(status)")
+        } else {
+            pluginkitResult = "spawn=\(spawnResult)"
+            NSLog("[PrismVPN] posix_spawn pluginkit failed: \(spawnResult) (errno)")
         }
     }
 
