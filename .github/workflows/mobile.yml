@@ -404,17 +404,19 @@ jobs:
           echo "app: $APP  exec: $EXEC"
 
           # 构建后打标：tauri build 会把主 App CFBundleVersion 覆盖为版本号
-          # （恒为 0.3.7，无法辨识具体构建）；此处写入 GITHUB_SHA 短 SHA，
-          # 后续 codesign 会重新 seal。App 启动失败诊断行 build= 即真实构建
-          BUILD_SHA=${GITHUB_SHA::7}
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_SHA" "$APP/Info.plist"
+          # （恒为 0.3.7，无法辨识具体构建）。严禁使用含字母的 Git 短 SHA
+          # ——Apple 规范要求 CFBundleVersion 只能为纯数字/点号，
+          # NetworkExtension 底层验证器发现字母会静默拒载插件，
+          # 导致 Code 14 与红色“需要更新”。改用纯数字的 GitHub 构建流水号。
+          BUILD_NUM=${GITHUB_RUN_NUMBER:-$(date +%s)}
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" "$APP/Info.plist"
           
           # 必须同步修改 VPN 扩展插件的版本号！否则 iOS pluginkit
           # 因主 App 与 appex 版本不一致而静默拒载扩展，导致 Code 14
           APPEX=$(find "$APP/PlugIns" -maxdepth 1 -name "*.appex" -type d 2>/dev/null | head -1)
           if [ -n "$APPEX" ]; then
-            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_SHA" "$APPEX/Info.plist"
-            echo "Synced AppEx version to: $BUILD_SHA"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" "$APPEX/Info.plist"
+            echo "Synced AppEx version to: $BUILD_NUM"
 
             # 强制将插件最低系统版本设为 14.0：Xcode 高版本默认生成的
             # MinimumOSVersion（如 17.0）会让 iOS 16.5 设备直接判定插件
@@ -424,7 +426,7 @@ jobs:
             echo "AppEx MinimumOSVersion: $(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APPEX/Info.plist")"
           fi
           
-          echo "build tag: $BUILD_SHA"
+          echo "build tag: $BUILD_NUM"
 
           echo "--- Frameworks as shipped by tauri --no-sign ---"
           ls -1 "$APP/Frameworks" 2>/dev/null || echo "(empty)"
