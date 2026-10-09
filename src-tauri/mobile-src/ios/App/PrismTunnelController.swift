@@ -412,7 +412,7 @@ final class PrismTunnelController {
         // pluginkit 未注册 appex，系统不知道扩展存在 → Code 14。
         // 通过 dlsym 动态加载 LSRegisterURL，强制向 Launch Services 注册
         // appex bundle，触发 pluginkit 扫描注册。
-        registerAppexWithLaunchServices()
+        PrismTunnelController.registerAppexWithLaunchServices()
 
         // 主动 pre-clean + 版本同步（同时解决三个问题）：
         //
