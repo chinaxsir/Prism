@@ -4,7 +4,6 @@
 
 import Foundation
 import NetworkExtension
-import Security
 
 /// 扩展 Bundle ID：优先取 App 包 PlugIns 内【实际存在】的
 /// packet-tunnel-provider appex 的真实 CFBundleIdentifier（防构建侧
@@ -145,11 +144,14 @@ final class PrismTunnelController {
         return nil
     }
 
-    /// 对 appex bundle 做系统级完整性预检（不加载/不启动扩展进程），
-    /// 失败时返回系统真实理由。
-    /// Bundle 上并不存在 preflightCheck 方法（CI xcodebuild 编译错误）；
-    /// 正确的等价 API 是 Security 框架的 SecStaticCode：只静态解析并校验
-    /// 代码签名与资源 seal，不执行任何代码。
+    /// 对 appex 做不加载、不启动扩展的完整性预检。
+    /// 两条系统级路径在 iOS 上都不可用：
+    /// - Bundle 没有 preflightCheck 方法（编译错误）
+    /// - SecStaticCode/SecCode 系列是 macOS-only SPI，iOS 上即便
+    ///   import Security 也「cannot find type SecStaticCode in scope」
+    /// 因此这里只做文件级预检：bundle 可定位、Info.plist 扩展点正确、
+    /// 可执行文件存在且 Mach-O 魔数合法。签名与 entitlements 的深度
+    /// 诊断（手动解析 CS Superblob）见 diagnoseAppexEntitlements。
     static func diagnoseAppexPreflight() -> String {
         guard let pluginsURL = Bundle.main.builtInPlugInsURL,
               let entries = try? FileManager.default.contentsOfDirectory(
@@ -158,34 +160,30 @@ final class PrismTunnelController {
               let bundle = Bundle(url: pluginsURL.appendingPathComponent(appexName))
         else { return "appex bundle 不可定位" }
 
-        var staticCode: SecStaticCode?
-        let createStatus = SecStaticCodeCreateWithPath(
-            bundle.bundleURL as CFURL,
-            SecCSFlags(rawValue: 0),
-            &staticCode
-        )
-        guard createStatus == errSecSuccess, let code = staticCode else {
-            let reason = SecCopyErrorMessageString(createStatus, nil)
-                .map { $0 as String } ?? ""
-            return "SecStaticCodeCreate 失败: \(createStatus) \(reason)"
-        }
+        guard let info = bundle.infoDictionary,
+              let point = (info["NSExtension"] as? [String: Any])?
+                ["NSExtensionPointIdentifier"] as? String,
+              point == "com.apple.networkextension.packet-tunnel-provider"
+        else { return "Info.plist 扩展点声明缺失或错误" }
 
-        // basic 校验：签名完整性 + 资源 seal；额外校验全部架构与嵌套代码，
-        // 覆盖 appex 内可能内嵌的 dylib
-        let flags = SecCSFlags(rawValue:
-            kSecCSBasicValidateOnly | kSecCSCheckAllArchitectures | kSecCSCheckNestedCode)
-        var unmanagedError: Unmanaged<CFError>?
-        let status = SecStaticCodeCheckValidity(code, flags, &unmanagedError)
+        guard let execURL = bundle.executableURL,
+              let data = try? Data(contentsOf: execURL),
+              data.count >= 4
+        else { return "可执行文件缺失或不可读" }
 
-        if status == errSecSuccess {
-            return "ok"
+        // Mach-O 魔数（arm64 thin 为小端 0xFEEDFACF；同时兼容大端变体
+        // 与 FAT/通用二进制 0xCAFEBABE）
+        let magic = data.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self) }
+        let valid: Set<UInt32> = [
+            0xfeedfacf, 0xcffaedfe, // MH_MAGIC_64
+            0xfeedface, 0xcefaedfe, // MH_MAGIC
+            0xbebafeca, 0xcafebabe, // FAT 32
+            0xbfbafeca, 0xcafebabf, // FAT 64
+        ]
+        guard valid.contains(magic) else {
+            return String(format: "可执行文件 Mach-O 魔数非法: 0x%08x", magic)
         }
-        if let cfError = unmanagedError?.takeRetainedValue() {
-            return describe(error: cfError as Error)
-        }
-        let reason = SecCopyErrorMessageString(status, nil)
-            .map { $0 as String } ?? ""
-        return "SecStaticCodeCheckValidity 失败: \(status) \(reason)"
+        return "ok"
     }
 
     /// 解析 appex 可执行文件内嵌代码签名（CS Superblob），报告
