@@ -74,7 +74,7 @@ jobs:
       # 步骤间不保留 shell 环境变量），而 Build APK 时是 Gradle 在全新进程里调
       # cargo：ring 等带 C 源码的 crate 会重新执行 build script，cc-rs 探测
       # 不到 NDK r23+ 已移除的无 API 级别后缀 aarch64-linux-android-clang
-      # （ring 的 rerun-if-env 指纹从“已设置”变“未设置”也会触发重编译）。
+      # （ring 的 rerun-if-env 指纹从"已设置"变"未设置"也会触发重编译）。
       # 写入 CARGO_HOME/config.toml 后对任意 cwd 的 cargo 调用都生效。
       - name: Configure cargo NDK toolchain globally
         shell: bash
@@ -401,67 +401,40 @@ jobs:
           unzip -q "$IPA" -d "$WORK"
           APP=$(find "$WORK/Payload" -maxdepth 1 -name "*.app" -type d | head -1)
           EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
-          echo "app: $APP  exec: $EXEC"
-
-          # 构建后打标：tauri build 会把主 App CFBundleVersion 覆盖为版本号
-          # （恒为 0.3.7，无法辨识具体构建）。严禁使用含字母的 Git 短 SHA
-          # ——Apple 规范要求 CFBundleVersion 只能为纯数字/点号，
-          # NetworkExtension 底层验证器发现字母会静默拒载插件，
-          # 导致 Code 14 与红色“需要更新”。改用纯数字的 GitHub 构建流水号。
-          BUILD_NUM=${GITHUB_RUN_NUMBER:-$(date +%s)}
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" "$APP/Info.plist"
-          
-          # 必须同步修改 VPN 扩展插件的版本号！否则 iOS pluginkit
-          # 因主 App 与 appex 版本不一致而静默拒载扩展，导致 Code 14
           APPEX=$(find "$APP/PlugIns" -maxdepth 1 -name "*.appex" -type d 2>/dev/null | head -1)
+          APPEX_EXEC=""
           if [ -n "$APPEX" ]; then
-            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" "$APPEX/Info.plist"
-            echo "Synced AppEx version to: $BUILD_NUM"
+            APPEX_EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APPEX/Info.plist" 2>/dev/null || true)
+          fi
+          echo "app: $APP  exec: $EXEC  appex: $APPEX"
 
-            # 强制将插件最低系统版本设为 14.0：Xcode 高版本默认生成的
-            # MinimumOSVersion（如 17.0）会让 iOS 16.5 设备直接判定插件
-            # 不兼容，显示红色“需要更新”
-            /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string 14.0" "$APPEX/Info.plist" 2>/dev/null || \
-            /usr/libexec/PlistBuddy -c "Set :MinimumOSVersion 14.0" "$APPEX/Info.plist"
-            echo "AppEx MinimumOSVersion: $(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APPEX/Info.plist")"
+          # ==================== 1. 深度清理（必须在签名前）====================
+          # 清除所有已存在的残留 _CodeSignature 目录——Tauri --no-sign
+          # 仍可能留下空壳签名目录，后续覆盖签名时哈希冲突导致
+          # CodeResources seal 破损，PluginKit 静态拉黑（Code 14 /
+          # 红色"需要更新" / 无崩溃日志）
+          find "$APP" -name "_CodeSignature" -type d -exec rm -rf {} +
+          echo "Removed all existing _CodeSignature directories"
 
-            # ================= 终极防拉黑清理与补全 =================
-            # PluginKit 静态拒载的最后几个嫌疑人：appex 内嵌未签名
-            # 动态库 / Info.plist 缺少 XPC! 声明 / Bundle ID 偏差 /
-            # 扩展点标识缺失。逐项强制清理与补全。
-
-            # 1. 删除 appex 内 Frameworks：App Extension 不允许
-            # 内嵌自己的 Swift 动态库，否则 PluginKit 静态拉黑
+          # 严禁插件自带动态库，必须使用主程序库
+          if [ -n "$APPEX" ]; then
             rm -rf "$APPEX/Frameworks"
             echo "Removed appex Frameworks (if any)"
-
-            # 2. 强制补全 CFBundlePackageType=XPC!（iOS 后台扩展必须）
-            /usr/libexec/PlistBuddy -c "Set :CFBundlePackageType XPC!" "$APPEX/Info.plist" 2>/dev/null || \
-            /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string XPC!" "$APPEX/Info.plist"
-            echo "AppEx PackageType: $(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$APPEX/Info.plist")"
-
-            # 3. 强制对齐 Bundle ID = 主 App ID + .PrismVPN
-            MAIN_BUNDLE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist")
-            /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $MAIN_BUNDLE.PrismVPN" "$APPEX/Info.plist" 2>/dev/null || true
-            echo "AppEx BundleID: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APPEX/Info.plist")"
-
-            # 4. 强制指定扩展点标识与入口类
-            /usr/libexec/PlistBuddy -c "Set :NSExtension:NSExtensionPointIdentifier com.apple.networkextension.packet-tunnel-provider" "$APPEX/Info.plist" 2>/dev/null || true
-            /usr/libexec/PlistBuddy -c "Set :NSExtension:NSExtensionPrincipalClass PrismVPN.PacketTunnelProvider" "$APPEX/Info.plist" 2>/dev/null || true
-            echo "AppEx NSExtension: $(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$APPEX/Info.plist") / $(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPrincipalClass' "$APPEX/Info.plist")"
-            # ========================================================
           fi
-          
-          echo "build tag: $BUILD_NUM"
 
-          echo "--- Frameworks as shipped by tauri --no-sign ---"
-          ls -1 "$APP/Frameworks" 2>/dev/null || echo "(empty)"
+          # 删除冗余的 Swift 库（仅保留 libswift_Concurrency.dylib
+          # 供 iOS<15 back-deploy；其余 15 个走 /usr/lib/swift）
+          find "$APP" -name "*.dylib.original" -delete -print
+          find "$APP/Frameworks" -maxdepth 1 -type f -name "libswift*.dylib" \
+            ! -name "libswift_Concurrency.dylib" -delete -print 2>/dev/null || true
+          if [ ! -f "$APP/Frameworks/libswift_Concurrency.dylib" ]; then
+            echo "::error::archive did not contain back-deploy libswift_Concurrency.dylib"
+            exit 1
+          fi
+          echo "--- Frameworks swift libs (expect only _Concurrency) ---"
+          ls -1 "$APP/Frameworks"/libswift*.dylib
 
-          # geoip/geosite 不进 bundle resources（实测 Tauri iOS 不会把
-          # resources 打进 .app，数组/映射写法均无效），而是编译期
-          # include_bytes! 内嵌进主二进制——上一步 Rust 构建成功即代表
-          # src-tauri/binaries/*.db 已就位并被内嵌。此处只校验源文件存在，
-          # 防止 CI 缓存/清理导致 fetch 步骤被跳过
+          # geoip/geosite 编译期内嵌校验
           for f in geoip.db geosite.db; do
             if [ ! -f "src-tauri/binaries/$f" ]; then
               echo "::error::$f missing from src-tauri/binaries (compile-time embedding source)"
@@ -470,52 +443,43 @@ jobs:
             echo "embedded source: $f ($(du -h "src-tauri/binaries/$f" | cut -f1))"
           done
 
-          # Swift 运行时解析（修复两轮闪退的最终方案，均由真机 .ips +
-          # 工具链实证确认）：
-          #
-          # 主二进制（Swift 静态库经 rustc/cc 链接）对 15 个 Swift 库的
-          # 引用是绝对路径 /usr/lib/swift/...（系统 dyld shared cache
-          # 直接提供，iOS 12.2 起 ABI 稳定），唯独 libswift_Concurrency
-          # 是 @rpath 引用——它只在 iOS 15+ 进入系统，Xcode 链接器已正确
-          # 把 back-deploy 副本放进 Frameworks（供 iOS 13/14 使用）。
-          #
-          # 真正缺失的是 swift 驱动默认注入、rustc 没带的 LC_RPATH
-          # /usr/lib/swift，且它必须排在 @executable_path/Frameworks
-          # 【之前】：新系统上 dyld 先命中系统库（back-deploy 版 Core 的
-          # checkVersion() 内置
-          # "This copy of libswiftCore.dylib requires an OS version prior
-          # to X.Y"，在 iOS 16.5 命中嵌入副本会立即 abort——这正是第三轮
-          # .ips 的 EXC_CRASH checkVersion）；老系统（<15）系统目录查无
-          # _Concurrency，再回退 Frameworks 嵌入副本，其 @rpath 依赖的
-          # Core 在 /usr/lib/swift 又能找到（12.2+ 系统自带）。
-          #
-          # 因此【不得】再额外嵌入 Core 等库：archive 自带的
-          # _Concurrency 是唯一需要保留的嵌入 Swift 库。
-          find "$APP" -name "*.dylib.original" -delete -print
-          find "$APP/Frameworks" -maxdepth 1 -type f -name "libswift*.dylib" \
-            ! -name "libswift_Concurrency.dylib" -delete -print
-          if [ ! -f "$APP/Frameworks/libswift_Concurrency.dylib" ]; then
-            echo "::error::archive did not contain back-deploy libswift_Concurrency.dylib"
-            exit 1
+          # ==================== 2. 属性对齐（必须在签名前）====================
+          APP_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          # 纯数字构建流水号（Apple 规范禁止 CFBundleVersion 含字母）
+          BUILD_NUM=${GITHUB_RUN_NUMBER:-$(date +%s)}
+          MAIN_BUNDLE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist")
+
+          # 主程序
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$APP/Info.plist"
+
+          if [ -n "$APPEX" ]; then
+            # 核心：大版本、小版本与主程序一字不差
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" "$APPEX/Info.plist" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUM" "$APPEX/Info.plist"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$APPEX/Info.plist" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $APP_VERSION" "$APPEX/Info.plist"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $MAIN_BUNDLE.PrismVPN" "$APPEX/Info.plist" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Set :MinimumOSVersion 14.0" "$APPEX/Info.plist" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string 14.0" "$APPEX/Info.plist"
+            /usr/libexec/PlistBuddy -c "Set :CFBundlePackageType XPC!" "$APPEX/Info.plist" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string XPC!" "$APPEX/Info.plist"
+            /usr/libexec/PlistBuddy -c "Set :NSExtension:NSExtensionPointIdentifier com.apple.networkextension.packet-tunnel-provider" "$APPEX/Info.plist" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Set :NSExtension:NSExtensionPrincipalClass PrismVPN.PacketTunnelProvider" "$APPEX/Info.plist" 2>/dev/null || true
+            echo "AppEx: ver=$BUILD_NUM pkg=XPC! id=$MAIN_BUNDLE.PrismVPN minOS=14.0"
           fi
-          echo "--- Frameworks swift libs (expect only _Concurrency) ---"
-          ls -1 "$APP/Frameworks"/libswift*.dylib
+          echo "build tag: $BUILD_NUM"
 
-          # ==================== RPATH 修复（主程序 + VPN 插件）====================
-          # 全部删除后按 /usr/lib/swift 优先重建，必须在重签之前修改
-          # （install_name_tool 会使旧签名失效）。
-          # 插件同样依赖 swift 运行时；若只修主程序，dyld 拉起 appex 时
-          # 找不到 libswiftCore 会瞬间崩溃，iOS 随即报 Code 14 /
-          # 红色“需要更新”。
-          APPEX=$(find "$APP/PlugIns" -maxdepth 1 -name "*.appex" -type d 2>/dev/null | head -1)
-          APPEX_EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APPEX/Info.plist" 2>/dev/null || true)
-
+          # ==================== 3. RPATH 重排与权限（必须在签名前）====================
+          # /usr/lib/swift 必须排在所有 @rpath 之前，否则 iOS 16.5 先
+          # 命中 back-deploy 嵌入副本触发 checkVersion abort
           TARGETS=("$APP/$EXEC")
           if [ -n "$APPEX" ] && [ -n "$APPEX_EXEC" ]; then
             TARGETS+=("$APPEX/$APPEX_EXEC")
           fi
 
           for bin in "${TARGETS[@]}"; do
+            chmod +x "$bin"
             echo "Rewriting rpaths for: $bin"
             RPATHS_RAW=$(mktemp)
             otool -l "$bin" | awk '
@@ -535,69 +499,93 @@ jobs:
             otool -l "$bin" | grep -A2 LC_RPATH | grep path
           done
 
-          # 收集 .app 内全部 Mach-O（主二进制 / Frameworks / 插件）
-          # 用临时文件列表而非 mapfile：macOS 自带 bash 3.2 没有 mapfile
+          # ==================== 4. 最终签名封印（必须在所有修改完成后）====================
+          # 所有文件修改（Info.plist / RPATH / dylib 删除）已完成，
+          # 现在对最终的文件状态统一签名，生成完好的 CodeResources seal
+          brew install ldid-procursus 2>/dev/null || brew install ldid || true
+          LDID=$(command -v ldid || true)
+          [ -n "$LDID" ] || { echo "::error::ldid not available"; exit 1; }
+
           LIST=$(mktemp)
           find "$APP" -type f | while IFS= read -r f; do
             if file "$f" | grep -q "Mach-O"; then echo "$f"; fi
           done > "$LIST"
           echo "mach-o count: $(wc -l < "$LIST" | tr -d ' ')"
 
-          # --no-sign 的主二进制不带任何 entitlements；TrollStore 安装时会注入
-          # 含 get-task-allow 的 fallback entitlements（模拟 Xcode 签名），
-          # iOS 16+ 因此要求开启“开发者模式”，未开启时 amfid 拒绝执行。
-          # 主二进制预签一份不含任何受限 entitlement 的 ad-hoc 签名；
-          # VPN 扩展二进制（PlugIns/*.appex）带 packet-tunnel-provider
-          # entitlement 重签；其余 Mach-O（含刚补入的 Swift dylib）无 entitlements。
-          # TrollStore 安装时仍会用 CoreTrust 漏洞重签整个 app，但不再要求
-          # 开发者模式，装完即开。
           while IFS= read -r bin; do
+            # 扩展内部二进制跳过 codesign，由外层 ldid 统一封印
+            if [[ "$bin" == *".appex/"* ]]; then
+              continue
+            fi
             if [ "$bin" = "$APP/$EXEC" ]; then
               codesign --force --sign - \
                 --entitlements "$PWD/src-tauri/TrollStore.entitlements.plist" \
                 "$bin"
             else
-              case "$bin" in
-                "$APP"/PlugIns/*.appex/*)
-                  # 扩展跳过 codesign——真机诊断证实 codesign ad-hoc 签名
-                  # 会被 TrollStore 重签管线剥掉（设备上无内嵌签名 → code=14），
-                  # 改由下方 ldid -S 统一签名（TrollStore 生态兼容格式）
-                  : ;;
-                *)
-                  codesign --force --sign - "$bin" ;;
-              esac
+              codesign --force --sign - "$bin"
             fi
           done < "$LIST"
 
-          # 对每个 appex【bundle】整体重签（Apple DTS：签 bundled
-          # 代码时应直接签 bundle，而非只签内部二进制）。上面的循环只
-          # 重签了 appex 内部二进制，CodeResources 对 geoip/geosite
-          # 资源与主二进制的 seal 会因此不一致；对 .appex 整体签名会
-          # 重新嵌入 entitlements 并重建资源 seal，pluginkit 才能正常
-          # 注册/加载扩展（否则 code=14 “VPN app not installed”）。
-          #
-          # 关键：改用 ldid -S 而非 codesign。真机诊断证实设备上 appex
-          # “无内嵌代码签名(LC_CODE_SIGNATURE 不可用)”——codesign 的
-          # ad-hoc 签名会被 TrollStore 重签管线剥掉，ldid -S 才是
-          # TrollStore 生态兼容的签名格式（Egern 等可用 App 即如此）。
-          brew install ldid-procursus 2>/dev/null || brew install ldid || true
-          LDID=$(command -v ldid || true)
-          [ -n "$LDID" ] || { echo "::error::ldid not available"; exit 1; }
-          find "$APP/PlugIns" -maxdepth 1 -name "*.appex" -type d \
-            | while IFS= read -r appex; do
-                # 直接对 .appex 包外壳签名：ldid 读取 Info.plist 定位
-                # 主二进制并签名，同时以 bundle 身份重建整个包的签名
-                # 上下文（TrollStore 生态标准做法），而非裸签 Mach-O
-                "$LDID" -S"$PWD/src-tauri/gen/apple/PrismVPN/PrismVPN.entitlements.plist" "$appex"
-                echo "--- appex ldid entitlements: $appex ---"
-                "$LDID" -e "$appex/$(plutil -extract CFBundleExecutable raw "$appex/Info.plist")" | head -30
-              done
+          # 对 appex bundle 整体重签（ldid -S 而非 codesign，
+          # TrollStore 生态兼容格式）
+          if [ -n "$APPEX" ]; then
+            "$LDID" -S"$PWD/src-tauri/gen/apple/PrismVPN/PrismVPN.entitlements.plist" "$APPEX"
+            echo "--- appex ldid entitlements: $APPEX ---"
+            "$LDID" -e "$APPEX/$APPEX_EXEC" | head -30
+          fi
 
           echo "--- main executable entitlements ---"
           codesign -d --entitlements - "$APP/$EXEC" 2>&1 | head -40 || true
 
-          # 硬校验：任一 Mach-O 仍带受限 entitlement 就让构建失败，
-          # 避免下次 Xcode/Tauri 升级悄悄带回 get-task-allow
+          # ==================== 硬校验（签名后只读检查）====================
+
+          # 0: VPN 扩展必须真的打进 PlugIns
+          if [ -z "$APPEX" ]; then
+            echo "::error::PrismVPN.appex missing from PlugIns"
+            exit 1
+          fi
+          EP=$(/usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" "$APPEX/Info.plist" 2>/dev/null || true)
+          if [ "$EP" != "com.apple.networkextension.packet-tunnel-provider" ]; then
+            echo "::error::appex NSExtensionPointIdentifier wrong: '$EP'"
+            exit 1
+          fi
+          # 扩展二进制必须内嵌 packet-tunnel-provider entitlement
+          "$LDID" -e "$APPEX/$APPEX_EXEC" 2>/dev/null \
+            | grep -q "packet-tunnel-provider" || {
+            echo "::error::appex binary lacks packet-tunnel-provider entitlement"
+            exit 1
+          }
+          # 主 App + 扩展都必须内嵌相同的 App Group
+          codesign -d --entitlements - "$APP/$EXEC" 2>/dev/null \
+            | grep -q "group.com.prism.proxy" || {
+            echo "::error::main app lacks application-groups entitlement"
+            exit 1
+          }
+          "$LDID" -e "$APPEX/$APPEX_EXEC" 2>/dev/null \
+            | grep -q "group.com.prism.proxy" || {
+            echo "::error::appex lacks application-groups entitlement"
+            exit 1
+          }
+          # Team Prefix 必须一致
+          "$LDID" -e "$APPEX/$APPEX_EXEC" 2>/dev/null \
+            | grep -q "TROLLTROLL.com.prism.proxy.PrismVPN" || {
+            echo "::error::appex application-identifier team prefix mismatches"
+            exit 1
+          }
+          echo "appex OK: point=$EP entitlement=present group=present team=matched"
+
+          # 1: /usr/lib/swift 必须是第一条 LC_RPATH
+          FIRST_RPATH=$(otool -l "$APP/$EXEC" | awk '
+            /cmd LC_RPATH/ { want=1; next }
+            want && /path / { sub(/^ *path /,""); sub(/ \(offset [0-9]+\).*/,""); print; exit }
+          ')
+          echo "first LC_RPATH: $FIRST_RPATH"
+          if [ "$FIRST_RPATH" != "/usr/lib/swift" ]; then
+            echo "::error::first LC_RPATH must be /usr/lib/swift (got '$FIRST_RPATH')"
+            exit 1
+          fi
+
+          # 2: 无受限 entitlement（避免要求开发者模式）
           bad=0
           while IFS= read -r bin; do
             ents=$(codesign -d --entitlements - "$bin" 2>/dev/null || true)
@@ -612,70 +600,7 @@ jobs:
           fi
           echo "no restricted entitlements; Developer Mode not required"
 
-          # 硬校验 0：VPN 扩展必须真的打进 PlugIns，否则主 App 启动隧道
-          # 时 NETunnelProviderManager 找不到 provider 直接报 -1
-          APPEX=$(find "$APP/PlugIns" -maxdepth 1 -name "*.appex" -type d 2>/dev/null | head -1)
-          if [ -z "$APPEX" ]; then
-            echo "::error::PrismVPN.appex missing from PlugIns (NETunnelProviderManager would fail with -1)"
-            exit 1
-          fi
-          echo "--- extension bundle check: $APPEX ---"
-          ls -la "$APPEX"
-          # 扩展的 Info.plist 必须声明 packet-tunnel-provider 扩展点
-          EP=$( /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" \
-            "$APPEX/Info.plist" 2>/dev/null || true )
-          if [ "$EP" != "com.apple.networkextension.packet-tunnel-provider" ]; then
-            echo "::error::appex NSExtensionPointIdentifier wrong: '$EP'"
-            exit 1
-          fi
-          # 扩展二进制必须内嵌 packet-tunnel-provider entitlement
-          # 注意：扩展已由 ldid 签名，codesign 可能读不出 entitlements，
-          # 这里必须用 ldid -e 读取
-          APP_EXEC=$( /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APPEX/Info.plist" )
-          "$LDID" -e "$APPEX/$APP_EXEC" 2>/dev/null \
-            | grep -q "packet-tunnel-provider" || {
-            echo "::error::appex binary lacks packet-tunnel-provider entitlement"
-            exit 1
-          }
-          # 主 App + 扩展都必须内嵌相同的 App Group（共享配置文件）
-          codesign -d --entitlements - "$APP/$EXEC" 2>/dev/null \
-            | grep -q "group.com.prism.proxy" || {
-            echo "::error::main app lacks com.apple.security.application-groups entitlement"
-            exit 1
-          }
-          "$LDID" -e "$APPEX/$APP_EXEC" 2>/dev/null \
-            | grep -q "group.com.prism.proxy" || {
-            echo "::error::appex binary lacks application-groups entitlement"
-            exit 1
-          }
-          # Team Prefix 必须与主 App 相同（code=14 “Developer must update”
-          # 的根因回归保护）：appex application-identifier 的前缀必须
-          # 与主 App 的 TROLLTROLL 一致，否则 pluginkit 拒绝关联宿主
-          "$LDID" -e "$APPEX/$APP_EXEC" 2>/dev/null \
-            | grep -q "TROLLTROLL.com.prism.proxy.PrismVPN" || {
-            echo "::error::appex application-identifier team prefix mismatches main app (would cause NEVPN code=14)"
-            exit 1
-          }
-          echo "appex OK: point=$EP entitlement=present group=present team=matched"
-
-          # 硬校验 1：/usr/lib/swift 必须是【第一条】LC_RPATH，
-          # 否则 iOS 16.5 会先加载 back-deploy 嵌入副本触发 checkVersion abort
-          FIRST_RPATH=$(otool -l "$APP/$EXEC" | awk '
-            /cmd LC_RPATH/ { want=1; next }
-            want && /path / { sub(/^ *path /,""); sub(/ \(offset [0-9]+\).*/,""); print; exit }
-          ')
-          echo "first LC_RPATH: $FIRST_RPATH"
-          if [ "$FIRST_RPATH" != "/usr/lib/swift" ]; then
-            echo "::error::first LC_RPATH must be /usr/lib/swift (got '$FIRST_RPATH')"
-            exit 1
-          fi
-
-          # 硬校验 2：每个 @rpath/libswift* 引用必须三选一——
-          #  a) 命中嵌入（仅允许 Xcode archive 自带的 _Concurrency，iOS<15 兜底）；
-          #  b) 命中 SDK stub（iPhoneOS.sdk/usr/lib/swift 下 .tbd/.dylib）；
-          #  c) dyld shared cache 常驻库：iOS 12.2 起内置于系统 /usr/lib/swift，
-          #     Xcode 16.x SDK 目录里连 .tbd 都没有（已在 CI 全 Xcode find 验证），
-          #     第一条 rpath=/usr/lib/swift 保证运行时命中系统新副本。
+          # 3: Swift 运行时引用解析
           SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
           SYS_SWIFT="$SDK_PATH/usr/lib/swift"
           echo "sdk swift stub dir: $SYS_SWIFT ($(ls -1 "$SYS_SWIFT" 2>/dev/null | wc -l | tr -d ' ') entries)"
@@ -715,18 +640,15 @@ jobs:
           fi
           echo "all referenced Swift runtime libraries resolve (system-first rpath)"
 
-          APP_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          OUT="$PWD/Prism-$APP_VERSION-TrollStore.ipa"
-          rm -f "$OUT"
-
-          # install_name_tool / ldid 等二进制改写可能丢失 +x；
-          # zip 不强制要求权限位，但 iOS 安装后无执行权限的可执行文件
-          # 会导致扩展无法加载（code=14）或系统误判“需要更新”
+          # ==================== 5. 压缩出包 ====================
+          # install_name_tool / ldid 可能丢失 +x，zip 前强制恢复
           chmod +x "$APP/$EXEC"
           find "$APP/PlugIns" -maxdepth 1 -name "*.appex" -type d | while IFS= read -r appex; do
             chmod +x "$appex/$(plutil -extract CFBundleExecutable raw "$appex/Info.plist")"
           done
 
+          OUT="$PWD/Prism-$APP_VERSION-TrollStore.ipa"
+          rm -f "$OUT"
           (cd "$WORK" && zip -qry "$OUT" Payload)
           echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
