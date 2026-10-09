@@ -591,24 +591,27 @@ jobs:
             exit 1
           fi
           # 扩展二进制必须内嵌 packet-tunnel-provider entitlement
-          "$LDID" -e "$APPEX/$APPEX_EXEC" 2>/dev/null \
+          # 注意：codesign -d --entitlements - 的 plist 输出在 stderr，
+          # 必须 2>&1 合并后再 grep；旧代码用 2>/dev/null + $LDID（ldid
+          # 已移除，变量为空）导致命令不存在、grep 误报"lacks entitlement"。
+          codesign -d --entitlements - "$APPEX/$APPEX_EXEC" 2>&1 \
             | grep -q "packet-tunnel-provider" || {
             echo "::error::appex binary lacks packet-tunnel-provider entitlement"
             exit 1
           }
           # 主 App + 扩展都必须内嵌相同的 App Group
-          codesign -d --entitlements - "$APP/$EXEC" 2>/dev/null \
+          codesign -d --entitlements - "$APP/$EXEC" 2>&1 \
             | grep -q "group.com.prism.proxy" || {
             echo "::error::main app lacks application-groups entitlement"
             exit 1
           }
-          "$LDID" -e "$APPEX/$APPEX_EXEC" 2>/dev/null \
+          codesign -d --entitlements - "$APPEX/$APPEX_EXEC" 2>&1 \
             | grep -q "group.com.prism.proxy" || {
             echo "::error::appex lacks application-groups entitlement"
             exit 1
           }
           # Team Prefix 必须一致
-          "$LDID" -e "$APPEX/$APPEX_EXEC" 2>/dev/null \
+          codesign -d --entitlements - "$APPEX/$APPEX_EXEC" 2>&1 \
             | grep -q "TROLLTROLL.com.prism.proxy.PrismVPN" || {
             echo "::error::appex application-identifier team prefix mismatches"
             exit 1
@@ -629,7 +632,7 @@ jobs:
           # 2: 无受限 entitlement（避免要求开发者模式）
           bad=0
           while IFS= read -r bin; do
-            ents=$(codesign -d --entitlements - "$bin" 2>/dev/null || true)
+            ents=$(codesign -d --entitlements - "$bin" 2>&1 || true)
             if echo "$ents" | grep -qE 'get-task-allow|task_for_pid-allow|com\.apple\.private\.cs\.debugger|com\.apple\.system-task-ports'; then
               echo "::error file=${bin#$PWD/}::restricted developer-mode entitlement present"
               bad=1
