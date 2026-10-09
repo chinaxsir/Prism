@@ -4,6 +4,7 @@
 
 import Foundation
 import NetworkExtension
+import Security
 
 /// 扩展 Bundle ID：优先取 App 包 PlugIns 内【实际存在】的
 /// packet-tunnel-provider appex 的真实 CFBundleIdentifier（防构建侧
@@ -381,7 +382,15 @@ final class PrismTunnelController {
         }
     }
 
-    /// 通过 LSApplicationWorkspace 私有 API 注册 appex
+    /// 通过 LSApplicationWorkspace 私有 API 注册 app 及其 appex。
+    ///
+    /// TrollStore root helper（RootHelper/uicache.m 的 registerPath）证实，
+    /// 注册 app 与其 PlugIns 的唯一正确 API 是：
+    ///   -[LSApplicationWorkspace registerApplicationDictionary:]
+    /// 该方法接收一个描述完整的字典；appex 通过字典里的
+    /// `_LSBundlePlugins` 键（每个 plugin 标 ApplicationType=PluginKitPlugin）
+    /// 一并注册到 pluginkit。旧代码猜的 registerApplicationWithBundleID:atURL:
+    /// 在 iOS 上并不存在（诊断"bid:url 不可响应"）。
     private static func tryLSApplicationWorkspace(appexURL: URL) {
         guard let wsAnyClass = NSClassFromString("LSApplicationWorkspace")
         else {
@@ -389,12 +398,9 @@ final class PrismTunnelController {
             lsAppWorkspaceResult = "class未找到"
             return
         }
-        // NSClassFromString 返回 AnyClass（元类型），Swift 在元类型上
-        // 直接调用 perform(_:) 会报「no exact matches」「takeUnretainedValue
-        // cannot be resolved without contextual type」。ObjC 类对象本身
-        // 是 NSObject 实例（根元类继承自 NSObject），cast 后即可调用。
+        // NSClassFromString 返回 AnyClass（元类型），cast AnyObject 后
+        // 才能调用 perform/responds（根元类继承自 NSObject）。
         let wsClass = wsAnyClass as AnyObject
-        // [LSApplicationWorkspace defaultWorkspace]
         let defaultSel = NSSelectorFromString("defaultWorkspace")
         guard wsClass.responds(to: defaultSel),
               let workspace = wsClass.perform(defaultSel)?.takeUnretainedValue()
@@ -403,27 +409,114 @@ final class PrismTunnelController {
             lsAppWorkspaceResult = "defaultWorkspace不可用"
             return
         }
-        // NSObject.perform(_:with:with:) 仅支持 2 个 with: 参；
-        // 4 参方法 registerApplication:atURL:options:error: 无法用 perform 调用
-        //（Swift NSInvocation 不友好，objc_msgSend 4 参签名编译脆弱），
-        // 故只用 2 参 registerApplicationWithBundleID:atURL: 私有方法，
-        // 这也是 TrollStore 安装时调用的同款 API。
-        let bid2Sel = NSSelectorFromString("registerApplicationWithBundleID:atURL:")
-        guard workspace.responds(to: bid2Sel) else {
-            NSLog("[PrismVPN] LSAppWorkspace registerApp(bid:url:) selector not responds")
-            lsAppWorkspaceResult = "bid:url 不可响应"
+
+        let regSel = NSSelectorFromString("registerApplicationDictionary:")
+        guard workspace.responds(to: regSel) else {
+            NSLog("[PrismVPN] registerApplicationDictionary: not responds")
+            lsAppWorkspaceResult = "regDict不可响应"
             return
         }
-        if let result = workspace.perform(bid2Sel,
-                                          with: extensionBundleIdentifier as NSString,
-                                          with: appexURL as NSURL) {
-            let ret = result.takeUnretainedValue()
-            lsAppWorkspaceResult = "bid:url ret=\(ret)"
-            NSLog("[PrismVPN] LSAppWorkspace registerApp(bid:url:) ret=\(ret)")
-        } else {
-            lsAppWorkspaceResult = "bid:url nil"
-            NSLog("[PrismVPN] LSAppWorkspace registerApp(bid:url:) returned nil")
+
+        let mainBid = Bundle.main.bundleIdentifier ?? "com.prism.proxy"
+        let appexBid = extensionBundleIdentifier
+        let mainEnt = readOwnEntitlements()
+        let appexEnt = knownAppexEntitlements()
+
+        // App Group 共享容器（主 App 与 appex 同一组）
+        var groupContainers = [String: String]()
+        if let gURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: prismAppGroupID) {
+            groupContainers[prismAppGroupID] = gURL.path
         }
+
+        // ---- appex（PluginKitPlugin）注册字典 ----
+        var plugin: [String: Any] = [
+            "ApplicationType": "PluginKitPlugin",
+            "CFBundleIdentifier": appexBid,
+            "CodeInfoIdentifier": appexBid,
+            "CompatibilityState": 0,
+            "IsContainerized": true,
+            "Path": appexURL.path,
+            "PluginOwnerBundleID": mainBid,
+            "SignerOrganization": "Apple Inc.",
+            "SignatureVersion": 132352,
+            "SignerIdentity": "Apple iPhone OS Application Signing",
+            "IsAdHocSigned": true,
+            "Entitlements": appexEnt,
+        ]
+        if !groupContainers.isEmpty {
+            plugin["HasAppGroupContainers"] = true
+            plugin["GroupContainers"] = groupContainers
+        }
+
+        // ---- 主 App 注册字典 ----
+        var dict: [String: Any] = [
+            "ApplicationType": "User",
+            "CFBundleIdentifier": mainBid,
+            "CodeInfoIdentifier": mainBid,
+            "CompatibilityState": 0,
+            "IsContainerized": true,
+            "Container": NSHomeDirectory(),
+            "IsDeletable": true,
+            "Path": Bundle.main.bundlePath,
+            "SignerOrganization": "Apple Inc.",
+            "SignatureVersion": 132352,
+            "SignerIdentity": "Apple iPhone OS Application Signing",
+            "IsAdHocSigned": true,
+            "LSInstallType": 1,
+            "HasMIDBasedSINF": 0,
+            "MissingSINF": 0,
+            "FamilyID": 0,
+            "IsOnDemandInstallCapable": 0,
+            "Entitlements": mainEnt,
+            "_LSBundlePlugins": [appexBid: plugin],
+        ]
+        if !groupContainers.isEmpty {
+            dict["HasAppGroupContainers"] = true
+            dict["GroupContainers"] = groupContainers
+        }
+
+        // registerApplicationDictionary: 返回 BOOL（非对象），perform 无法
+        // 可靠取回，用 1 参 objc_msgSend（签名简单安全）。
+        typealias RegFn = @convention(c) (AnyObject, Selector, NSDictionary) -> Bool
+        let fn = unsafeBitCast(objc_msgSend, to: RegFn.self)
+        let ok = fn(workspace, regSel, dict as NSDictionary)
+        lsAppWorkspaceResult = "regDict=\(ok)"
+        NSLog("[PrismVPN] registerApplicationDictionary: ret=\(ok)")
+    }
+
+    /// 用 SecTask 读取【本进程】真实签名中的关键 entitlements，
+    /// 供注册字典使用（避免硬编码与实际签名不符）。
+    private static func readOwnEntitlements() -> [String: Any] {
+        var out = [String: Any]()
+        guard let task = SecTaskCreateFromSelf(nil) else { return out }
+        let keys = [
+            "application-identifier",
+            "com.apple.developer.team-identifier",
+            "com.apple.developer.networking.networkextension",
+            "com.apple.security.application-groups",
+            "keychain-access-groups",
+        ]
+        for key in keys {
+            if let v = SecTaskCopyValueForEntitlement(task, key as CFString, nil) {
+                out[key] = v
+            }
+        }
+        return out
+    }
+
+    /// appex 应有的 entitlements（与 CI 签入的 PrismVPN.entitlements.plist
+    /// 一致）。appex 在独立进程，SecTask 只能读本进程，故按已知值构造。
+    private static func knownAppexEntitlements() -> [String: Any] {
+        let appexBid = extensionBundleIdentifier
+        return [
+            "application-identifier": "TROLLTROLL.\(appexBid)",
+            "com.apple.developer.team-identifier": "TROLLTROLL",
+            "com.apple.developer.networking.networkextension":
+                ["packet-tunnel-provider"],
+            "com.apple.security.application-groups": [prismAppGroupID],
+            "keychain-access-groups": ["TROLLTROLL.\(appexBid)"],
+        ]
     }
 
     /// 通过 posix_spawn 调用 pluginkit -a 强制注册扩展
