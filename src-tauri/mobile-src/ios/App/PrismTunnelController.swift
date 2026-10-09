@@ -4,6 +4,7 @@
 
 import Foundation
 import NetworkExtension
+import Security
 
 /// 扩展 Bundle ID：优先取 App 包 PlugIns 内【实际存在】的
 /// packet-tunnel-provider appex 的真实 CFBundleIdentifier（防构建侧
@@ -144,8 +145,11 @@ final class PrismTunnelController {
         return nil
     }
 
-    /// 对 appex bundle 做系统级完整性预检（不加载扩展进程）：
-    /// preflightCheck 会校验代码签名与资源 seal，失败时返回系统真实理由
+    /// 对 appex bundle 做系统级完整性预检（不加载/不启动扩展进程），
+    /// 失败时返回系统真实理由。
+    /// Bundle 上并不存在 preflightCheck 方法（CI xcodebuild 编译错误）；
+    /// 正确的等价 API 是 Security 框架的 SecStaticCode：只静态解析并校验
+    /// 代码签名与资源 seal，不执行任何代码。
     static func diagnoseAppexPreflight() -> String {
         guard let pluginsURL = Bundle.main.builtInPlugInsURL,
               let entries = try? FileManager.default.contentsOfDirectory(
@@ -153,12 +157,35 @@ final class PrismTunnelController {
               let appexName = entries.first(where: { $0.hasSuffix(".appex") }),
               let bundle = Bundle(url: pluginsURL.appendingPathComponent(appexName))
         else { return "appex bundle 不可定位" }
-        do {
-            try bundle.preflightCheck()
-            return "ok"
-        } catch {
-            return describe(error: error)
+
+        var staticCode: SecStaticCode?
+        let createStatus = SecStaticCodeCreateWithPath(
+            bundle.bundleURL as CFURL,
+            SecCSFlags(rawValue: 0),
+            &staticCode
+        )
+        guard createStatus == errSecSuccess, let code = staticCode else {
+            let reason = SecCopyErrorMessageString(createStatus, nil)
+                .map { $0 as String } ?? ""
+            return "SecStaticCodeCreate 失败: \(createStatus) \(reason)"
         }
+
+        // basic 校验：签名完整性 + 资源 seal；额外校验全部架构与嵌套代码，
+        // 覆盖 appex 内可能内嵌的 dylib
+        let flags = SecCSFlags(rawValue:
+            kSecCSBasicValidateOnly | kSecCSCheckAllArchitectures | kSecCSCheckNestedCode)
+        var unmanagedError: Unmanaged<CFError>?
+        let status = SecStaticCodeCheckValidity(code, flags, &unmanagedError)
+
+        if status == errSecSuccess {
+            return "ok"
+        }
+        if let cfError = unmanagedError?.takeRetainedValue() {
+            return describe(error: cfError as Error)
+        }
+        let reason = SecCopyErrorMessageString(status, nil)
+            .map { $0 as String } ?? ""
+        return "SecStaticCodeCheckValidity 失败: \(status) \(reason)"
     }
 
     /// 解析 appex 可执行文件内嵌代码签名（CS Superblob），报告
