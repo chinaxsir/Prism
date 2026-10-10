@@ -294,11 +294,15 @@ final class PrismTunnelController {
     /// 对 appex【整个 bundle 目录】做不启动扩展的静态校验。这与 pkd /
     /// pluginkit 注册扩展时所做的校验是同一套代码，因此能给出真机上的
     /// 权威结论：
-    /// 输出三段区分根因：
+    /// 输出四段区分根因：
     ///   bnd=整包校验（pkd 注册同款）；bin=直接校验二进制文件；
-    ///   exe=安装后 CFBundleExecutable 实际值/文件是否存在。
+    ///   exe=安装后 CFBundleExecutable 实际值/文件是否存在；
+    ///   app=阳性对照：主 App 二进制同款校验。
     ///   bin=valid 而 bnd=invalid → bundle 结构问题（exe 键/seal）；
-    ///   两者都 invalid          → 二进制签名被安装管线（ldid/ChOma）破坏。
+    ///   两者都 invalid 且 app=valid → appex 二进制签名被安装管线破坏；
+    ///   app 与 appex 同错 → 该校验根本不认 ChOma bypass 签名，
+    ///   static= 整段是噪声，Code 14 根因在注册层（开发者模式 /
+    ///   pkd 未注册）而非签名，应立即转向注册层排查。
     /// 这些符号不在公开 SDK 头里（Swift 直接写会"cannot find"），但
     /// TrollStore 自己（Shared/TSUtil.m）就在设备上直接链接使用它们，
     /// 故运行时 dlsym 一定能取到。
@@ -376,6 +380,12 @@ final class PrismTunnelController {
         let bnd = checkOne(appexURL)
         let bin = execURL.map { checkOne($0) } ?? "无二进制"
 
+        // 阳性对照：主 App 与 appex 走同一 TrollStore 安装管线
+        //（CI codesign → ldid 重签 → ChOma bypass）。若 app 与 appex
+        // 返回相同错误码，说明此校验不认 ChOma bypass 签名，
+        // static= 整段无诊断价值；只有 app=valid 时 bnd/bin 才可作判据。
+        let app = Bundle.main.executableURL.map { checkOne($0) } ?? "无路径"
+
         // identifier/team/flags（经 bundle）
         var extra = ""
         var infoCodeRef: CFTypeRef?
@@ -393,7 +403,7 @@ final class PrismTunnelController {
         }
         // 注意：Swift ARC 自动管理 CF 对象，不能也无需手动 CFRelease。
 
-        return "bnd=\(bnd) bin=\(bin) \(exeInfo)\(extra)"
+        return "bnd=\(bnd) bin=\(bin) app=\(app) \(exeInfo)\(extra)"
     }
 
     /// 打包诊断：列出 PlugIns 下每个 appex 的 bundle ID 与扩展点。
