@@ -319,12 +319,12 @@ final class PrismTunnelController {
               let infoP = dlsym(sec, "SecCodeCopySigningInformation")
         else { return "SecStaticCode符号未找到" }
 
-        // 精确 ABI：OSStatus 即 Int32。
-        // 注意 SecRequirementRef 是一个 CF 类型的指针，必须用 OpaquePointer?
-        // 而不是 CFTypeRef? 传 nil（CFTypeRef? 的 ABI 在某些 SDK 下不等价，
-        // 会让 CheckValidity 把"无 requirement"误判为参数错误 errSecParam=-50）。
+        // 精确 ABI：OSStatus 即 Int32。所有 CF 对象参数统一用 CFTypeRef?
+        // （OpaquePointer? 在 Swift ARM64 ABI 下与 CFTypeRef? 等价；但对
+        //  CFDictionary attributes 必须用 CFTypeRef?，否则 Optional<CFDictionary>
+        //  的 ABI 与 Optional<CFTypeRef> 不一致会导致调用约定错）。
         typealias CreateFn = @convention(c) (
-            CFURL, UInt32, CFDictionary?,
+            CFURL, UInt32, CFTypeRef?,
             UnsafeMutablePointer<CFTypeRef?>
         ) -> OSStatus
         typealias CheckFn = @convention(c) (
@@ -333,11 +333,11 @@ final class PrismTunnelController {
         // SecStaticCodeCheckValidityWithErrors(code, flags, requirement, &cfError)
         typealias CheckErrFn = @convention(c) (
             OpaquePointer, UInt32, OpaquePointer?,
-            UnsafeMutablePointer<CFError?>
+            UnsafeMutablePointer<CFErrorRef?>
         ) -> OSStatus
         typealias InfoFn = @convention(c) (
             OpaquePointer, UInt32,
-            UnsafeMutablePointer<CFDictionary?>
+            UnsafeMutablePointer<CFTypeRef?>
         ) -> OSStatus
 
         // 指向 bundle【目录】：Security 会解析到主二进制并同时校验
@@ -356,11 +356,12 @@ final class PrismTunnelController {
 
         // 若失败，再用 CheckValidityWithErrors 拿 CFError 看具体原因。
         var errDetail = ""
-        if vs != 0, let ce = checkErrP {
-            let checkErr = unsafeBitCast(ce, to: CheckErrFn.self)
-            var cfErr: CFError?
+        if vs != 0 {
+            let checkErr = unsafeBitCast(checkErrP, to: CheckErrFn.self)
+            var cfErr: CFErrorRef?
             let vs2 = checkErr(codePtr, 0, nil, &cfErr)
             errDetail = " errcode2=\(vs2)"
+            // CFErrorRef 可无条件桥接到 NSError
             if let e = cfErr {
                 let ns = e as NSError
                 errDetail += " errDomain=\(ns.domain) errCode=\(ns.code) errMsg=\(ns.localizedDescription)"
@@ -369,10 +370,10 @@ final class PrismTunnelController {
 
         // 顺带读回 identifier / team / flags，便于交叉验证
         let info = unsafeBitCast(infoP, to: InfoFn.self)
-        var infoDict: CFDictionary?
-        let infoStatus = info(codePtr, 0, &infoDict)
+        var infoDictRef: CFTypeRef?
+        let infoStatus = info(codePtr, 0, &infoDictRef)
         var extra = ""
-        if infoStatus == 0, let d = infoDict {
+        if infoStatus == 0, let d = infoDictRef {
             let nd = d as NSDictionary
             if let ident = nd["identifier"] { extra += " id=\(ident)" }
             if let team = nd["teamidentifier"] { extra += " team=\(team)" }
