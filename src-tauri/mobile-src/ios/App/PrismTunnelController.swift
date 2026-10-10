@@ -378,9 +378,11 @@ final class PrismTunnelController {
         let infoStatus = info(codePtr, 0, &infoDictRef)
         var extra = ""
         if infoStatus == 0, let d = infoDictRef {
-            // CFTypeRef -> CFDictionary -> NSDictionary
-            if let cfDict = d as? CFDictionary {
-                let nd = cfDict as NSDictionary
+            // SecCodeCopySigningInformation 固定返回 CFDictionary，
+            // 直接桥接到 NSDictionary（CFDictionary 与 NSDictionary 是
+            // toll-free bridged）。
+            if CFGetTypeID(d) == CFDictionaryGetTypeID() {
+                let nd = d as! NSDictionary
                 if let ident = nd["identifier"] { extra += " id=\(ident)" }
                 if let team = nd["teamidentifier"] { extra += " team=\(team)" }
                 if let flags = nd["flags"] { extra += " flags=\(flags)" }
