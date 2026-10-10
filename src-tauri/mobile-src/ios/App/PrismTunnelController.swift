@@ -294,10 +294,11 @@ final class PrismTunnelController {
     /// 对 appex【整个 bundle 目录】做不启动扩展的静态校验。这与 pkd /
     /// pluginkit 注册扩展时所做的校验是同一套代码，因此能给出真机上的
     /// 权威结论：
-    ///   staticCheck=valid     → 签名与 seal 都合法，问题不在静态校验，
-    ///                          而在 pkd/lsd 注册、容器或开发者模式；
-    ///   staticCheck=invalid(N)→ 系统真的拒绝了该 appex，N 为 OSStatus，
-    ///                          可据此精确定位（资源 seal 坏、签名格式错等）。
+    /// 输出三段区分根因：
+    ///   bnd=整包校验（pkd 注册同款）；bin=直接校验二进制文件；
+    ///   exe=安装后 CFBundleExecutable 实际值/文件是否存在。
+    ///   bin=valid 而 bnd=invalid → bundle 结构问题（exe 键/seal）；
+    ///   两者都 invalid          → 二进制签名被安装管线（ldid/ChOma）破坏。
     /// 这些符号不在公开 SDK 头里（Swift 直接写会"cannot find"），但
     /// TrollStore 自己（Shared/TSUtil.m）就在设备上直接链接使用它们，
     /// 故运行时 dlsym 一定能取到。
@@ -309,28 +310,35 @@ final class PrismTunnelController {
         else { return "appex未定位" }
         let appexURL = pluginsURL.appendingPathComponent(appexName)
 
+        // 读取安装后 Info.plist 的 CFBundleExecutable 实际值并核对文件存在。
+        // 若该键与实际二进制名不匹配，SecStaticCode 对 bundle 会解析不到
+        // 主二进制而误报"未签名"（-67061），这是必须排除的结构问题。
+        var exeInfo = "exe=plist读取失败"
+        var execURL: URL?
+        if let plist = NSDictionary(contentsOf: appexURL),
+           let exeName = plist["CFBundleExecutable"] as? String {
+            let candidate = appexURL.appendingPathComponent(exeName)
+            let exists = FileManager.default.fileExists(atPath: candidate.path)
+            exeInfo = "exe=\(exeName)/\(exists ? "ok" : "缺失")"
+            if exists { execURL = candidate }
+        }
+
         guard let sec = dlopen(
             "/System/Library/Frameworks/Security.framework/Security", 1
         ) else { return "Security dlopen失败" }
 
         guard let createP = dlsym(sec, "SecStaticCodeCreateWithPathAndAttributes"),
-              let checkP = dlsym(sec, "SecStaticCodeCheckValidity"),
               let checkErrP = dlsym(sec, "SecStaticCodeCheckValidityWithErrors"),
               let infoP = dlsym(sec, "SecCodeCopySigningInformation")
         else { return "SecStaticCode符号未找到" }
 
-        // 精确 ABI：OSStatus 即 Int32。所有 CF 对象参数统一用 CFTypeRef?
-        // （OpaquePointer? 在 Swift ARM64 ABI 下与 CFTypeRef? 等价；但对
-        //  CFDictionary attributes 必须用 CFTypeRef?，否则 Optional<CFDictionary>
-        //  的 ABI 与 Optional<CFTypeRef> 不一致会导致调用约定错）。
+        // 精确 ABI：OSStatus 即 Int32。CF 对象参数统一 CFTypeRef?/OpaquePointer。
+        // 只用 CheckValidityWithErrors（带 CFError 输出），它已验证能给出
+        // 真实结论（如 -67061 unsigned），不再用 ABI 敏感的 CheckValidity。
         typealias CreateFn = @convention(c) (
             CFURL, UInt32, CFTypeRef?,
             UnsafeMutablePointer<CFTypeRef?>
         ) -> OSStatus
-        typealias CheckFn = @convention(c) (
-            OpaquePointer, UInt32, OpaquePointer?
-        ) -> OSStatus
-        // SecStaticCodeCheckValidityWithErrors(code, flags, requirement, &cfError)
         typealias CheckErrFn = @convention(c) (
             OpaquePointer, UInt32, OpaquePointer?,
             UnsafeMutablePointer<CFError?>
@@ -339,49 +347,44 @@ final class PrismTunnelController {
             OpaquePointer, UInt32,
             UnsafeMutablePointer<CFTypeRef?>
         ) -> OSStatus
-
-        // 指向 bundle【目录】：Security 会解析到主二进制并同时校验
-        // _CodeSignature/CodeResources 资源封印，等价于 pkd 的整包校验。
-        var codeRef: CFTypeRef?
         let create = unsafeBitCast(createP, to: CreateFn.self)
-        let cs = create(appexURL as CFURL, 0, nil, &codeRef)
-        guard cs == 0, let code = codeRef else {
-            return "staticCreate失败=\(cs)"
-        }
-        let codePtr = unsafeBitCast(code, to: OpaquePointer.self)
+        let checkErr = unsafeBitCast(checkErrP, to: CheckErrFn.self)
+        let info = unsafeBitCast(infoP, to: InfoFn.self)
 
-        // 先用 CheckValidity，第三参 requirement=nil（OpaquePointer?）。
-        let check = unsafeBitCast(checkP, to: CheckFn.self)
-        let vs = check(codePtr, 0, nil)
-
-        // 若失败，再用 CheckValidityWithErrors 拿 CFError 看具体原因。
-        var errDetail = ""
-        if vs != 0 {
-            let checkErr = unsafeBitCast(checkErrP, to: CheckErrFn.self)
+        // 对单个 URL（bundle 目录或二进制文件）做静态校验并返回可读结论
+        func checkOne(_ url: URL) -> String {
+            var ref: CFTypeRef?
+            let cs = create(url as CFURL, 0, nil, &ref)
+            guard cs == 0, let code = ref else { return "createErr(\(cs))" }
+            let ptr = unsafeBitCast(code, to: OpaquePointer.self)
             var cfErr: CFError?
-            let vs2 = checkErr(codePtr, 0, nil, &cfErr)
-            errDetail = " errcode2=\(vs2)"
-            // CFError 与 NSError 是 toll-free bridged，但 Swift 不允许
-            // 直接 as NSError；取其 CFErrorGetDomain/Code/CopyFailureReason
-            // 等价地拿到可读描述。
+            let vs = checkErr(ptr, 0, nil, &cfErr)
+            if vs == 0 { return "valid" }
+            var s = "invalid(\(vs))"
             if let e = cfErr {
                 let domain = CFErrorGetDomain(e) as String
-                let code = CFErrorGetCode(e)
-                let reason = CFErrorCopyFailureReason(e) as String?
-                errDetail += " errDomain=\(domain) errCode=\(code) errMsg=\(reason ?? "")"
+                let ecode = CFErrorGetCode(e)
+                let reason = CFErrorCopyFailureReason(e) as String? ?? ""
+                s += " \(domain)/\(ecode) \(reason)"
             }
+            return s
         }
 
-        // 顺带读回 identifier / team / flags，便于交叉验证
-        let info = unsafeBitCast(infoP, to: InfoFn.self)
-        var infoDictRef: CFTypeRef?
-        let infoStatus = info(codePtr, 0, &infoDictRef)
+        // bnd=整包校验（pkd 注册时同款）；bin=直接校验二进制文件。
+        // bin=valid 而 bnd=invalid → bundle 结构问题（exe 键/seal）；
+        // 两者都 invalid → 二进制签名本身被安装管线破坏。
+        let bnd = checkOne(appexURL)
+        let bin = execURL.map { checkOne($0) } ?? "无二进制"
+
+        // identifier/team/flags（经 bundle）
         var extra = ""
-        if infoStatus == 0, let d = infoDictRef {
-            // SecCodeCopySigningInformation 固定返回 CFDictionary，
-            // 直接桥接到 NSDictionary（CFDictionary 与 NSDictionary 是
-            // toll-free bridged）。
-            if CFGetTypeID(d) == CFDictionaryGetTypeID() {
+        var infoCodeRef: CFTypeRef?
+        if create(appexURL as CFURL, 0, nil, &infoCodeRef) == 0,
+           let infoCode = infoCodeRef {
+            let ptr = unsafeBitCast(infoCode, to: OpaquePointer.self)
+            var infoDictRef: CFTypeRef?
+            if info(ptr, 0, &infoDictRef) == 0, let d = infoDictRef,
+               CFGetTypeID(d) == CFDictionaryGetTypeID() {
                 let nd = d as! NSDictionary
                 if let ident = nd["identifier"] { extra += " id=\(ident)" }
                 if let team = nd["teamidentifier"] { extra += " team=\(team)" }
@@ -390,8 +393,7 @@ final class PrismTunnelController {
         }
         // 注意：Swift ARC 自动管理 CF 对象，不能也无需手动 CFRelease。
 
-        let verdict = vs == 0 ? "valid" : "invalid(\(vs))"
-        return "staticCheck=\(verdict)\(errDetail)\(extra)"
+        return "bnd=\(bnd) bin=\(bin) \(exeInfo)\(extra)"
     }
 
     /// 打包诊断：列出 PlugIns 下每个 appex 的 bundle ID 与扩展点。
