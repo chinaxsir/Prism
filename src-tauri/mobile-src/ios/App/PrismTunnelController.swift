@@ -333,7 +333,7 @@ final class PrismTunnelController {
         // SecStaticCodeCheckValidityWithErrors(code, flags, requirement, &cfError)
         typealias CheckErrFn = @convention(c) (
             OpaquePointer, UInt32, OpaquePointer?,
-            UnsafeMutablePointer<CFErrorRef?>
+            UnsafeMutablePointer<CFError?>
         ) -> OSStatus
         typealias InfoFn = @convention(c) (
             OpaquePointer, UInt32,
@@ -358,13 +358,17 @@ final class PrismTunnelController {
         var errDetail = ""
         if vs != 0 {
             let checkErr = unsafeBitCast(checkErrP, to: CheckErrFn.self)
-            var cfErr: CFErrorRef?
+            var cfErr: CFError?
             let vs2 = checkErr(codePtr, 0, nil, &cfErr)
             errDetail = " errcode2=\(vs2)"
-            // CFErrorRef 可无条件桥接到 NSError
+            // CFError 与 NSError 是 toll-free bridged，但 Swift 不允许
+            // 直接 as NSError；取其 CFErrorGetDomain/Code/CopyFailureReason
+            // 等价地拿到可读描述。
             if let e = cfErr {
-                let ns = e as NSError
-                errDetail += " errDomain=\(ns.domain) errCode=\(ns.code) errMsg=\(ns.localizedDescription)"
+                let domain = CFErrorGetDomain(e) as String
+                let code = CFErrorGetCode(e)
+                let reason = CFErrorCopyFailureReason(e) as String?
+                errDetail += " errDomain=\(domain) errCode=\(code) errMsg=\(reason ?? "")"
             }
         }
 
@@ -374,10 +378,13 @@ final class PrismTunnelController {
         let infoStatus = info(codePtr, 0, &infoDictRef)
         var extra = ""
         if infoStatus == 0, let d = infoDictRef {
-            let nd = d as NSDictionary
-            if let ident = nd["identifier"] { extra += " id=\(ident)" }
-            if let team = nd["teamidentifier"] { extra += " team=\(team)" }
-            if let flags = nd["flags"] { extra += " flags=\(flags)" }
+            // CFTypeRef -> CFDictionary -> NSDictionary
+            if let cfDict = d as? CFDictionary {
+                let nd = cfDict as NSDictionary
+                if let ident = nd["identifier"] { extra += " id=\(ident)" }
+                if let team = nd["teamidentifier"] { extra += " team=\(team)" }
+                if let flags = nd["flags"] { extra += " flags=\(flags)" }
+            }
         }
         // 注意：Swift ARC 自动管理 CF 对象，不能也无需手动 CFRelease。
 
