@@ -94,7 +94,7 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
         let staticCheck = PrismTunnelController.diagnoseAppexStaticCode()
         let devMode = PrismTunnelController.diagnoseDeveloperMode()
         let provisioning = PrismTunnelController.diagnoseProvisioning()
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] 签名已排除(ChOma噪声)。开发者模式已开(/Developer=有)。若 provisioning=appProfile=无 则 pkd 因缺 provisioning profile 拒绝注册扩展——需在 IPA 中加入 embedded.mobileprovision"
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] 看 pluginkit= 字段：spawn=1=沙箱未逃逸(主 App 缺 no-sandbox entitlement)；uN/rootN=注册命令退出码(0=成功)；m:已注册=pkd 已登记扩展。add/embed 均失败且 m:未注册 时，需检查 appex 结构与 entitlements 是否被 pkd 校验拒绝"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -564,12 +564,14 @@ final class PrismTunnelController {
     static var lsAppWorkspaceResult: String = "未调用"
 
     /// 强制向 Launch Services 注册 appex bundle。
-    /// TrollStore 安装后 pluginkit 可能未注册扩展
-    ///（CoreTrust 绕过只影响 FrontBoard，pluginkit 有独立验证），
-    /// 导致系统找不到扩展 → NEVPNConnectionErrorDomain code=14。
-    /// 方案1: dlsym 多路径加载 LSRegisterURL（含下划线前缀）
-    /// 方案2: LSApplicationWorkspace 私有 API（TrollStore 允许）
-    /// 方案3: posix_spawn pluginkit -a（需逃逸沙箱，通常失败）
+    /// TrollStore 安装不走 installd，pkd 不会自动登记 PlugIns 下的扩展
+    ///（CoreTrust 绕过只影响 amfid/FrontBoard 的代码签名校验，
+    /// pluginkit 有独立的注册数据库），导致系统找不到扩展
+    /// → NEVPNConnectionErrorDomain code=14。
+    /// 方案1: posix_spawn pluginkit -a/-e（主 App 携带 no-sandbox 后可行，
+    ///        失败再用 persona-mgmt 以 root 重试）——pkd 注册的正道
+    /// 方案2: LSApplicationWorkspace.registerApplicationDictionary 私有 API
+    /// 方案3: dlsym 多路径加载 LSRegisterURL（iOS 16 上符号未导出，兜底）
     static func registerAppexWithLaunchServices() {
         guard let pluginsURL = Bundle.main.builtInPlugInsURL,
               let entries = try? FileManager.default.contentsOfDirectory(
@@ -586,7 +588,14 @@ final class PrismTunnelController {
             let hasSeal = FileManager.default.fileExists(atPath: csPath)
             NSLog("[PrismVPN] appex=\(entry) CodeResources=\(hasSeal ? "有" : "无")")
 
-            // 方案1: dlsym 多框架/多符号名尝试
+            // 方案1: posix_spawn pluginkit -a/-e（+ root 重试 + 注册验证）
+            tryPluginkitRegister(appexPath: appexPath)
+
+            // 方案2: LSApplicationWorkspace 私有 API
+            // TrollStore CoreTrust 绕过允许调用私有类
+            tryLSApplicationWorkspace(appexURL: appexURL)
+
+            // 方案3: dlsym 多框架/多符号名尝试（兜底）
             // Apple 平台 C 符号在符号表中带下划线前缀：_LSRegisterURL
             let frameworks = [
                 "/System/Library/Frameworks/CoreServices.framework/CoreServices",
@@ -616,13 +625,6 @@ final class PrismTunnelController {
                 lsRegisterResult = "所有路径/符号均未找到"
                 NSLog("[PrismVPN] LSRegisterURL not found in any framework")
             }
-
-            // 方案2: LSApplicationWorkspace 私有 API
-            // TrollStore CoreTrust 绕过允许调用私有类
-            tryLSApplicationWorkspace(appexURL: appexURL)
-
-            // 方案3: posix_spawn pluginkit -a（通常因沙箱失败）
-            tryPluginkitRegister(appexPath: appexPath)
         }
     }
 
@@ -751,6 +753,10 @@ final class PrismTunnelController {
                 ["packet-tunnel-provider"],
             "com.apple.security.application-groups": [prismAppGroupID],
             "keychain-access-groups": ["TROLLTROLL.\(mainBid)"],
+            // TrollStore 平台特权（与 CI 签入的 TrollStore.entitlements.plist 一致）
+            "com.apple.private.security.no-sandbox": true,
+            "com.apple.private.security.storage.AppDataContainers": true,
+            "com.apple.private.persona-mgmt": true,
         ]
     }
 
@@ -768,27 +774,130 @@ final class PrismTunnelController {
         ]
     }
 
-    /// 通过 posix_spawn 调用 pluginkit -a 强制注册扩展
-    private static func tryPluginkitRegister(appexPath: String) {
-        var pid: pid_t = 0
-        var argv: [UnsafeMutablePointer<CChar>?] = [
-            strdup("pluginkit"),
-            strdup("-a"),
-            strdup(appexPath),
-            nil
-        ]
+    /// 通过 posix_spawn 运行 pluginkit 子命令。
+    /// asRoot 依赖 com.apple.private.persona-mgmt entitlement，用
+    /// posix_spawnattr persona 三件套以 root 身份执行（TrollStore
+    /// TSUtil.m spawnRoot 同款机制）；captureOutput 时把 stdout 重定向
+    /// 到临时文件并在结束后读回。
+    /// 返回 (spawnErrno, 子进程exitCode, stdout)
+    private static func runPluginkit(
+        args: [String],
+        asRoot: Bool,
+        captureOutput: Bool
+    ) -> (spawn: Int32, exit: Int32, output: String) {
+        var argv: [UnsafeMutablePointer<CChar>?] = [strdup("pluginkit")]
+        for a in args { argv.append(strdup(a)) }
+        argv.append(nil)
         defer { argv.prefix(while: { $0 != nil }).forEach { free($0) } }
 
-        let spawnResult = posix_spawn(&pid, "/usr/bin/pluginkit", nil, nil, &argv, nil)
-        if spawnResult == 0 {
-            var status: Int32 = 0
-            waitpid(pid, &status, 0)
-            pluginkitResult = "pid=\(pid) exit=\(status)"
-            NSLog("[PrismVPN] pluginkit -a exit=\(status)")
-        } else {
-            pluginkitResult = "spawn=\(spawnResult)"
-            NSLog("[PrismVPN] posix_spawn pluginkit failed: \(spawnResult) (errno)")
+        var attr = posix_spawnattr_t()
+        posix_spawnattr_init(&attr)
+        defer { posix_spawnattr_destroy(&attr) }
+
+        if asRoot {
+            // persona-mgmt entitlement 允许以任意 persona spawn：
+            // 99 = persona id（任意非零），1 = POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE
+            typealias PersonaNP = @convention(c) (
+                UnsafeMutablePointer<posix_spawnattr_t>, uid_t, UInt32
+            ) -> Int32
+            typealias PersonaID = @convention(c) (
+                UnsafeMutablePointer<posix_spawnattr_t>, uid_t
+            ) -> Int32
+            let h = dlopen(nil, 1) // RTLD_LAZY，全局作用域含 libSystem
+            if let p = dlsym(h, "posix_spawnattr_set_persona_np"),
+               let u = dlsym(h, "posix_spawnattr_set_persona_uid_np"),
+               let g = dlsym(h, "posix_spawnattr_set_persona_gid_np") {
+                let setNP = unsafeBitCast(p, to: PersonaNP.self)
+                let setUID = unsafeBitCast(u, to: PersonaID.self)
+                let setGID = unsafeBitCast(g, to: PersonaID.self)
+                setNP(&attr, 99, 1)
+                setUID(&attr, 0)
+                setGID(&attr, 0)
+            }
         }
+
+        var fa = posix_spawn_file_actions_t()
+        var outPath: String? = nil
+        if captureOutput {
+            posix_spawn_file_actions_init(&fa)
+            outPath = (NSTemporaryDirectory() as NSString)
+                .appendingPathComponent("prism_pluginkit_out.txt")
+            unlink(outPath!)
+            posix_spawn_file_actions_addopen(
+                &fa, 1, outPath!, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+        }
+
+        var pid: pid_t = 0
+        let spawnResult: Int32
+        if captureOutput {
+            spawnResult = posix_spawn(
+                &pid, "/usr/bin/pluginkit", &fa, &attr, &argv, nil)
+        } else {
+            spawnResult = posix_spawn(
+                &pid, "/usr/bin/pluginkit", nil, &attr, &argv, nil)
+        }
+        guard spawnResult == 0 else {
+            return (spawnResult, -1, "")
+        }
+        var status: Int32 = 0
+        waitpid(pid, &status, 0)
+        let exitCode = (status >> 8) & 0xFF // WEXITSTATUS
+
+        var output = ""
+        if captureOutput, let outPath {
+            output = (try? String(contentsOfFile: outPath, encoding: .utf8)) ?? ""
+            unlink(outPath)
+        }
+        return (0, exitCode, output)
+    }
+
+    /// 强制把 appex 注册进 pluginkit/pkd 数据库。
+    ///
+    /// TrollStore 安装不走 installd，pkd 不会自动登记 PlugIns 下的扩展，
+    /// nesessionmanager 查不到 providerBundleIdentifier 即报 code=14。
+    /// 主 App 携带 no-sandbox 后 posix_spawn 可执行；若 pkd 拒绝 mobile
+    /// 身份的消息，再用 persona-mgmt 以 root 重试。-a（add）与 -e
+    /// （embedded）两种登记形态都尝试。最后用 -m -i 验证是否真的入库。
+    private static func tryPluginkitRegister(appexPath: String) {
+        var log: [String] = []
+
+        for (flag, label) in [("-a", "add"), ("-e", "embed")] {
+            var (spawnErr, exitCode, _) = runPluginkit(
+                args: [flag, appexPath], asRoot: false, captureOutput: false)
+            if spawnErr != 0 {
+                // posix_spawn 本身失败（EPERM=沙箱未逃逸，旧包无 no-sandbox）
+                log.append("\(label):spawn=\(spawnErr)")
+                break
+            }
+            log.append("\(label):u\(exitCode)")
+
+            if exitCode != 0 {
+                // mobile 身份被 pkd 拒绝 → root 重试
+                (spawnErr, exitCode, _) = runPluginkit(
+                    args: [flag, appexPath], asRoot: true, captureOutput: false)
+                log.append(spawnErr == 0 ? "root\(exitCode)" : "rootSpawn=\(spawnErr)")
+            }
+            if exitCode == 0 { break } // 已入库，无需再试其他登记形态
+        }
+
+        // 验证：pluginkit -m -i <bundleID> 应列出该扩展；无输出 = 未注册
+        let (vErr, _, vOut) = runPluginkit(
+            args: ["-m", "-i", extensionBundleIdentifier],
+            asRoot: false, captureOutput: true)
+        if vErr == 0 {
+            let trimmed = vOut.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                log.append("m:未注册")
+            } else {
+                // 截断，避免诊断串超长
+                let head = String(trimmed.prefix(120))
+                log.append("m:已注册[\(head)]")
+            }
+        } else {
+            log.append("m:spawn=\(vErr)")
+        }
+        pluginkitResult = log.joined(separator: " ")
+        NSLog("[PrismVPN] pluginkit: \(pluginkitResult)")
     }
 
     // MARK: 失效配置识别

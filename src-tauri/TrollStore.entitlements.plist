@@ -29,5 +29,16 @@
 	<array>
 		<string>TROLLTROLL.com.prism.proxy</string>
 	</array>
+	<!-- TrollStore 平台特权（仅主 App）：逃逸沙箱后 posix_spawn 才能执行
+	     /usr/bin/pluginkit -a，把 PlugIns/PrismVPN.appex 强制注册进 pkd——
+	     TrollStore 安装不走 installd，pkd 不会自动登记扩展，缺注册即
+	     NEVPNConnectionErrorDomain code=14。persona-mgmt 允许 spawn 时
+	     以 root persona 执行（TrollStore TSUtil.m spawnRoot 同款机制）。 -->
+	<key>com.apple.private.security.no-sandbox</key>
+	<true/>
+	<key>com.apple.private.security.storage.AppDataContainers</key>
+	<true/>
+	<key>com.apple.private.persona-mgmt</key>
+	<true/>
 </dict>
 </plist>
