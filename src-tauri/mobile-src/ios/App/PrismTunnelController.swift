@@ -317,14 +317,17 @@ final class PrismTunnelController {
         // 读取安装后 Info.plist 的 CFBundleExecutable 实际值并核对文件存在。
         // 若该键与实际二进制名不匹配，SecStaticCode 对 bundle 会解析不到
         // 主二进制而误报"未签名"（-67061），这是必须排除的结构问题。
-        var exeInfo = "exe=plist读取失败"
+        // 【109 实测教训】NSDictionary(contentsOf:) 传【目录】URL 恒返回 nil
+        //（设备上 exe 恒报"plist读取失败"、bin 校验从未执行）。改用
+        // Bundle(url:) 解析 —— 该路径已在真机上被预检/签名诊断验证可用。
+        var exeInfo = "exe=appex bundle解析失败"
         var execURL: URL?
-        if let plist = NSDictionary(contentsOf: appexURL),
-           let exeName = plist["CFBundleExecutable"] as? String {
-            let candidate = appexURL.appendingPathComponent(exeName)
-            let exists = FileManager.default.fileExists(atPath: candidate.path)
+        if let bundle = Bundle(url: appexURL),
+           let exeName = bundle.infoDictionary?["CFBundleExecutable"] as? String,
+           let url = bundle.executableURL {
+            let exists = FileManager.default.fileExists(atPath: url.path)
             exeInfo = "exe=\(exeName)/\(exists ? "ok" : "缺失")"
-            if exists { execURL = candidate }
+            if exists { execURL = url }
         }
 
         guard let sec = dlopen(

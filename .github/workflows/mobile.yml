@@ -409,11 +409,10 @@ jobs:
           echo "app: $APP  exec: $EXEC  appex: $APPEX"
 
           # ==================== 1. 深度清理（必须在签名前）====================
-          # 【关键】不可删除 _CodeSignature 目录！--no-sign 构建本身不带
-          # 签名目录，但 codesign 签目录时会创建。之前删除后只签二进制
-          # 不签目录，导致 appex 无 _CodeSignature/CodeResources bundle seal，
-          # pluginkit 静态校验失败 → Code 14 "not installed" / 无崩溃日志。
-          # codesign --force 会覆盖旧签名，不需要预删除。
+          # 注：appex 的 _CodeSignature 由下方 v4 流程显式删除（对齐
+          # FlClash 终态：TrollStore 重签后不重建 CodeResources，设备上
+          # 「存在但失配」的 seal 会被 pkd 拒绝，「缺失」则不校验）。
+          # codesign --force 会覆盖旧签名，主程序不需要预删除。
 
           # 严禁插件自带动态库，必须使用主程序库
           if [ -n "$APPEX" ]; then
@@ -510,8 +509,9 @@ jobs:
           echo "mach-o count: $(wc -l < "$LIST" | tr -d ' ')"
 
           while IFS= read -r bin; do
-            # appex 内部二进制在此跳过，改由下方对 appex【目录】整体
-            # codesign（保证其二进制签名与 CodeResources 同次生成、一致）
+            # appex 主二进制在下方单独签（嵌入 entitlements，不生成
+            # CodeResources）；appex 内其余 Mach-O 无需 CI 签名，
+            # TrollStore 安装时会统一重签
             if [[ "$bin" == *".appex/"* ]]; then
               continue
             fi
@@ -524,54 +524,39 @@ jobs:
             fi
           done < "$LIST"
 
-          # 对 appex bundle 进行单次、seal 一致的签名：
+          # 对 appex 只签【二进制文件】，不生成、不保留 CodeResources：
           #
-          # 【根因修复历史】
-          #   v1 只对二进制签 ldid：无 _CodeSignature/CodeResources → seal 缺失
-          #   v2 codesign 目录 + ldid 重签二进制：seal 与二进制 hash 不一致
-          #      （ldid 在 codesign 之后改了二进制却没更新 CodeResources）
-          #   v3（当前）codesign 单次签目录：二进制签名与 CodeResources 同
-          #      一次生成，天然一致。
-          #
-          # pluginkit 注册 appex 时会重新计算二进制 hash 并与 CodeResources
-          # 比对，任何「seal 缺失」或「seal 不一致」都会被静态拒绝，表现为
-          # NEVPN code=14（"VPN app not installed"）/ 无崩溃日志 /
-          # 红色"需要更新" / 配置消失。
+          # 【v4 FlClash 终态对齐】
+          #   v1 只签二进制无 seal；v2 codesign 目录 + ldid 重签二进制
+          #   （seal 失配）；v3 codesign 单次签目录（seal 一致）——三者
+          #   真机全部 code=14，且同一校验 API 对同一目标两次安装分别
+          #   返回 -67061 / -50，说明 seal 理论无法解释失败。
+          #   已验证可用的 FlClash（TrollStore NE 项目）其 appex 安装后
+          #   终态就是【无 CodeResources】：TrollStore 安装时对每个
+          #   Mach-O 重签（CoreTrust bypass）但【不会重建】CodeResources，
+          #   CI 侧生成的 CodeResources 在设备上必然与重签后的二进制
+          #   hash 不一致；pkd 对「存在但失配」的 seal 拒绝注册（code=14），
+          #   对「缺失」的 seal 不校验 —— 因此必须让它不存在。
           if [ -n "$APPEX" ] && [ -n "$APPEX_EXEC" ]; then
             chmod +x "$APPEX/$APPEX_EXEC"
-            # 【根因修复】appex 只签一次：codesign 对目录签名会同时
-            #   a) 签 appex 二进制（ad-hoc + entitlements 嵌入 LC_CODE_SIGNATURE）
-            #   b) 生成 _CodeSignature/CodeResources（记录刚签好的二进制 hash）
-            # 二者天然一致，pluginkit 校验 bundle seal 才能通过。
-            #
-            # 绝不能在 codesign 之后再用 ldid 重签二进制：ldid 会改变
-            # 二进制签名内容却不更新 CodeResources，导致 seal 与二进制
-            # hash 不一致 → pluginkit 静态拒绝注册 → NEVPN code=14
-            #（"VPN app not installed"）/ 无崩溃日志 / 红色"需要更新"。
-            #
-            # TrollStore 安装时从 codesign 签好的二进制提取 entitlements
-            #（dumpEntitlementsFromBinaryAtPath），再对二进制应用
-            # CoreTrust bypass 并保留 entitlements，因此无需 ldid。
+            # 只签二进制文件：entitlements 嵌入 LC_CODE_SIGNATURE，
+            # TrollStore 安装时用 dumpEntitlementsFromBinaryAtPath 提取
+            # 后保留重签，因此 CI 侧必须先把 entitlements 嵌好
             codesign --force --sign - \
               --entitlements "$PWD/src-tauri/gen/apple/PrismVPN/PrismVPN.entitlements.plist" \
-              "$APPEX"
-            echo "--- appex codesign (single, seal-consistent): $APPEX ---"
-            # 验证 seal 存在且与二进制一致
-            if [ -f "$APPEX/_CodeSignature/CodeResources" ]; then
-              echo "appex CodeResources: OK"
-              if codesign --verify --strict "$APPEX" 2>&1; then
-                echo "appex seal verify: OK"
-              else
-                echo "::error::appex codesign --verify failed (seal inconsistent)"; exit 1
-              fi
-              # 确认 entitlements 真实嵌入二进制
-              if codesign -d --entitlements - "$APPEX/$APPEX_EXEC" 2>&1 | grep -q "networkextension"; then
-                echo "appex embedded entitlements: OK"
-              else
-                echo "::error::appex binary missing networkextension entitlement"; exit 1
-              fi
+              "$APPEX/$APPEX_EXEC"
+            # 移除 xcodebuild / 历史步骤遗留的 seal，杜绝 stale CodeResources
+            rm -rf "$APPEX/_CodeSignature"
+            echo "--- appex binary codesign (no CodeResources, FlClash-style): $APPEX ---"
+            if [ -e "$APPEX/_CodeSignature" ]; then
+              echo "::error::appex _CodeSignature still present (must be absent)"; exit 1
+            fi
+            # 确认 entitlements 真实嵌入二进制（读取内嵌 superblob，
+            # 与 CodeResources 无关）
+            if codesign -d --entitlements - "$APPEX/$APPEX_EXEC" 2>&1 | grep -q "networkextension"; then
+              echo "appex embedded entitlements: OK"
             else
-              echo "::error::appex _CodeSignature/CodeResources not found after codesign"; exit 1
+              echo "::error::appex binary missing networkextension entitlement"; exit 1
             fi
           fi
 
