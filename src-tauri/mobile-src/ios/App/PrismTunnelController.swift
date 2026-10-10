@@ -328,7 +328,7 @@ final class PrismTunnelController {
         ) -> OSStatus
         typealias InfoFn = @convention(c) (
             CFTypeRef, UInt32,
-            UnsafeMutablePointer<CFDictionaryRef?>
+            UnsafeMutablePointer<CFDictionary?>
         ) -> OSStatus
 
         // 指向 bundle【目录】：Security 会解析到主二进制并同时校验
@@ -346,18 +346,17 @@ final class PrismTunnelController {
 
         // 顺带读回 identifier / team / flags，便于交叉验证
         let info = unsafeBitCast(infoP, to: InfoFn.self)
-        var infoDict: CFDictionaryRef?
-        let is = info(code, 0, &infoDict)
+        var infoDict: CFDictionary?
+        let infoStatus = info(code, 0, &infoDict)
         var extra = ""
-        if is == 0, let d = infoDict {
+        if infoStatus == 0, let d = infoDict {
             let nd = d as NSDictionary
             if let ident = nd["identifier"] { extra += " id=\(ident)" }
             if let team = nd["teamidentifier"] { extra += " team=\(team)" }
             if let flags = nd["flags"] { extra += " flags=\(flags)" }
         }
-
-        CFRelease(code)
-        if let d = infoDict { CFRelease(d) }
+        // 注意：Swift ARC 自动管理 CF 对象，不能也无需手动 CFRelease。
+        // 该函数仅在启动失败诊断时调用一次，无需担心引用生命周期。
 
         let verdict = vs == 0 ? "valid" : "invalid(\(vs))"
         return "staticCheck=\(verdict)\(extra)"
