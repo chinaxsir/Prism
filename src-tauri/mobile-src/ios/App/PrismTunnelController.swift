@@ -315,19 +315,28 @@ final class PrismTunnelController {
 
         guard let createP = dlsym(sec, "SecStaticCodeCreateWithPathAndAttributes"),
               let checkP = dlsym(sec, "SecStaticCodeCheckValidity"),
+              let checkErrP = dlsym(sec, "SecStaticCodeCheckValidityWithErrors"),
               let infoP = dlsym(sec, "SecCodeCopySigningInformation")
         else { return "SecStaticCode符号未找到" }
 
-        // 精确 ABI 签名（OSStatus 即 Int32；引用类型输出参数用 CFTypeRef?）
+        // 精确 ABI：OSStatus 即 Int32。
+        // 注意 SecRequirementRef 是一个 CF 类型的指针，必须用 OpaquePointer?
+        // 而不是 CFTypeRef? 传 nil（CFTypeRef? 的 ABI 在某些 SDK 下不等价，
+        // 会让 CheckValidity 把"无 requirement"误判为参数错误 errSecParam=-50）。
         typealias CreateFn = @convention(c) (
             CFURL, UInt32, CFDictionary?,
             UnsafeMutablePointer<CFTypeRef?>
         ) -> OSStatus
         typealias CheckFn = @convention(c) (
-            CFTypeRef, UInt32, CFTypeRef?
+            OpaquePointer, UInt32, OpaquePointer?
+        ) -> OSStatus
+        // SecStaticCodeCheckValidityWithErrors(code, flags, requirement, &cfError)
+        typealias CheckErrFn = @convention(c) (
+            OpaquePointer, UInt32, OpaquePointer?,
+            UnsafeMutablePointer<CFError?>
         ) -> OSStatus
         typealias InfoFn = @convention(c) (
-            CFTypeRef, UInt32,
+            OpaquePointer, UInt32,
             UnsafeMutablePointer<CFDictionary?>
         ) -> OSStatus
 
@@ -339,15 +348,29 @@ final class PrismTunnelController {
         guard cs == 0, let code = codeRef else {
             return "staticCreate失败=\(cs)"
         }
+        let codePtr = unsafeBitCast(code, to: OpaquePointer.self)
 
-        // flags=0（kSecCSDefaultFlags）：默认即校验可执行文件 + 资源 seal。
+        // 先用 CheckValidity，第三参 requirement=nil（OpaquePointer?）。
         let check = unsafeBitCast(checkP, to: CheckFn.self)
-        let vs = check(code, 0, nil)
+        let vs = check(codePtr, 0, nil)
+
+        // 若失败，再用 CheckValidityWithErrors 拿 CFError 看具体原因。
+        var errDetail = ""
+        if vs != 0, let ce = checkErrP {
+            let checkErr = unsafeBitCast(ce, to: CheckErrFn.self)
+            var cfErr: CFError?
+            let vs2 = checkErr(codePtr, 0, nil, &cfErr)
+            errDetail = " errcode2=\(vs2)"
+            if let e = cfErr {
+                let ns = e as NSError
+                errDetail += " errDomain=\(ns.domain) errCode=\(ns.code) errMsg=\(ns.localizedDescription)"
+            }
+        }
 
         // 顺带读回 identifier / team / flags，便于交叉验证
         let info = unsafeBitCast(infoP, to: InfoFn.self)
         var infoDict: CFDictionary?
-        let infoStatus = info(code, 0, &infoDict)
+        let infoStatus = info(codePtr, 0, &infoDict)
         var extra = ""
         if infoStatus == 0, let d = infoDict {
             let nd = d as NSDictionary
@@ -356,10 +379,9 @@ final class PrismTunnelController {
             if let flags = nd["flags"] { extra += " flags=\(flags)" }
         }
         // 注意：Swift ARC 自动管理 CF 对象，不能也无需手动 CFRelease。
-        // 该函数仅在启动失败诊断时调用一次，无需担心引用生命周期。
 
         let verdict = vs == 0 ? "valid" : "invalid(\(vs))"
-        return "staticCheck=\(verdict)\(extra)"
+        return "staticCheck=\(verdict)\(errDetail)\(extra)"
     }
 
     /// 打包诊断：列出 PlugIns 下每个 appex 的 bundle ID 与扩展点。
