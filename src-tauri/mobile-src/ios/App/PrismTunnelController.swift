@@ -93,7 +93,8 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
         }
         let staticCheck = PrismTunnelController.diagnoseAppexStaticCode()
         let devMode = PrismTunnelController.diagnoseDeveloperMode()
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) static=\(staticCheck) devMode=\(devMode) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] 签名校验已排除(app=invalid 与 appex 同错=ChOma噪声)。根因在 pkd 未注册扩展。iOS 16+ 必须开开发者模式：设置→隐私与安全性→开发者模式→打开→重启手机。若已开启仍失败：TrollStore→设置→刷新App注册→彻底卸载→重启→重装"
+        let provisioning = PrismTunnelController.diagnoseProvisioning()
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] 签名已排除(ChOma噪声)。开发者模式已开(/Developer=有)。若 provisioning=appProfile=无 则 pkd 因缺 provisioning profile 拒绝注册扩展——需在 IPA 中加入 embedded.mobileprovision"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -477,6 +478,57 @@ final class PrismTunnelController {
                     parts.append("extRegistered=\(isReg ? "是" : "否")")
                 }
             }
+        }
+
+        return parts.joined(separator: " ")
+    }
+
+    /// 检查 provisioning profile 与 PKPlugInKit 注册状态。
+    /// Apple 文档 TN3134 明确要求：NE entitlement「must be authorised by
+    /// a provisioning profile」。TrollStore 可能不创建 embedded.mobileprovision，
+    /// 而 pkd 可能要求它存在才注册扩展。
+    static func diagnoseProvisioning() -> String {
+        var parts: [String] = []
+
+        // 1. 主 App 的 provisioning profile
+        let appProfile = Bundle.main.path(forResource: "embedded", ofType: "mobileprovision")
+        parts.append("appProfile=\(appProfile != nil ? "有" : "无")")
+
+        // 2. appex 的 provisioning profile
+        if let pluginsURL = Bundle.main.builtInPlugInsURL,
+           let entries = try? FileManager.default.contentsOfDirectory(atPath: pluginsURL.path),
+           let appexName = entries.first(where: { $0.hasSuffix(".appex") }) {
+            let profilePath = pluginsURL.appendingPathComponent(appexName)
+                .appendingPathComponent("embedded.mobileprovision").path
+            parts.append("appexProfile=\(FileManager.default.fileExists(atPath: profilePath) ? "有" : "无")")
+        }
+
+        // 3. PKPlugInKit 查询已注册扩展
+        if dlopen("/System/Library/PrivateFrameworks/PlugKit.framework/PlugKit", 1) != nil,
+           let pkClass = NSClassFromString("PKPlugInKit") {
+            let pkObj = pkClass as AnyObject
+            let sharedSel = NSSelectorFromString("plugInKit")
+            if pkObj.responds(to: sharedSel),
+               let kit = pkObj.perform(sharedSel)?.takeUnretainedValue() {
+                let plugsSel = NSSelectorFromString("plugIns")
+                if kit.responds(to: plugsSel),
+                   let plugs = kit.perform(plugsSel)?.takeUnretainedValue() as? [AnyObject] {
+                    parts.append("pkTotal=\(plugs.count)")
+                    var found = false
+                    for plug in plugs {
+                        let idSel = NSSelectorFromString("pluginIdentifier")
+                        if plug.responds(to: idSel),
+                           let id = plug.perform(idSel)?.takeUnretainedValue() as? String,
+                           id == extensionBundleIdentifier {
+                            found = true
+                            break
+                        }
+                    }
+                    parts.append("pkOurExt=\(found ? "已注册" : "未注册")")
+                }
+            }
+        } else {
+            parts.append("PKKit=未找到")
         }
 
         return parts.joined(separator: " ")
