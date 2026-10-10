@@ -92,7 +92,8 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
             sealOk = FileManager.default.fileExists(atPath: sealPath) ? "有" : "无"
         }
         let staticCheck = PrismTunnelController.diagnoseAppexStaticCode()
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) static=\(staticCheck) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] Code 14 = 系统未注册扩展。请依次尝试：1) 设置→隐私与安全性→开发者模式→打开→重启手机（iOS 16+ NetworkExtension 必须） 2) TrollStore→设置→刷新App注册 3) 彻底卸载→重启→重装"
+        let devMode = PrismTunnelController.diagnoseDeveloperMode()
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) static=\(staticCheck) devMode=\(devMode) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] 签名校验已排除(app=invalid 与 appex 同错=ChOma噪声)。根因在 pkd 未注册扩展。iOS 16+ 必须开开发者模式：设置→隐私与安全性→开发者模式→打开→重启手机。若已开启仍失败：TrollStore→设置→刷新App注册→彻底卸载→重启→重装"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -407,6 +408,78 @@ final class PrismTunnelController {
         // 注意：Swift ARC 自动管理 CF 对象，不能也无需手动 CFRelease。
 
         return "bnd=\(bnd) bin=\(bin) app=\(app) \(exeInfo)\(extra)"
+    }
+
+    /// 检查开发者模式状态与扩展注册情况。
+    ///
+    /// 【根因收敛】build=111 阳性对照已证实：app=invalid(-50) 与 appex
+    /// 同错，SecStaticCode 校验整段是 ChOma 噪声。签名方向彻底排除。
+    /// Code 14 根因锁定在 pkd 未注册扩展。iOS 16+ 要求开发者模式开启，
+    /// pkd 才会注册 NetworkExtension；若关闭，App 本身可正常运行
+    /// （CoreTrust bypass 不受开发者模式影响），但扩展不会被注册。
+    static func diagnoseDeveloperMode() -> String {
+        var parts: [String] = []
+
+        // 1. iOS 版本（16+ 需要开发者模式才能加载 NE 扩展）
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        parts.append("iOS\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)")
+
+        // 2. 尝试 csops 读取自身代码签名标志
+        // CS_GET_TASK_ALLOW (0x4) 若设置，表明开发者模式允许调试；
+        // 我们的 TrollStore 包没有 get-task-allow entitlement，
+        // 但开发者模式开启时内核行为不同，csflags 可能反映差异。
+        if let lib = dlopen("/usr/lib/system/libsystem_kernel.dylib", 1),
+           let sym = dlsym(lib, "csops") {
+            typealias Fn = @convention(c) (Int32, UInt32, UnsafeMutableRawPointer?, Int) -> Int32
+            let fn = unsafeBitCast(sym, to: Fn.self)
+            var flags: UInt32 = 0
+            let r = fn(getpid(), 0, &flags, MemoryLayout<UInt32>.size)
+            if r == 0 {
+                let getTask = (flags & 0x4) != 0
+                let valid = (flags & 0x1) != 0
+                parts.append("csflags=0x\(String(format: "%x", flags)) valid=\(valid ? "1" : "0") getTaskAllow=\(getTask ? "1" : "0")")
+            } else {
+                parts.append("csops=err(\(r))")
+            }
+        } else {
+            parts.append("csops=符号未找到")
+        }
+
+        // 3. 开发者模式相关路径检查
+        for p in ["/Developer", "/var/db/developermode"] {
+            if FileManager.default.fileExists(atPath: p) {
+                parts.append("\(p)=有")
+            }
+        }
+
+        // 4. iOS build 版本（帮助精确识别 iOS 版本）
+        var osversion = [CChar](repeating: 0, count: 32)
+        var size: Int = 32
+        if sysctlbyname("kern.osversion", &osversion, &size, nil, 0) == 0 {
+            parts.append("build=\(String(cString: osversion))")
+        }
+
+        // 5. 尝试查询扩展是否已注册到系统
+        // LSApplicationWorkspace applicationIsRegistered: 返回 BOOL，
+        // 必须用 objc_msgSend 直接调用（perform 无法可靠取回 BOOL）
+        let appexBid = extensionBundleIdentifier
+        if let wsClass = NSClassFromString("LSApplicationWorkspace") {
+            let wsObj = wsClass as AnyObject
+            let defaultSel = NSSelectorFromString("defaultWorkspace")
+            if wsObj.responds(to: defaultSel),
+               let workspace = wsObj.perform(defaultSel)?.takeUnretainedValue() {
+                let regSel = NSSelectorFromString("applicationIsRegistered:")
+                if workspace.responds(to: regSel),
+                   let msgSym = dlsym(dlopen(nil, 1), "objc_msgSend") {
+                    typealias MsgFn = @convention(c) (AnyObject, Selector, NSString) -> Bool
+                    let fn = unsafeBitCast(msgSym, to: MsgFn.self)
+                    let isReg = fn(workspace, regSel, appexBid as NSString)
+                    parts.append("extRegistered=\(isReg ? "是" : "否")")
+                }
+            }
+        }
+
+        return parts.joined(separator: " ")
     }
 
     /// 打包诊断：列出 PlugIns 下每个 appex 的 bundle ID 与扩展点。
