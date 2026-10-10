@@ -91,7 +91,8 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
                 .appendingPathComponent("_CodeSignature/CodeResources").path
             sealOk = FileManager.default.fileExists(atPath: sealPath) ? "有" : "无"
         }
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] Code 14 = 系统未注册扩展。请依次尝试：1) 设置→隐私与安全性→开发者模式→打开→重启手机（iOS 16+ NetworkExtension 必须） 2) TrollStore→设置→刷新App注册 3) 彻底卸载→重启→重装"
+        let staticCheck = PrismTunnelController.diagnoseAppexStaticCode()
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) static=\(staticCheck) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] Code 14 = 系统未注册扩展。请依次尝试：1) 设置→隐私与安全性→开发者模式→打开→重启手机（iOS 16+ NetworkExtension 必须） 2) TrollStore→设置→刷新App注册 3) 彻底卸载→重启→重装"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -287,6 +288,79 @@ final class PrismTunnelController {
         let ne = entPlist.contains("packet-tunnel-provider") ? "ok" : "缺"
         let group = entPlist.contains("group.com.prism.proxy") ? "ok" : "缺"
         return "appID=\(appID) ne=\(ne) group=\(group) der=\(derFound ? "有" : "无")"
+    }
+
+    /// 用系统 Security 框架的【私有但在 iOS 真实导出】的 SecStaticCode API，
+    /// 对 appex【整个 bundle 目录】做不启动扩展的静态校验。这与 pkd /
+    /// pluginkit 注册扩展时所做的校验是同一套代码，因此能给出真机上的
+    /// 权威结论：
+    ///   staticCheck=valid     → 签名与 seal 都合法，问题不在静态校验，
+    ///                          而在 pkd/lsd 注册、容器或开发者模式；
+    ///   staticCheck=invalid(N)→ 系统真的拒绝了该 appex，N 为 OSStatus，
+    ///                          可据此精确定位（资源 seal 坏、签名格式错等）。
+    /// 这些符号不在公开 SDK 头里（Swift 直接写会"cannot find"），但
+    /// TrollStore 自己（Shared/TSUtil.m）就在设备上直接链接使用它们，
+    /// 故运行时 dlsym 一定能取到。
+    static func diagnoseAppexStaticCode() -> String {
+        guard let pluginsURL = Bundle.main.builtInPlugInsURL,
+              let entries = try? FileManager.default.contentsOfDirectory(
+                atPath: pluginsURL.path),
+              let appexName = entries.first(where: { $0.hasSuffix(".appex") })
+        else { return "appex未定位" }
+        let appexURL = pluginsURL.appendingPathComponent(appexName)
+
+        guard let sec = dlopen(
+            "/System/Library/Frameworks/Security.framework/Security", 1
+        ) else { return "Security dlopen失败" }
+
+        guard let createP = dlsym(sec, "SecStaticCodeCreateWithPathAndAttributes"),
+              let checkP = dlsym(sec, "SecStaticCodeCheckValidity"),
+              let infoP = dlsym(sec, "SecCodeCopySigningInformation")
+        else { return "SecStaticCode符号未找到" }
+
+        // 精确 ABI 签名（OSStatus 即 Int32；引用类型输出参数用 CFTypeRef?）
+        typealias CreateFn = @convention(c) (
+            CFURL, UInt32, CFDictionary?,
+            UnsafeMutablePointer<CFTypeRef?>
+        ) -> OSStatus
+        typealias CheckFn = @convention(c) (
+            CFTypeRef, UInt32, CFTypeRef?
+        ) -> OSStatus
+        typealias InfoFn = @convention(c) (
+            CFTypeRef, UInt32,
+            UnsafeMutablePointer<CFDictionaryRef?>
+        ) -> OSStatus
+
+        // 指向 bundle【目录】：Security 会解析到主二进制并同时校验
+        // _CodeSignature/CodeResources 资源封印，等价于 pkd 的整包校验。
+        var codeRef: CFTypeRef?
+        let create = unsafeBitCast(createP, to: CreateFn.self)
+        let cs = create(appexURL as CFURL, 0, nil, &codeRef)
+        guard cs == 0, let code = codeRef else {
+            return "staticCreate失败=\(cs)"
+        }
+
+        // flags=0（kSecCSDefaultFlags）：默认即校验可执行文件 + 资源 seal。
+        let check = unsafeBitCast(checkP, to: CheckFn.self)
+        let vs = check(code, 0, nil)
+
+        // 顺带读回 identifier / team / flags，便于交叉验证
+        let info = unsafeBitCast(infoP, to: InfoFn.self)
+        var infoDict: CFDictionaryRef?
+        let is = info(code, 0, &infoDict)
+        var extra = ""
+        if is == 0, let d = infoDict {
+            let nd = d as NSDictionary
+            if let ident = nd["identifier"] { extra += " id=\(ident)" }
+            if let team = nd["teamidentifier"] { extra += " team=\(team)" }
+            if let flags = nd["flags"] { extra += " flags=\(flags)" }
+        }
+
+        CFRelease(code)
+        if let d = infoDict { CFRelease(d) }
+
+        let verdict = vs == 0 ? "valid" : "invalid(\(vs))"
+        return "staticCheck=\(verdict)\(extra)"
     }
 
     /// 打包诊断：列出 PlugIns 下每个 appex 的 bundle ID 与扩展点。
