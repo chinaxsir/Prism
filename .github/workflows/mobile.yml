@@ -563,6 +563,22 @@ jobs:
           echo "--- main executable entitlements ---"
           codesign -d --entitlements - "$APP/$EXEC" 2>&1 | head -40 || true
 
+          # ==================== 4.5 embedded.mobileprovision ====================
+          # pkd（插件守护进程）要求 .app / .appex 内存在 embedded.mobileprovision
+          # 才会注册网络扩展；缺失时直接 NEVPNConnectionErrorDomain code=14。
+          # 用自签证书生成 CMS 签名的 profile（CoreTrust bypass 接受任意签名）。
+          bash scripts/gen-mobileprovision.sh \
+            "$APP" \
+            "$PWD/src-tauri/TrollStore.entitlements.plist" \
+            "$MAIN_BUNDLE"
+          if [ -n "$APPEX" ]; then
+            APPEX_BUNDLE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APPEX/Info.plist")
+            bash scripts/gen-mobileprovision.sh \
+              "$APPEX" \
+              "$PWD/src-tauri/gen/apple/PrismVPN/PrismVPN.entitlements.plist" \
+              "$APPEX_BUNDLE"
+          fi
+
           # ==================== 硬校验（签名后只读检查）====================
 
           # 0: VPN 扩展必须真的打进 PlugIns
@@ -575,6 +591,16 @@ jobs:
             echo "::error::appex NSExtensionPointIdentifier wrong: '$EP'"
             exit 1
           fi
+          # 0.5: embedded.mobileprovision 必须存在（pkd 注册扩展的硬前提）
+          if [ ! -f "$APP/embedded.mobileprovision" ]; then
+            echo "::error::main app missing embedded.mobileprovision (pkd will reject extension)"
+            exit 1
+          fi
+          if [ ! -f "$APPEX/embedded.mobileprovision" ]; then
+            echo "::error::appex missing embedded.mobileprovision (pkd will reject extension)"
+            exit 1
+          fi
+          echo "embedded.mobileprovision present: app+appex OK"
           # 扩展二进制必须内嵌 packet-tunnel-provider entitlement
           # 注意：codesign -d --entitlements - 的 plist 输出在 stderr，
           # 必须 2>&1 合并后再 grep；旧代码用 2>/dev/null + $LDID（ldid
