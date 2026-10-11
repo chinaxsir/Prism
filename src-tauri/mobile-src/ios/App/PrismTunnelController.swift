@@ -95,7 +95,8 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
         let devMode = PrismTunnelController.diagnoseDeveloperMode()
         let provisioning = PrismTunnelController.diagnoseProvisioning()
         let rtEnt = PrismTunnelController.runtimeEntitlementsSummary()
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) rtEnt=\(rtEnt) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] rtEnt= 主App运行时实际生效的 entitlements（TrollStore 重签后真值）：platform=1 才能逃逸沙箱；noSbx=1 + persona=1 才能注册扩展。pluginkit= 字段：spawn=1=沙箱未逃逸；uN/rootN=注册命令退出码(0=成功)；m:已注册=pkd 已登记扩展"
+        let pkdReg = PrismTunnelController.diagnosePkdRegistration()
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) rtEnt=\(rtEnt) pkd=\(pkdReg) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] pkd= 字段是关键：lsPlug=主App LS 视图里有无 appex；pkdDB=PlugInKit 数据库里有无 appex（原始字节搜索）。pkdDB=未命中 → pkd 拒绝注册（签名/profile 校验层）；pkdDB=命中 → 注册已入库，code 14 出在 nesessionmanager 校验层"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -535,6 +536,95 @@ final class PrismTunnelController {
         return parts.joined(separator: " ")
     }
 
+    /// 直读 pkd（pluginkit 守护进程）注册数据库与 LS plugin 视图，
+    /// 一锤定音"扩展到底进没进系统"：
+    /// - lsPlug: 主 App LSApplicationProxy.plugins 里能否找到 appex
+    ///   （nesessionmanager 查 provider 的路径之一）
+    /// - pkdDB: 直接在 PlugInKit 数据库文件的原始字节里搜 appex
+    ///   bundleID（binary plist/sqlite 的字符串均明文存储，原始搜索可靠）
+    static func diagnosePkdRegistration() -> String {
+        var parts: [String] = []
+        let appexBid = extensionBundleIdentifier
+        let mainBid = Bundle.main.bundleIdentifier ?? "com.prism.proxy"
+
+        // 1. LS 层：主 App proxy 的 plugins 数组
+        var lsPlug = "类未找到"
+        if let wsClass = NSClassFromString("LSApplicationProxy") {
+            let cls = wsClass as AnyObject
+            let proxySel = NSSelectorFromString("applicationProxyForIdentifier:")
+            if cls.responds(to: proxySel),
+               let mainProxy = cls.perform(proxySel, with: mainBid)?
+                   .takeUnretainedValue() {
+                let pluginsSel = NSSelectorFromString("plugins")
+                if mainProxy.responds(to: pluginsSel),
+                   let plugins = mainProxy.perform(pluginsSel)?
+                       .takeUnretainedValue() as? [AnyObject] {
+                    var ids: [String] = []
+                    for p in plugins {
+                        let bidSel = NSSelectorFromString("bundleIdentifier")
+                        if p.responds(to: bidSel),
+                           let b = p.perform(bidSel)?
+                               .takeUnretainedValue() as? String {
+                            ids.append(b)
+                        }
+                    }
+                    lsPlug = ids.contains(appexBid)
+                        ? "有(\(ids.count))" : "无[\(ids.joined(separator: ","))]"
+                } else {
+                    lsPlug = "plugins不可读"
+                }
+            } else {
+                lsPlug = "proxy失败"
+            }
+        }
+        parts.append("lsPlug=\(lsPlug)")
+
+        // 2. pkd 层：PlugInKit 数据库目录原始搜索
+        let needle = Data(appexBid.utf8)
+        var pkdDB = "目录不存在"
+        for dbDir in ["/var/mobile/Library/PlugInKit",
+                      "/var/containers/Shared/SystemGroup"] {
+            guard FileManager.default.fileExists(atPath: dbDir) else { continue }
+            // PlugInKit 目录直接扫；SystemGroup 下找 PlugInKit 相关子目录
+            var scanDirs: [String] = []
+            if dbDir.hasSuffix("PlugInKit") {
+                scanDirs.append(dbDir)
+            } else {
+                let subs = (try? FileManager.default.contentsOfDirectory(
+                    atPath: dbDir)) ?? []
+                for s in subs where s.contains("pluginkit") || s.contains("PlugInKit") {
+                    scanDirs.append((dbDir as NSString).appendingPathComponent(s))
+                }
+            }
+            var hit = false
+            var scanned = 0
+            var total = 0
+            for dir in scanDirs {
+                let files = (try? FileManager.default.contentsOfDirectory(
+                    atPath: dir)) ?? []
+                for f in files {
+                    let p = (dir as NSString).appendingPathComponent(f)
+                    total += 1
+                    guard let data = FileManager.default.contents(atPath: p),
+                          !data.isEmpty else { continue }
+                    scanned += 1
+                    if data.range(of: needle) != nil {
+                        hit = true
+                    }
+                }
+                if hit { break }
+            }
+            if !scanDirs.isEmpty {
+                pkdDB = hit
+                    ? "命中" : "未命中(可读\(scanned)/\(total)文件, dirs=\(scanDirs.count))"
+                break
+            }
+        }
+        parts.append("pkdDB=\(pkdDB)")
+
+        return parts.joined(separator: " ")
+    }
+
     /// 打包诊断：列出 PlugIns 下每个 appex 的 bundle ID 与扩展点。
     /// 随启动失败错误一起输出，用户截图即可远程定位是 IPA 缺扩展
     /// 还是系统/配置层问题
@@ -714,14 +804,45 @@ final class PrismTunnelController {
         let mainEnt = knownMainEntitlements()
         let appexEnt = knownAppexEntitlements()
 
-        // App Group 共享容器（主 App 与 appex 同一组）
+        // App Group 共享容器（主 App 与 appex 同一组）。
+        // 官方 uicache 用 MCMSharedDataContainer createIfNecessary 构造，
+        // 我们用 containerURL 读到的路径等价（同一 group 容器）。
         var groupContainers = [String: String]()
         if let gURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: prismAppGroupID) {
             groupContainers[prismAppGroupID] = gURL.path
         }
 
+        // plugin 数据容器（官方 uicache 用 MCMPluginKitPluginDataContainer
+        // containerWithIdentifier:createIfNecessary:YES 构造——pkd 处理
+        // PluginKitPlugin 时预期该字段存在）
+        var pluginContainerPath: String?
+        if let mcmClass = NSClassFromString("MCMPluginKitPluginDataContainer"),
+           let mcm = mcmClass as AnyObject as? NSObjectProtocol {
+            let containerSel = NSSelectorFromString(
+                "containerWithIdentifier:createIfNecessary:existed:error:")
+            // ObjC 实例方法多参调用需 objc_msgSend 精确签名
+            typealias ContainerFn = @convention(c) (
+                AnyObject, Selector, NSString, Bool, UnsafeMutablePointer<Bool>?,
+                UnsafeMutablePointer<CFError?>?
+            ) -> CFTypeRef?
+            let h = dlopen(nil, 1)
+            if mcm.responds(to: containerSel),
+               let sym = dlsym(h, "objc_msgSend") {
+                let fn = unsafeBitCast(sym, to: ContainerFn.self)
+                let appexBid = extensionBundleIdentifier
+                if let c = fn(mcm, containerSel, appexBid as NSString, true, nil, nil) {
+                    let urlSel = NSSelectorFromString("url")
+                    if let obj = unsafeBitCast(c, to: NSObject.self)
+                        .perform(urlSel)?.takeUnretainedValue() as? URL {
+                        pluginContainerPath = obj.path
+                    }
+                }
+            }
+        }
+
         // ---- appex（PluginKitPlugin）注册字典 ----
+        // 逐字段对齐 TrollStore RootHelper/uicache.m registerPath
         var plugin: [String: Any] = [
             "ApplicationType": "PluginKitPlugin",
             "CFBundleIdentifier": appexBid,
@@ -733,9 +854,22 @@ final class PrismTunnelController {
             "SignerOrganization": "Apple Inc.",
             "SignatureVersion": 132352,
             "SignerIdentity": "Apple iPhone OS Application Signing",
-            "IsAdHocSigned": true,
             "Entitlements": appexEnt,
         ]
+        if let pcPath = pluginContainerPath {
+            plugin["Container"] = pcPath
+            // 官方：isContainerized 时 HOME=容器、TMPDIR=容器/tmp
+            plugin["EnvironmentVariables"] = [
+                "CFFIXED_USER_HOME": pcPath,
+                "HOME": pcPath,
+                "TMPDIR": (pcPath as NSString).appendingPathComponent("tmp"),
+            ]
+        }
+        // TeamIdentifier 取自 appex entitlements（官方 dump 二进制后取
+        // com.apple.developer.team-identifier）
+        if let team = appexEnt["com.apple.developer.team-identifier"] as? String {
+            plugin["TeamIdentifier"] = team
+        }
         if !groupContainers.isEmpty {
             plugin["HasAppGroupContainers"] = true
             plugin["GroupContainers"] = groupContainers
@@ -761,8 +895,16 @@ final class PrismTunnelController {
             "FamilyID": 0,
             "IsOnDemandInstallCapable": 0,
             "Entitlements": mainEnt,
+            "EnvironmentVariables": [
+                "CFFIXED_USER_HOME": NSHomeDirectory(),
+                "HOME": NSHomeDirectory(),
+                "TMPDIR": (NSHomeDirectory() as NSString).appendingPathComponent("tmp"),
+            ],
             "_LSBundlePlugins": [appexBid: plugin],
         ]
+        if let team = mainEnt["com.apple.developer.team-identifier"] as? String {
+            dict["TeamIdentifier"] = team
+        }
         if !groupContainers.isEmpty {
             dict["HasAppGroupContainers"] = true
             dict["GroupContainers"] = groupContainers
