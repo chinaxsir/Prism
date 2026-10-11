@@ -71,6 +71,7 @@ pub async fn start_core(app: AppHandle, state: State<'_, AppState>) -> Result<()
 
 /// 启动准备结果：校验通过但尚未停机/启动（restart 时先产出它再做静态校验）
 struct PreparedStart {
+    mode: RunMode,
     settings: UserSettings,
     work_dir: std::path::PathBuf,
     api_addr: String,
@@ -88,10 +89,12 @@ async fn prepare_start(
     let settings = state.settings.read().clone();
 
     // 提权/授权预检：
+    // - Android：无条件需要系统 VPN 授权（VpnService.prepare，tun 是唯一流量
+    //   路径）。未授权时返回 false，前端提示用户在系统弹窗中允许后重试
+    // - iOS：SystemProxy 为 App 内本地代理（无 VPN）；Tun 走 NE 扩展，授权由
+    //   NETunnelProviderManager 弹窗流程内部处理，均无需在此预检
     // - 桌面 TUN 模式：非管理员/root 时 tun inbound 必然失败，提前报错
-    // - 移动端：系统 VPN 授权（Android VpnService.prepare）。
-    //   未授权时返回 false，前端提示用户在系统弹窗中允许后重试
-    #[cfg(any(target_os = "ios", target_os = "android"))]
+    #[cfg(target_os = "android")]
     if !crate::platform::ensure_vpn_permission().map_err(|e| e.to_string())? {
         return Err("需要系统 VPN 授权：请在弹出的系统对话框中点击「允许」，然后再次点击启动".into());
     }
@@ -129,11 +132,20 @@ async fn prepare_start(
     #[cfg(any(target_os = "ios", target_os = "android"))]
     let binary_path = std::path::PathBuf::new();
 
-    // 端口预检，避免与本机其他代理内核冲突。
-    // 移动端 mixed 入站已移除（流量全走 TUN），无需检查混合端口。
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
-    {
+    // 端口预检，避免与本机其他代理内核冲突：
+    // - 桌面：mixed 入站始终存在
+    // - iOS：仅 SystemProxy（App 内本地代理）存在 mixed 入站，listen 固定
+    //   127.0.0.1（见 config_builder）
+    // - Android：流量全走 TUN，无 mixed 入站，无需检查
+    #[cfg(not(target_os = "android"))]
+    let check_mixed_port = cfg!(not(any(target_os = "ios", target_os = "android")))
+        || mode == RunMode::SystemProxy;
+    #[cfg(not(target_os = "android"))]
+    if check_mixed_port {
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
         let listen_host = if settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" };
+        #[cfg(target_os = "ios")]
+        let listen_host = "127.0.0.1";
         if !is_port_free(listen_host, settings.mixed_port) {
             return Err(format!(
                 "混合端口 {} 已被占用，请在“设置”中更换端口后重试",
@@ -164,6 +176,7 @@ async fn prepare_start(
     }
 
     Ok(PreparedStart {
+        mode,
         settings,
         work_dir,
         api_addr,
@@ -180,6 +193,7 @@ async fn apply_prepared(
     state: &State<'_, AppState>,
 ) -> Result<(), String> {
     let PreparedStart {
+        mode,
         settings,
         work_dir,
         api_addr,
@@ -198,6 +212,8 @@ async fn apply_prepared(
         api_addr,
         api_secret,
         runtime_config: built.config,
+        // iOS SystemProxy：内核经 FFI 跑在主 App 进程内（无 NE 扩展）
+        in_process: cfg!(target_os = "ios") && mode == RunMode::SystemProxy,
     };
 
     let handle = KernelHandle::spawn(kernel_config, app.clone())

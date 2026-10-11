@@ -14,6 +14,7 @@ import {
   Globe,
   Blocks,
   RefreshCw,
+  Smartphone,
 } from "lucide-react";
 
 import {
@@ -54,6 +55,15 @@ const isMobile = () => {
   try {
     const ua = navigator.userAgent;
     return ua.includes("Android") || ua.includes("iPhone") || ua.includes("iPad");
+  } catch {
+    return false;
+  }
+};
+
+const isIOS = () => {
+  try {
+    const ua = navigator.userAgent;
+    return ua.includes("iPhone") || ua.includes("iPad");
   } catch {
     return false;
   }
@@ -311,6 +321,19 @@ export default function Settings() {
             <ShieldAlert size={14} className="mt-0.5 shrink-0" />
             TUN 模式启动时若提示权限不足，请完全退出 Prism 后，右键选择
             “以管理员身份运行”（macOS/Linux 使用 sudo 启动）。
+          </div>
+        )}
+        {isIOS() && mode === "systemProxy" && (
+          <div className="px-3 py-2.5 flex items-start gap-2 bg-accent/5 text-xs text-gray-400 border-t border-white/5">
+            <Smartphone size={14} className="mt-0.5 shrink-0 text-accent" />
+            <span>
+              iOS 上「系统代理」为 App 内本地代理：启动后请在
+              系统「设置 → WLAN → 当前网络 → 配置代理」选择「手动」，服务器
+              <code className="mx-1 text-accent">127.0.0.1</code>
+              端口
+              <code className="mx-1 text-accent">{form.mixedPort}</code>
+              ，即可让流量经 Prism 转发（无需 VPN 授权）。
+            </span>
           </div>
         )}
       </SettingsGroup>

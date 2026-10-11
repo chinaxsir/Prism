@@ -1,6 +1,7 @@
 name: Mobile Build
 
-# 推送 main / tag v* / 手动触发：产出 Android APK 与 TrollStore（巨魔）未签名 IPA
+# 推送 main / tag v* / 手动触发：产出 Android APK 与 iOS 双 IPA
+# （TrollStore 巨魔版 + SideStore 普通版：无扩展/干净签名，免费 Apple ID 可签）
 # tag 触发时额外把 APK/IPA 作为 Release asset 上传，与桌面端（build.yml）共用同一 Release
 on:
   push:
@@ -300,7 +301,7 @@ jobs:
           files: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
 
   ios:
-    name: Build TrollStore IPA
+    name: Build iOS IPAs
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -389,7 +390,7 @@ jobs:
       - name: Build unsigned IPA
         run: npx tauri ios build --no-sign --verbose
 
-      - name: Prepare TrollStore IPA
+      - name: Prepare IPAs (TrollStore + SideStore)
         id: ipa
         run: |
           set -e
@@ -496,6 +497,35 @@ jobs:
           done < "$RPATHS_RAW"
           echo "--- rpaths after rewrite ---"
           otool -l "$MAIN_EXEC_PATH" | grep -A2 LC_RPATH | grep path
+
+          # ==================== 3.5 SideStore 普通版 fork ====================
+          # 从同一份预处理产物分叉（清理/rpath/版本号均已就绪）：
+          # - 移除整个 PlugIns（无 NE 扩展，本地代理模式不需要）
+          # - 全部 Mach-O 裸 ad-hoc 签名、无任何 entitlements，SideStore/
+          #   AltStore 用免费 Apple ID 重签时注入用户证书与 entitlements
+          # - 不生成 embedded.mobileprovision（SideStore 注入自己的 profile）
+          PLAIN_WORK=$(mktemp -d)
+          cp -R "$WORK/Payload" "$PLAIN_WORK/Payload"
+          PLAIN_APP=$(find "$PLAIN_WORK/Payload" -maxdepth 1 -name "*.app" -type d | head -1)
+          rm -rf "$PLAIN_APP/PlugIns"
+          find "$PLAIN_APP" -type f | while IFS= read -r f; do
+            if file "$f" | grep -q "Mach-O"; then
+              codesign --force --sign - "$f"
+            fi
+          done
+          # bundle 级签名重建 CodeResources（seal 覆盖上面全部二进制签名）
+          codesign --force --sign - "$PLAIN_APP"
+          chmod +x "$PLAIN_APP/$EXEC"
+          if [ -e "$PLAIN_APP/PlugIns" ]; then
+            echo "::error::plain ipa still contains PlugIns"; exit 1
+          fi
+          if codesign -d --entitlements - "$PLAIN_APP/$EXEC" 2>&1 | grep -q "networkextension"; then
+            echo "::error::plain ipa main app must not carry NE entitlements"; exit 1
+          fi
+          OUT_PLAIN="$PWD/Prism-$APP_VERSION-SideStore.ipa"
+          rm -f "$OUT_PLAIN"
+          (cd "$PLAIN_WORK" && zip -qry "$OUT_PLAIN" Payload)
+          echo "plain ipa: $OUT_PLAIN (appex removed, clean ad-hoc signed)"
 
           # ==================== 4. 最终签名封印（必须在所有修改完成后）====================
           # 所有文件修改（Info.plist / RPATH / dylib 删除）已完成，
@@ -707,16 +737,25 @@ jobs:
           (cd "$WORK" && zip -qry "$OUT" Payload)
           echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
-      - name: Upload IPA
+      - name: Upload TrollStore IPA
         uses: actions/upload-artifact@v4
         with:
           name: Prism-TrollStore-ipa
           path: Prism-*-TrollStore.ipa
           if-no-files-found: error
 
+      - name: Upload SideStore IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Prism-SideStore-ipa
+          path: Prism-*-SideStore.ipa
+          if-no-files-found: error
+
       # tag 构建时把 IPA 作为 Release asset 上传（与桌面端共用同一 Release）
-      - name: Upload IPA to Release
+      - name: Upload IPAs to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: Prism-*-TrollStore.ipa
+          files: |
+            Prism-*-TrollStore.ipa
+            Prism-*-SideStore.ipa

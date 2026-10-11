@@ -615,21 +615,26 @@ pub fn build(
     }
 
     // 4. 入站
-    // 移动端（iOS/Android）所有流量经 TUN 接管，mixed 入站非必需且可能在
-    // NetworkExtension 沙箱内绑定端口失败导致内核启动失败，故移动端不包含。
+    // mixed 入站：桌面 SystemProxy；iOS SystemProxy（本地代理模式——内核
+    // 跑在主 App 进程内监听 127.0.0.1，无 NE 扩展、无特殊 entitlement，
+    // 免费 Apple ID 签名即可安装；listen 写死 127.0.0.1 不随 allow_lan）
+    // Android 仍全部走 TUN（libbox 回调 VpnService）。
     let mut inbounds: Vec<Value> = Vec::new();
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
-    inbounds.push(json!({
-        "type": "mixed",
-        "tag": MIXED_TAG,
-        "listen": if settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
-        "listen_port": settings.mixed_port,
-    }));
+    let desktop = cfg!(not(any(target_os = "ios", target_os = "android")));
+    let ios_local_proxy = cfg!(target_os = "ios") && mode == RunMode::SystemProxy;
+    if desktop || ios_local_proxy {
+        inbounds.push(json!({
+            "type": "mixed",
+            "tag": MIXED_TAG,
+            "listen": if desktop && settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+            "listen_port": settings.mixed_port,
+        }));
+    }
 
-    // 桌面端仅 TUN 模式加 TUN 入站；移动端（iOS/Android）必须始终包含：
-    // 普通 App 无法设置系统代理，libbox 经 tun 入站回调 PlatformInterface.OpenTun
-    // 向系统 VPN（VpnService / NEPacketTunnelProvider）索要 TUN fd
-    if mode == RunMode::Tun || cfg!(any(target_os = "ios", target_os = "android")) {
+    // TUN 入站：桌面 TUN 模式；Android 必须始终包含（libbox 经 tun 入站回调
+    // PlatformInterface.OpenTun 向 VpnService 索要 TUN fd）；iOS 仅 TUN
+    // （VPN 扩展）模式包含（SystemProxy 本地代理无需 TUN）。
+    if mode == RunMode::Tun || cfg!(target_os = "android") {
         // 1.10 起 inet4_address/inet6_address 合并为 address（legacy 字段
         // 需 ENABLE_DEPRECATED_TUN_ADDRESS_X env，check/run 均会 FATAL）
         let mut tun_addresses = vec!["198.18.0.1/30"];
