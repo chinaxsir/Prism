@@ -33,10 +33,12 @@
 	     /usr/bin/pluginkit -a，把 PlugIns/PrismVPN.appex 强制注册进 pkd——
 	     TrollStore 安装不走 installd，pkd 不会自动登记扩展，缺注册即
 	     NEVPNConnectionErrorDomain code=14。persona-mgmt 允许 spawn 时
-	     以 root persona 执行（TrollStore TSUtil.m spawnRoot 同款机制）。 -->
+	     以 root persona 执行（TrollStore TSUtil.m spawnRoot 同款机制）。
+	     注意：只保留 no-sandbox + persona-mgmt（TrollSpeed 真机验证组合，
+	     且其目标系统同为 iOS 16.5）；storage.AppDataContainers 需配合
+	     platform-application 使用，单独加会导致 App 启动即被杀
+	     （"Failed to open"，build 116 实测）。 -->
 	<key>com.apple.private.security.no-sandbox</key>
-	<true/>
-	<key>com.apple.private.security.storage.AppDataContainers</key>
 	<true/>
 	<key>com.apple.private.persona-mgmt</key>
 	<true/>
