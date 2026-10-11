@@ -94,7 +94,8 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
         let staticCheck = PrismTunnelController.diagnoseAppexStaticCode()
         let devMode = PrismTunnelController.diagnoseDeveloperMode()
         let provisioning = PrismTunnelController.diagnoseProvisioning()
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] 看 pluginkit= 字段：spawn=1=沙箱未逃逸(主 App 缺 no-sandbox entitlement)；uN/rootN=注册命令退出码(0=成功)；m:已注册=pkd 已登记扩展。add/embed 均失败且 m:未注册 时，需检查 appex 结构与 entitlements 是否被 pkd 校验拒绝"
+        let rtEnt = PrismTunnelController.runtimeEntitlementsSummary()
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) rtEnt=\(rtEnt) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] rtEnt= 主App运行时实际生效的 entitlements（TrollStore 重签后真值）：platform=1 才能逃逸沙箱；noSbx=1 + persona=1 才能注册扩展。pluginkit= 字段：spawn=1=沙箱未逃逸；uN/rootN=注册命令退出码(0=成功)；m:已注册=pkd 已登记扩展"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -558,6 +559,51 @@ final class PrismTunnelController {
 
     // MARK: - 强制注册扩展
 
+    /// 运行时读取主进程实际生效的关键 entitlements（TrollStore 重签后的
+    /// 真值）。与 knownMainEntitlements() 期望值比对：若设备上读不到
+    /// 或值不符，说明 TrollStore 安装时丢弃/改写了 entitlements——
+    /// 这是"签名/预检全 ok 但行为异常"的终极判据。
+    static func runtimeEntitlementsSummary() -> String {
+        guard let sec = dlopen(
+            "/System/Library/Frameworks/Security.framework/Security", 1),
+            let createSelfP = dlsym(sec, "SecTaskCreateFromSelf"),
+            let copyValueP = dlsym(sec, "SecTaskCopyValueForEntitlement")
+        else { return "SecTask符号未找到" }
+
+        typealias CreateSelfFn = @convention(c) (CFAllocator?) -> CFTypeRef?
+        typealias CopyValueFn = @convention(c) (
+            OpaquePointer, CFString, UnsafeMutablePointer<CFError?>?
+        ) -> CFTypeRef?
+        let createSelf = unsafeBitCast(createSelfP, to: CreateSelfFn.self)
+        let copyValue = unsafeBitCast(copyValueP, to: CopyValueFn.self)
+
+        guard let taskRef = createSelf(kCFAllocatorDefault) else {
+            return "task创建失败"
+        }
+        let task = unsafeBitCast(taskRef, to: OpaquePointer.self)
+
+        func valueFor(_ key: String) -> String {
+            let v = copyValue(task, key as CFString, nil)
+            if v == nil { return "-" }
+            if let b = v as? Bool { return b ? "1" : "0" }
+            if let s = v as? String { return s }
+            if let a = v as? [Any] { return "[\(a.count)]" }
+            return "?"
+        }
+
+        let parts = [
+            "platform=\(valueFor("platform-application"))",
+            "noSbx=\(valueFor("com.apple.private.security.no-sandbox"))",
+            "noCnt=\(valueFor("com.apple.private.security.no-container"))",
+            "adc=\(valueFor("com.apple.private.security.storage.AppDataContainers"))",
+            "persona=\(valueFor("com.apple.private.persona-mgmt"))",
+            "netext=\(valueFor("com.apple.developer.networking.networkextension"))",
+            "groups=\(valueFor("com.apple.security.application-groups"))",
+            "appID=\(valueFor("application-identifier"))",
+        ]
+        return parts.joined(separator: " ")
+    }
+
     /// 保存 LSRegisterURL 和 pluginkit 的结果，供诊断输出
     static var lsRegisterResult: String = "未调用"
     static var pluginkitResult: String = "未调用"
@@ -753,10 +799,15 @@ final class PrismTunnelController {
                 ["packet-tunnel-provider"],
             "com.apple.security.application-groups": [prismAppGroupID],
             "keychain-access-groups": ["TROLLTROLL.\(mainBid)"],
-            // 平台特权键（no-sandbox / no-container / persona-mgmt）已全部
-            // 移除：build 116-118 实测加任一组合都会导致 App 启动即死
-            //（"Failed to open"）。与 CI 签入的 TrollStore.entitlements.plist
-            // 保持一致：仅业务 entitlements。
+            // TrollStore 平台特权（与 CI 签入的 TrollStore.entitlements.plist
+            // 一致）：官方 README "Unsandboxing" 完整配方——platform-application
+            // 是 no-sandbox 生效前提；AppDataContainers 是 no-sandbox +
+            // platform-application 下访问自身容器所需；persona-mgmt 为
+            // root spawn 所需（前提即 not sandboxed）
+            "platform-application": true,
+            "com.apple.private.security.no-sandbox": true,
+            "com.apple.private.security.storage.AppDataContainers": true,
+            "com.apple.private.persona-mgmt": true,
         ]
     }
 

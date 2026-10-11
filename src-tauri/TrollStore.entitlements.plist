@@ -29,13 +29,26 @@
 	<array>
 		<string>TROLLTROLL.com.prism.proxy</string>
 	</array>
-	<!-- 平台特权键（no-sandbox / no-container / persona-mgmt）已全部移除：
-	     build 116-118 三种组合均导致启动即死（"Failed to open"，无崩溃日志），
-	     而本文件在 build 114 状态（即当前内容）验证过可正常启动。
-	     由排除法：Swift 改动不在启动路径，entitlements 是唯一变量。
-	     结论：平台特权键与本 App 的 application-groups /
-	     networkextension entitlement 组合在 iOS 16.5 上 exec 期被杀。
-	     后续若需 sandbox 逃逸做 pkd 注册，须换路线（如 root helper），
-	     不能再往本 plist 加平台特权键。 -->
+	<!-- TrollStore 平台特权（仅主 App）——官方 README "Unsandboxing" 完整配方：
+	     1) platform-application：no-sandbox/no-container 正常工作的前提，
+	        缺它时单加 no-sandbox/no-container 会导致启动即被杀
+	        （build 116-118 "Failed to open" 实测根因）
+	     2) no-sandbox：逃逸沙箱（README 推荐，保留数据容器——
+	        no-container 会让 UIKit/UserDefaults 启动时访问容器失败）
+	     3) storage.AppDataContainers：README 明示 no-sandbox +
+	        platform-application 时访问自身数据容器所需
+	     4) persona-mgmt：root persona spawn（pluginkit 注册用），
+	        README 前提即 "app is not sandboxed"
+	     产物：主 App 可逃逸沙箱执行 /usr/bin/pluginkit -a，
+	     把 PlugIns/PrismVPN.appex 注册进 pkd（TrollStore 安装不走
+	     installd，pkd 不会自动登记扩展，缺注册即 code=14）。 -->
+	<key>platform-application</key>
+	<true/>
+	<key>com.apple.private.security.no-sandbox</key>
+	<true/>
+	<key>com.apple.private.security.storage.AppDataContainers</key>
+	<true/>
+	<key>com.apple.private.persona-mgmt</key>
+	<true/>
 </dict>
 </plist>
