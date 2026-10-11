@@ -790,7 +790,10 @@ final class PrismTunnelController {
         argv.append(nil)
         defer { argv.prefix(while: { $0 != nil }).forEach { free($0) } }
 
-        var attr = posix_spawnattr_t()
+        // 注意：iOS SDK 中 posix_spawnattr_t / posix_spawn_file_actions_t
+        // 是指针 typedef（Swift 导入为 OpaquePointer），不能值初始化，
+        // 必须经 *_init 分配、*_destroy 释放。
+        var attr: posix_spawnattr_t? = nil
         posix_spawnattr_init(&attr)
         defer { posix_spawnattr_destroy(&attr) }
 
@@ -798,10 +801,10 @@ final class PrismTunnelController {
             // persona-mgmt entitlement 允许以任意 persona spawn：
             // 99 = persona id（任意非零），1 = POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE
             typealias PersonaNP = @convention(c) (
-                UnsafeMutablePointer<posix_spawnattr_t>, uid_t, UInt32
+                UnsafeMutablePointer<posix_spawnattr_t?>, uid_t, UInt32
             ) -> Int32
             typealias PersonaID = @convention(c) (
-                UnsafeMutablePointer<posix_spawnattr_t>, uid_t
+                UnsafeMutablePointer<posix_spawnattr_t?>, uid_t
             ) -> Int32
             let h = dlopen(nil, 1) // RTLD_LAZY，全局作用域含 libSystem
             if let p = dlsym(h, "posix_spawnattr_set_persona_np"),
@@ -816,7 +819,7 @@ final class PrismTunnelController {
             }
         }
 
-        var fa = posix_spawn_file_actions_t()
+        var fa: posix_spawn_file_actions_t? = nil
         var outPath: String? = nil
         if captureOutput {
             posix_spawn_file_actions_init(&fa)
@@ -825,6 +828,10 @@ final class PrismTunnelController {
             unlink(outPath!)
             posix_spawn_file_actions_addopen(
                 &fa, 1, outPath!, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+        }
+        // 销毁须发生在 posix_spawn 之后，故 defer 不能放在 if 块内
+        defer {
+            if captureOutput { posix_spawn_file_actions_destroy(&fa) }
         }
 
         var pid: pid_t = 0
