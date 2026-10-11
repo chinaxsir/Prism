@@ -29,15 +29,13 @@
 	<array>
 		<string>TROLLTROLL.com.prism.proxy</string>
 	</array>
-	<!-- TrollStore 平台特权（仅主 App）：persona-mgmt 允许 spawn 时
-	     以 root persona 执行（TrollStore TSUtil.m spawnRoot 同款机制）。
-	     no-container 阻止 TrollStore 自动注入 container-required——
-	     否则与 no-sandbox（已移除）互斥导致启动崩溃（build 116-117 实测
-	     "Failed to open"）。TrollVNC（同样跑在 iOS 16.5 的 TrollStore
-	     应用）验证过 no-container + persona-mgmt 组合可正常启动。 -->
-	<key>com.apple.private.security.no-container</key>
-	<true/>
-	<key>com.apple.private.persona-mgmt</key>
-	<true/>
+	<!-- 平台特权键（no-sandbox / no-container / persona-mgmt）已全部移除：
+	     build 116-118 三种组合均导致启动即死（"Failed to open"，无崩溃日志），
+	     而本文件在 build 114 状态（即当前内容）验证过可正常启动。
+	     由排除法：Swift 改动不在启动路径，entitlements 是唯一变量。
+	     结论：平台特权键与本 App 的 application-groups /
+	     networkextension entitlement 组合在 iOS 16.5 上 exec 期被杀。
+	     后续若需 sandbox 逃逸做 pkd 注册，须换路线（如 root helper），
+	     不能再往本 plist 加平台特权键。 -->
 </dict>
 </plist>

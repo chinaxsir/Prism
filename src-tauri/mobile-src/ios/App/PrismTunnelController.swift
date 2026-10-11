@@ -753,11 +753,10 @@ final class PrismTunnelController {
                 ["packet-tunnel-provider"],
             "com.apple.security.application-groups": [prismAppGroupID],
             "keychain-access-groups": ["TROLLTROLL.\(mainBid)"],
-            // TrollStore 平台特权（与 CI 签入的 TrollStore.entitlements.plist
-            // 一致；no-container 阻止 TrollStore 注入 container-required，
-            // no-sandbox 与其互斥已移除——build 116-117 "Failed to open" 实测）
-            "com.apple.private.security.no-container": true,
-            "com.apple.private.persona-mgmt": true,
+            // 平台特权键（no-sandbox / no-container / persona-mgmt）已全部
+            // 移除：build 116-118 实测加任一组合都会导致 App 启动即死
+            //（"Failed to open"）。与 CI 签入的 TrollStore.entitlements.plist
+            // 保持一致：仅业务 entitlements。
         ]
     }
 
