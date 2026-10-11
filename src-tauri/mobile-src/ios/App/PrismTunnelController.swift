@@ -1073,11 +1073,12 @@ final class PrismTunnelController {
             let sel = NSSelectorFromString("applicationProxyForIdentifier:")
             if c.responds(to: sel),
                let proxy = c.perform(sel, with: "com.opa334.TrollStore")?
-                   .takeUnretainedValue(),
-               let urlSel = NSSelectorFromString("bundleURL"),
-               let url = proxy.perform(urlSel)?
-                   .takeUnretainedValue() as? URL {
-                return url.path
+                   .takeUnretainedValue() {
+                let urlSel = NSSelectorFromString("bundleURL")
+                if let url = proxy.perform(urlSel)?
+                    .takeUnretainedValue() as? URL {
+                    return url.path
+                }
             }
         }
         let root = "/var/containers/Bundle/Application"
