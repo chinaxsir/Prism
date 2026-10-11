@@ -96,7 +96,7 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
         let provisioning = PrismTunnelController.diagnoseProvisioning()
         let rtEnt = PrismTunnelController.runtimeEntitlementsSummary()
         let pkdReg = PrismTunnelController.diagnosePkdRegistration()
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) rtEnt=\(rtEnt) pkd=\(pkdReg) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) pluginkit=\(PrismTunnelController.pluginkitResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] pkd= 字段是关键：lsPlug=主App LS 视图里有无 appex；pkdDB=PlugInKit 数据库里有无 appex（原始字节搜索）。pkdDB=未命中 → pkd 拒绝注册（签名/profile 校验层）；pkdDB=命中 → 注册已入库，code 14 出在 nesessionmanager 校验层"
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) rtEnt=\(rtEnt) pkd=\(pkdReg) rootHelper=\(PrismTunnelController.rootHelperResult) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] rootHelper= 用 TrollStore 自带 root helper 执行官方 uicache 注册的结果（u0=成功）。pkd= 字段：lsPlug=LS 对 appex 的 plugin 视图；pkdDB=PlugInKit 数据库搜索。pkdDB 命中 → code 14 出在 nesessionmanager 校验层；未命中 → pkd 拒绝注册"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -547,78 +547,90 @@ final class PrismTunnelController {
         let appexBid = extensionBundleIdentifier
         let mainBid = Bundle.main.bundleIdentifier ?? "com.prism.proxy"
 
-        // 1. LS 层：主 App proxy 的 plugins 数组
+        // 1. LS 层：直接对 appex bundleID 取 proxy——若 LS 认识该 plugin，
+        //    proxy 非 nil 且 pluginIdentity 存在（等价于主 App plugins 数组
+        //    里有它，但绕开 plugins 属性的桥接问题）
         var lsPlug = "类未找到"
         if let wsClass = NSClassFromString("LSApplicationProxy") {
             let cls = wsClass as AnyObject
             let proxySel = NSSelectorFromString("applicationProxyForIdentifier:")
-            if cls.responds(to: proxySel),
-               let mainProxy = cls.perform(proxySel, with: mainBid)?
-                   .takeUnretainedValue() {
-                let pluginsSel = NSSelectorFromString("plugins")
-                if mainProxy.responds(to: pluginsSel),
-                   let plugins = mainProxy.perform(pluginsSel)?
-                       .takeUnretainedValue() as? [AnyObject] {
-                    var ids: [String] = []
-                    for p in plugins {
-                        let bidSel = NSSelectorFromString("bundleIdentifier")
-                        if p.responds(to: bidSel),
-                           let b = p.perform(bidSel)?
-                               .takeUnretainedValue() as? String {
-                            ids.append(b)
-                        }
+            if cls.responds(to: proxySel) {
+                let appexProxy = cls.perform(proxySel, with: appexBid)?
+                    .takeUnretainedValue()
+                let mainProxy = cls.perform(proxySel, with: mainBid)?
+                    .takeUnretainedValue()
+                // 主 App plugins 数组（NSArray 桥接可能失败，仅报数量）
+                var plugCount = -1
+                if let mp = mainProxy {
+                    let pluginsSel = NSSelectorFromString("plugins")
+                    if mp.responds(to: pluginsSel),
+                       let arr = mp.perform(pluginsSel)?.takeUnretainedValue() {
+                        plugCount = (arr as? NSArray)?.count ?? -1
                     }
-                    lsPlug = ids.contains(appexBid)
-                        ? "有(\(ids.count))" : "无[\(ids.joined(separator: ","))]"
+                }
+                if appexProxy == nil {
+                    lsPlug = "appex无proxy"
                 } else {
-                    lsPlug = "plugins不可读"
+                    let piSel = NSSelectorFromString("pluginIdentity")
+                    let hasPI = appexProxy!.responds(to: piSel)
+                        && appexProxy!.perform(piSel)?.takeUnretainedValue() != nil
+                    lsPlug = "\(hasPI ? "pluginIdentity有" : "pluginIdentity无")(count=\(plugCount))"
                 }
             } else {
-                lsPlug = "proxy失败"
+                lsPlug = "proxy选择器不可用"
             }
         }
         parts.append("lsPlug=\(lsPlug)")
 
-        // 2. pkd 层：PlugInKit 数据库目录原始搜索
+        // 2. pkd 层：PlugInKit 数据库目录原始搜索。
+        //    iOS 16 的 pkd 数据库在 /var/mobile/Library/PlugInKit/（历史路径）
+        //    或 system group container；先枚举候选目录再看能不能命中。
         let needle = Data(appexBid.utf8)
         var pkdDB = "目录不存在"
-        for dbDir in ["/var/mobile/Library/PlugInKit",
-                      "/var/containers/Shared/SystemGroup"] {
-            guard FileManager.default.fileExists(atPath: dbDir) else { continue }
-            // PlugInKit 目录直接扫；SystemGroup 下找 PlugInKit 相关子目录
-            var scanDirs: [String] = []
-            if dbDir.hasSuffix("PlugInKit") {
-                scanDirs.append(dbDir)
-            } else {
-                let subs = (try? FileManager.default.contentsOfDirectory(
-                    atPath: dbDir)) ?? []
-                for s in subs where s.contains("pluginkit") || s.contains("PlugInKit") {
-                    scanDirs.append((dbDir as NSString).appendingPathComponent(s))
-                }
+        var probeDirs: [String] = []
+        // 2a. /var/mobile/Library/ 枚举（no-sandbox 后应可读）——找
+        //     PlugIn 相关目录，同时报目录是否存在（决定性信息）
+        let mobLib = "/var/mobile/Library"
+        if let entries = try? FileManager.default.contentsOfDirectory(
+            atPath: mobLib) {
+            let hitNames = entries.filter {
+                $0.lowercased().contains("pluginkit")
+                    || $0.lowercased().contains("plugin")
             }
+            probeDirs = hitNames.map { (mobLib as NSString).appendingPathComponent($0) }
+            pkdDB = "mobLib可枚举(\(entries.count)项, plug=\(hitNames.joined(separator: ",")))"
+        } else {
+            pkdDB = "mobLib不可枚举"
+        }
+        // 2b. system group container 扫描
+        let sgRoot = "/var/containers/Shared/SystemGroup"
+        if let subs = try? FileManager.default.contentsOfDirectory(atPath: sgRoot) {
+            let pkSubs = subs.filter { $0.lowercased().contains("pluginkit") }
+            for s in pkSubs {
+                probeDirs.append((sgRoot as NSString).appendingPathComponent(s))
+            }
+            pkdDB += " sg=\(pkSubs.isEmpty ? "无pluginkit组" : pkSubs.joined(separator: ","))"
+        } else {
+            pkdDB += " sg不可枚举"
+        }
+        // 2c. 对候选目录做原始字节搜索
+        if !probeDirs.isEmpty {
             var hit = false
             var scanned = 0
-            var total = 0
-            for dir in scanDirs {
+            for dir in probeDirs {
                 let files = (try? FileManager.default.contentsOfDirectory(
                     atPath: dir)) ?? []
                 for f in files {
                     let p = (dir as NSString).appendingPathComponent(f)
-                    total += 1
                     guard let data = FileManager.default.contents(atPath: p),
                           !data.isEmpty else { continue }
                     scanned += 1
-                    if data.range(of: needle) != nil {
-                        hit = true
-                    }
+                    if data.range(of: needle) != nil { hit = true }
                 }
                 if hit { break }
             }
-            if !scanDirs.isEmpty {
-                pkdDB = hit
-                    ? "命中" : "未命中(可读\(scanned)/\(total)文件, dirs=\(scanDirs.count))"
-                break
-            }
+            pkdDB += hit
+                ? " 搜索=命中" : " 搜索=未命中(扫\(scanned)文件)"
         }
         parts.append("pkdDB=\(pkdDB)")
 
@@ -694,9 +706,8 @@ final class PrismTunnelController {
         return parts.joined(separator: " ")
     }
 
-    /// 保存 LSRegisterURL 和 pluginkit 的结果，供诊断输出
+    /// 保存注册尝试的结果，供诊断输出
     static var lsRegisterResult: String = "未调用"
-    static var pluginkitResult: String = "未调用"
     static var lsAppWorkspaceResult: String = "未调用"
 
     /// 强制向 Launch Services 注册 appex bundle。
@@ -719,13 +730,15 @@ final class PrismTunnelController {
         }
         for entry in entries where entry.hasSuffix(".appex") {
             let appexURL = pluginsURL.appendingPathComponent(entry)
-            let appexPath = appexURL.path
             let csPath = appexURL.appendingPathComponent("_CodeSignature/CodeResources").path
             let hasSeal = FileManager.default.fileExists(atPath: csPath)
             NSLog("[PrismVPN] appex=\(entry) CodeResources=\(hasSeal ? "有" : "无")")
 
-            // 方案1: posix_spawn pluginkit -a/-e（+ root 重试 + 注册验证）
-            tryPluginkitRegister(appexPath: appexPath)
+            // 方案1: posix_spawn pluginkit -a/-e —— 已废弃：iOS 无
+            //        pluginkit CLI（/usr/bin/pluginkit 不存在，spawn 恒
+            //        ENOENT）。改为用 TrollStore 自带 setuid root helper
+            //        执行官方 uicache 注册（与 TrollStore 安装时同源）
+            tryRootHelperUICache()
 
             // 方案2: LSApplicationWorkspace 私有 API
             // TrollStore CoreTrust 绕过允许调用私有类
@@ -969,16 +982,16 @@ final class PrismTunnelController {
 
     /// 通过 posix_spawn 运行 pluginkit 子命令。
     /// asRoot 依赖 com.apple.private.persona-mgmt entitlement，用
-    /// posix_spawnattr persona 三件套以 root 身份执行（TrollStore
-    /// TSUtil.m spawnRoot 同款机制）；captureOutput 时把 stdout 重定向
-    /// 到临时文件并在结束后读回。
+    /// posix_spawn 运行外部工具（TrollStore TSUtil.m spawnRoot 同款机制）；
+    /// captureOutput 时把 stdout 重定向到临时文件并在结束后读回。
     /// 返回 (spawnErrno, 子进程exitCode, stdout)
-    private static func runPluginkit(
+    private static func runSpawnTool(
+        path: String,
         args: [String],
         asRoot: Bool,
         captureOutput: Bool
     ) -> (spawn: Int32, exit: Int32, output: String) {
-        var argv: [UnsafeMutablePointer<CChar>?] = [strdup("pluginkit")]
+        var argv: [UnsafeMutablePointer<CChar>?] = [strdup(path)]
         for a in args { argv.append(strdup(a)) }
         argv.append(nil)
         defer { argv.prefix(while: { $0 != nil }).forEach { free($0) } }
@@ -1030,11 +1043,9 @@ final class PrismTunnelController {
         var pid: pid_t = 0
         let spawnResult: Int32
         if captureOutput {
-            spawnResult = posix_spawn(
-                &pid, "/usr/bin/pluginkit", &fa, &attr, &argv, nil)
+            spawnResult = posix_spawn(&pid, path, &fa, &attr, &argv, nil)
         } else {
-            spawnResult = posix_spawn(
-                &pid, "/usr/bin/pluginkit", nil, &attr, &argv, nil)
+            spawnResult = posix_spawn(&pid, path, nil, &attr, &argv, nil)
         }
         guard spawnResult == 0 else {
             return (spawnResult, -1, "")
@@ -1051,53 +1062,70 @@ final class PrismTunnelController {
         return (0, exitCode, output)
     }
 
-    /// 强制把 appex 注册进 pluginkit/pkd 数据库。
+    // MARK: - root helper 注册
+
+    static var rootHelperResult: String = "未调用"
+
+    /// 定位 TrollStore.app 目录（LS 查询，失败则扫描 Bundle/Application）
+    private static func trollStoreAppPath() -> String? {
+        if let cls = NSClassFromString("LSApplicationProxy") {
+            let c = cls as AnyObject
+            let sel = NSSelectorFromString("applicationProxyForIdentifier:")
+            if c.responds(to: sel),
+               let proxy = c.perform(sel, with: "com.opa334.TrollStore")?
+                   .takeUnretainedValue(),
+               let urlSel = NSSelectorFromString("bundleURL"),
+               let url = proxy.perform(urlSel)?
+                   .takeUnretainedValue() as? URL {
+                return url.path
+            }
+        }
+        let root = "/var/containers/Bundle/Application"
+        if let ids = try? FileManager.default.contentsOfDirectory(atPath: root) {
+            for id in ids {
+                let p = (root as NSString).appendingPathComponent(id)
+                if let apps = try? FileManager.default.contentsOfDirectory(atPath: p),
+                   apps.contains("TrollStore.app") {
+                    return (p as NSString).appendingPathComponent("TrollStore.app")
+                }
+            }
+        }
+        return nil
+    }
+
+    /// 用 TrollStore 自带的 setuid root helper（trollstorehelper）以 root
+    /// 身份执行官方 uicache 注册。
     ///
-    /// TrollStore 安装不走 installd，pkd 不会自动登记 PlugIns 下的扩展，
-    /// nesessionmanager 查不到 providerBundleIdentifier 即报 code=14。
-    /// 主 App 携带 no-sandbox 后 posix_spawn 可执行；若 pkd 拒绝 mobile
-    /// 身份的消息，再用 persona-mgmt 以 root 重试。-a（add）与 -e
-    /// （embedded）两种登记形态都尝试。最后用 -m -i 验证是否真的入库。
-    private static func tryPluginkitRegister(appexPath: String) {
-        var log: [String] = []
-
-        for (flag, label) in [("-a", "add"), ("-e", "embed")] {
-            var (spawnErr, exitCode, _) = runPluginkit(
-                args: [flag, appexPath], asRoot: false, captureOutput: false)
-            if spawnErr != 0 {
-                // posix_spawn 本身失败（EPERM=沙箱未逃逸，旧包无 no-sandbox）
-                log.append("\(label):spawn=\(spawnErr)")
-                break
-            }
-            log.append("\(label):u\(exitCode)")
-
-            if exitCode != 0 {
-                // mobile 身份被 pkd 拒绝 → root 重试
-                (spawnErr, exitCode, _) = runPluginkit(
-                    args: [flag, appexPath], asRoot: true, captureOutput: false)
-                log.append(spawnErr == 0 ? "root\(exitCode)" : "rootSpawn=\(spawnErr)")
-            }
-            if exitCode == 0 { break } // 已入库，无需再试其他登记形态
+    /// 背景：iOS 没有 pluginkit CLI（/usr/bin/pluginkit 不存在，spawn 恒
+    /// ENOENT），App 内 registerApplicationDictionary 只是同字典的 mobile
+    /// 身份重复劳动。TrollStore 安装 IPA 时正是以 root 跑 trollstorehelper
+    /// uicache（RootHelper/uicache.m registerPath，含 PlugIns 的完整
+    /// _LSBundlePlugins 字典）——这是生态内唯一的 root 级注册正道。
+    /// uicache CLI 语义：给 app 路径 = 注册该 app（含 PlugIns）。
+    @discardableResult
+    static func tryRootHelperUICache() -> Bool {
+        guard let tsPath = trollStoreAppPath() else {
+            rootHelperResult = "helper=TrollStore未定位"
+            return false
         }
-
-        // 验证：pluginkit -m -i <bundleID> 应列出该扩展；无输出 = 未注册
-        let (vErr, _, vOut) = runPluginkit(
-            args: ["-m", "-i", extensionBundleIdentifier],
-            asRoot: false, captureOutput: true)
-        if vErr == 0 {
-            let trimmed = vOut.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty {
-                log.append("m:未注册")
-            } else {
-                // 截断，避免诊断串超长
-                let head = String(trimmed.prefix(120))
-                log.append("m:已注册[\(head)]")
-            }
-        } else {
-            log.append("m:spawn=\(vErr)")
+        let helperPath = (tsPath as NSString)
+            .appendingPathComponent("trollstorehelper")
+        guard FileManager.default.isExecutableFile(atPath: helperPath) else {
+            rootHelperResult = "helper=\(helperPath)不可执行"
+            return false
         }
-        pluginkitResult = log.joined(separator: " ")
-        NSLog("[PrismVPN] pluginkit: \(pluginkitResult)")
+        let appPath = Bundle.main.bundlePath
+        let (spawnErr, exitCode, output) = runSpawnTool(
+            path: helperPath, args: ["uicache", appPath],
+            asRoot: true, captureOutput: true)
+        if spawnErr != 0 {
+            rootHelperResult = "helper=spawn=\(spawnErr)"
+            return false
+        }
+        let tail = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        rootHelperResult = "helper=u\(exitCode)\(tail.isEmpty ? "" : " out=\(tail.prefix(100))")"
+        NSLog("[PrismVPN] rootHelper: \(rootHelperResult)")
+        return exitCode == 0
     }
 
     // MARK: 失效配置识别
