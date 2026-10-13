@@ -502,23 +502,28 @@ jobs:
           # spawn 它，以 root 身份用 LSApplicationWorkspace 强扭注册 VPN
           # 扩展（registerApplicationDictionary: + registerPlugin:），并
           # 修复 PlugIns 目录权限（mobile:mobile，目录/可执行 0755）。
-          # -static-stdlib：Swift stdlib 静态链接，运行时零 @rpath 依赖
-          # （否则 CLI 的 swift lib 引用会挂掉步骤 3 校验和设备 dyld）。
+          # 动态链接系统 Swift stdlib（Xcode 16 起已移除 -static-stdlib 对
+          # Apple 平台的支持，build 133 由此静默丢 helper）：libswiftCore/
+          # Foundation 等自 iOS 13 起在 dyld 共享缓存与 SDK tbd stub 中。
+          # -rpath /usr/lib/swift 系统优先，@executable_path/Frameworks
+          # 兜底 back-deploy 的 _Concurrency。
           HELPER_SRC="$PWD/src-tauri/mobile-src/ios/Helper/PrismHelper.swift"
           HELPER_BIN="$APP/PrismHelper"
-          # helper 为增强注册（可选件）：编译失败不阻塞出包——设备端
-          # trySelfHelperRegister 检测到 helper 缺失会降级走
-          # trollstorehelper uicache。swiftc 输出完整进日志便于排错。
-          if xcrun -sdk iphoneos swiftc -O -static-stdlib \
+          # helper 是 pkd 注册的关键路径（root 身份 LSApplicationWorkspace
+          # registerApplicationDictionary + registerPlugin），编译失败必须
+          # 阻断出包——build 133 曾静默降级 uicache-only，真机 code=12。
+          if xcrun -sdk iphoneos swiftc -O \
             -target arm64-apple-ios15.0 \
+            -rpath /usr/lib/swift \
+            -rpath @executable_path/Frameworks \
             -framework Foundation -framework CoreServices -framework Security \
             -o "$HELPER_BIN" "$HELPER_SRC" 2>&1; then
             chmod +x "$HELPER_BIN"
             file "$HELPER_BIN"
             echo "PrismHelper compiled: $(du -h "$HELPER_BIN" | cut -f1)"
           else
-            echo "::warning::PrismHelper compile failed; packaging without it (uicache-only registration)"
-            rm -f "$HELPER_BIN"
+            echo "::error::PrismHelper compile failed (required for pkd plugin registration)"
+            exit 1
           fi
           # helper（若存在）会被步骤 4 的 Mach-O 循环自动 codesign 并入主 App seal
 

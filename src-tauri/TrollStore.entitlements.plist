@@ -5,8 +5,7 @@
 	<!-- TrollStore 安装时会从主二进制提取本文件作为 entitlements。
 	     绝不能包含 get-task-allow / task_for_pid-allow / com.apple.private.cs.debugger
 	     等受限键，否则 iOS 16+ 会要求开启“开发者模式”（未开启即闪退）。
-	     TrollStore 会自动补 com.apple.private.security.container-required，
-	     并用 CoreTrust 漏洞重新签名整个 app。 -->
+	     TrollStore 会用 CoreTrust 漏洞重新签名整个 app。 -->
 	<key>application-identifier</key>
 	<string>TROLLTROLL.com.prism.proxy</string>
 	<key>com.apple.developer.team-identifier</key>
@@ -29,6 +28,12 @@
 	<array>
 		<string>TROLLTROLL.com.prism.proxy</string>
 	</array>
+	<!-- 显式声明数据容器：no-sandbox 平台特权下 TrollStore 可能跳过
+	     分配标准沙盒数据目录，主 App 无容器时与插件共享的 App Group
+	     底层挂载异常，nesessionmanager 构建 VPN 会话时报 code=12
+	     "internal error"（build 133 真机诊断 noCnt=- 印证缺失）。 -->
+	<key>com.apple.private.security.container-required</key>
+	<string>com.prism.proxy</string>
 	<!-- TrollStore 平台特权（仅主 App）——官方 README "Unsandboxing" 完整配方：
 	     1) platform-application：no-sandbox/no-container 正常工作的前提，
 	        缺它时单加 no-sandbox/no-container 会导致启动即被杀

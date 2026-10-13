@@ -15,8 +15,11 @@
 //   PrismHelper register <mainAppBundlePath> <appexBundlePath>
 //   PrismHelper fixperm  <mainAppBundlePath> <appexBundlePath>
 //
-// 构建要求：swiftc -static-stdlib（静态链接 Swift stdlib，运行时零
-// @rpath 依赖；设备上仅依赖系统框架）。
+// 构建要求：动态链接系统 Swift stdlib（Xcode 16 起已移除
+// -static-stdlib 对 Apple 平台的支持）。libswiftCore/Foundation 等
+// 自 iOS 13 起在 dyld 共享缓存中，CI 侧以
+// -rpath /usr/lib/swift（系统优先）+ -rpath @executable_path/Frameworks
+// （兜底 back-deploy 的 _Concurrency）保证设备端解析。
 
 import Darwin
 import Foundation
