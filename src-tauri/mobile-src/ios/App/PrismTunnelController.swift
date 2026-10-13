@@ -96,7 +96,7 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
         let provisioning = PrismTunnelController.diagnoseProvisioning()
         let rtEnt = PrismTunnelController.runtimeEntitlementsSummary()
         let pkdReg = PrismTunnelController.diagnosePkdRegistration()
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) rtEnt=\(rtEnt) pkd=\(pkdReg) rootHelper=\(PrismTunnelController.rootHelperResult) selfHelper=\(PrismTunnelController.selfHelperResult) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] selfHelper= 随包 PrismHelper 以 root 执行的结果：reg ls=1/plugin=1=注册成功，fixperm fixed=N=权限修复数；rootHelper= TrollStore 官方 uicache（u0=成功）。若注册成功但仍 code 14 → 看 pkdDB 搜索是否命中，未命中则 pkd 在 nesessionmanager 校验层拒绝"
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) rtEnt=\(rtEnt) pkd=\(pkdReg) rootHelper=\(PrismTunnelController.rootHelperResult) selfHelper=\(PrismTunnelController.selfHelperResult) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] selfHelper= 随包 PrismRegister.sh 以 root（/bin/sh）执行的结果：reg uicache rc=0=TrollStore 官方注册成功 / pluginkit rc=0=CLI 注册成功，fixperm done=权限修复完成；rootHelper= TrollStore 官方 uicache（u0=成功）。若注册成功但仍 code 14 → 看 pkdDB 搜索是否命中，未命中则 pkd 在 nesessionmanager 校验层拒绝"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -792,8 +792,8 @@ final class PrismTunnelController {
             //        pluginkit CLI（/usr/bin/pluginkit 不存在，spawn 恒
             //        ENOENT）。注册交给：
             //        a) TrollStore 自带 trollstorehelper uicache（官方注册）
-            //        b) 随包 PrismHelper（root 级 registerApplicationDictionary
-            //           + registerPlugin: + 权限修复 + pkd kickstart）
+            //        b) 随包 PrismRegister.sh（root 级 uicache/pluginkit
+            //           注册 + 权限修复 + pkd kickstart）
             tryRootHelperUICache()
             trySelfHelperRegister()
 
@@ -802,7 +802,7 @@ final class PrismTunnelController {
             // 字典不如 TrollStore 安装时完整，会在 LaunchServices 里
             // 覆盖掉安装时生成的 _LSBundlePlugins 注册记录，反而清空
             // 主 App 的 plugInKitPlugins（lsPlug=plugins不可读 的来源）。
-            // LaunchServices 层注册统一由 root 级 uicache/PrismHelper 负责。
+            // LaunchServices 层注册统一由 root 级 uicache/PrismRegister.sh 负责。
 
             // 方案3: dlsym 多框架/多符号名尝试（兜底）
             // Apple 平台 C 符号在符号表中带下划线前缀：_LSRegisterURL
@@ -986,23 +986,27 @@ final class PrismTunnelController {
         return exitCode == 0
     }
 
-    // MARK: - 随包 root helper（PrismHelper）强扭注册
+    // MARK: - 随包 root 注册脚本（PrismRegister.sh）
 
     static var selfHelperResult: String = "未调用"
 
-    /// 以 root persona spawn 随包的 PrismHelper CLI：
-    /// 1. register — root 身份 LSApplicationWorkspace.registerApplication
-    ///    Dictionary:（完整官方字典）+ registerPlugin: 强扭注册扩展，
-    ///    并 kickstart pkd/nesessionmanager 强制重载数据库
+    /// 以 root persona 经 /bin/sh 执行随包的注册脚本：
+    /// 1. register — 优先用 TrollStore 官方 trollstorehelper uicache 注册
+    ///    app+PlugIns（root 级 LS/pkd 正道，mobile 身份扫描不到 TrollStore
+    ///    目录所以主 App 侧恒"未定位"，root 扫描即得），兜底 pluginkit -a，
+    ///    并 kickstart pkd/nesessionmanager 重载数据库
     /// 2. fixperm  — PlugIns 目录/文件属主修回 mobile:mobile（目录/可执行
     ///    0755、其余 0644），防 nesessionmanager 读沙盒时权限污染拒绝
-    /// helper 的 stdout 全部捕获进诊断（selfHelper= 字段）。
+    /// 用 shell 而非 Mach-O helper 的原因（build 133-136 实证）：TrollStore
+    /// 安装器统一重置 bundle 内文件权限（+x 丢失）叠加
+    /// path(forResource:ofType:) 对无扩展名文件的查找怪癖，二进制
+    /// PrismHelper 真机恒报 helper缺失；/bin/sh 解释执行只需读权限，
+    /// 完全绕开可执行位与签名问题。脚本的 stdout 全部捕获进诊断。
     @discardableResult
     static func trySelfHelperRegister() -> Bool {
-        guard
-            let helperPath = Bundle.main.path(forResource: "PrismHelper", ofType: nil),
-            FileManager.default.isExecutableFile(atPath: helperPath)
-        else {
+        let scriptPath = Bundle.main.bundleURL
+            .appendingPathComponent("PrismRegister.sh").path
+        guard FileManager.default.fileExists(atPath: scriptPath) else {
             selfHelperResult = "helper缺失"
             return false
         }
@@ -1017,7 +1021,7 @@ final class PrismTunnelController {
         var ok = true
         for cmd in ["register", "fixperm"] {
             let (spawnErr, exitCode, output) = runSpawnTool(
-                path: helperPath, args: [cmd, mainPath, appexPath],
+                path: "/bin/sh", args: [scriptPath, cmd, mainPath, appexPath],
                 asRoot: true, captureOutput: true)
             if spawnErr != 0 {
                 all.append("\(cmd):spawn=\(spawnErr)")

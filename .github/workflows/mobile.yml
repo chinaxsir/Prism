@@ -497,35 +497,64 @@ jobs:
           echo "--- rpaths after rewrite ---"
           otool -l "$MAIN_EXEC_PATH" | grep -A2 LC_RPATH | grep path
 
-          # ==================== 3.5 编译 PrismHelper（随包 root helper）====
-          # 主 App 在设备上以 root persona（persona-mgmt + no-sandbox）
-          # spawn 它，以 root 身份用 LSApplicationWorkspace 强扭注册 VPN
-          # 扩展（registerApplicationDictionary: + registerPlugin:），并
-          # 修复 PlugIns 目录权限（mobile:mobile，目录/可执行 0755）。
-          # 动态链接系统 Swift stdlib（Xcode 16 起已移除 -static-stdlib 对
-          # Apple 平台的支持，build 133 由此静默丢 helper）：libswiftCore/
-          # Foundation 等自 iOS 13 起在 dyld 共享缓存与 SDK tbd stub 中。
-          # -rpath /usr/lib/swift 系统优先，@executable_path/Frameworks
-          # 兜底 back-deploy 的 _Concurrency。
-          HELPER_SRC="$PWD/src-tauri/mobile-src/ios/Helper/PrismHelper.swift"
-          HELPER_BIN="$APP/PrismHelper"
-          # helper 是 pkd 注册的关键路径（root 身份 LSApplicationWorkspace
-          # registerApplicationDictionary + registerPlugin），编译失败必须
-          # 阻断出包——build 133 曾静默降级 uicache-only，真机 code=12。
-          if xcrun -sdk iphoneos swiftc -O \
-            -target arm64-apple-ios15.0 \
-            -Xlinker -rpath -Xlinker /usr/lib/swift \
-            -Xlinker -rpath -Xlinker @executable_path/Frameworks \
-            -framework Foundation -framework CoreServices -framework Security \
-            -o "$HELPER_BIN" "$HELPER_SRC" 2>&1; then
-            chmod +x "$HELPER_BIN"
-            file "$HELPER_BIN"
-            echo "PrismHelper compiled: $(du -h "$HELPER_BIN" | cut -f1)"
+          # ==================== 3.5 生成 PrismRegister.sh（随包 root 注册脚本）====
+          # 主 App 在设备上以 root persona spawn /bin/sh 执行本脚本：
+          #   register — 优先 TrollStore 官方 trollstorehelper uicache 注册
+          #              app+PlugIns（root 级 LS/pkd 正道，mobile 身份扫描
+          #              不到 TrollStore 目录，root 扫描即得），兜底
+          #              pluginkit -a，并 kickstart pkd/nesessionmanager
+          #   fixperm  — bundle 属主修回 mobile:mobile（目录/可执行 0755）
+          # 用 shell 而非 Mach-O helper（build 133-136 实证）：/bin/sh
+          # 解释执行只需读权限，不依赖可执行位与 Mach-O 签名——二进制
+          # PrismHelper 因 TrollStore 安装器统一重置 bundle 内文件权限
+          # （+x 丢失）叠加 path(forResource:) 查找怪癖，真机恒报
+          # helper缺失（CI 日志 mach-o 里明明有它，见 build 136）。
+          REGISTER_SCRIPT="$APP/PrismRegister.sh"
+          cat << 'EOF' > "$REGISTER_SCRIPT"
+          #!/bin/sh
+          # PrismRegister.sh — TrollStore 环境 VPN 插件注册脚本（随包分发）
+          # 由主 App 以 root persona 执行：/bin/sh PrismRegister.sh <cmd> <mainApp> <appex>
+          # stdout 被主 App 捕获进诊断（selfHelper= 字段），务必输出 result= 行。
+          CMD="$1"; APP_DIR="$2"; APPEX_DIR="$3"
+          if [ "$CMD" = "register" ]; then
+            TS_HELPER=""
+            for d in /var/containers/Bundle/Application/*/TrollStore.app; do
+              if [ -x "$d/trollstorehelper" ]; then TS_HELPER="$d/trollstorehelper"; break; fi
+            done
+            if [ -n "$TS_HELPER" ]; then
+              "$TS_HELPER" uicache "$APP_DIR" 2>&1
+              echo "result=reg uicache rc=$?"
+            else
+              echo "result=reg uicache=no_helper"
+              if [ -x /usr/bin/pluginkit ]; then
+                /usr/bin/pluginkit -v -a "$APP_DIR/PlugIns/PrismVPN.appex" 2>&1
+                echo "result=reg pluginkit rc=$?"
+              else
+                echo "result=reg pluginkit=absent"
+              fi
+            fi
+            /bin/launchctl kickstart -k system/com.apple.pluginkit.pkd 2>/dev/null
+            echo "result=reg pkdKick=$?"
+            /bin/launchctl kickstart -k system/com.apple.nesessionmanager 2>/dev/null
+            echo "result=reg nesmKick=$?"
+          elif [ "$CMD" = "fixperm" ]; then
+            chown -R 501:501 "$APP_DIR" 2>&1
+            echo "result=fixperm chown rc=$?"
+            find "$APP_DIR" -type d -exec chmod 755 {} + 2>&1
+            find "$APP_DIR" -type f -exec chmod 644 {} + 2>&1
+            EXEC=$(plutil -extract CFBundleExecutable raw "$APP_DIR/Info.plist" 2>/dev/null)
+            [ -n "$EXEC" ] && chmod 755 "$APP_DIR/$EXEC"
+            AEXEC=$(plutil -extract CFBundleExecutable raw "$APPEX_DIR/Info.plist" 2>/dev/null)
+            [ -n "$AEXEC" ] && chmod 755 "$APPEX_DIR/$AEXEC"
+            chmod 755 "$APP_DIR/PrismRegister.sh" 2>/dev/null
+            echo "result=fixperm done"
           else
-            echo "::error::PrismHelper compile failed (required for pkd plugin registration)"
-            exit 1
+            echo "result=unknown cmd=$CMD"
+            exit 2
           fi
-          # helper（若存在）会被步骤 4 的 Mach-O 循环自动 codesign 并入主 App seal
+          EOF
+          chmod +x "$REGISTER_SCRIPT"
+          echo "PrismRegister.sh created: $(du -h "$REGISTER_SCRIPT" | cut -f1)"
 
           # ==================== 4. 最终签名封印（必须在所有修改完成后）====================
           # 所有文件修改（Info.plist / RPATH / dylib 删除）已完成，
@@ -548,12 +577,6 @@ jobs:
             if [ "$bin" = "$APP/$EXEC" ]; then
               codesign --force --sign - \
                 --entitlements "$PWD/src-tauri/TrollStore.entitlements.plist" \
-                "$bin"
-            elif [ "$bin" = "$APP/PrismHelper" ]; then
-              # helper 必须带特权 entitlements（no-sandbox 等，TrollStore
-              # 重签保留），否则 root 身份也在沙箱内，注册链路失效
-              codesign --force --sign - \
-                --entitlements "$PWD/src-tauri/mobile-src/ios/Helper/PrismHelper.entitlements.plist" \
                 "$bin"
             else
               codesign --force --sign - "$bin"
