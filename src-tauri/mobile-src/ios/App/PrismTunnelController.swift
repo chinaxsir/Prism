@@ -393,6 +393,43 @@ final class PrismTunnelController {
         // static= 整段无诊断价值；只有 app=valid 时 bnd/bin 才可作判据。
         let app = Bundle.main.executableURL.map { checkOne($0) } ?? "无路径"
 
+        // ---- requirement 对照（IPA.txt 消噪）----
+        // 三目标同报 paramErr(-50) 有两种可能：
+        //   a) API 层必现错误（isStaticCode 失败之类）→ static 段整体噪声
+        //   b) BasicValidator 解析 TrollStore 签名时抛 paramErr →
+        //      nesessionmanager 若走同款校验，同样 -50 → 直接解释 code 14
+        // 区分方法：对同一对象用显式 requirement（"anchor apple generic"）
+        // 再校验一次。requirement 解析发生在类型检查之后——若返回
+        // -67050（designated 不满足）说明校验器正常工作且签名被正式
+        // 拒绝；若仍 -50 则确认 API 层错误。
+        var req = "req符号未找到"
+        if let reqCreateP = dlsym(sec, "SecRequirementCreateWithString") {
+            typealias ReqCreateFn = @convention(c) (
+                CFString, UInt32, UnsafeMutablePointer<CFTypeRef?>
+            ) -> OSStatus
+            let reqCreate = unsafeBitCast(reqCreateP, to: ReqCreateFn.self)
+            var reqRef: CFTypeRef?
+            let rc = reqCreate("anchor apple generic" as CFString, 0, &reqRef)
+            if rc == 0, let reqPtr = reqRef {
+                var ref2: CFTypeRef?
+                let cs2 = create(appexURL as CFURL, 0, nil, &ref2)
+                if cs2 == 0, let code2 = ref2 {
+                    let ptr2 = unsafeBitCast(code2, to: OpaquePointer.self)
+                    var cfErr2: CFError?
+                    let vs2 = checkErr(
+                        ptr2, 0,
+                        unsafeBitCast(reqPtr, to: OpaquePointer.self),
+                        &cfErr2)
+                    req = vs2 == 0
+                        ? "reqValid(不应发生)" : "req=\(vs2)"
+                } else {
+                    req = "reqCreateCodeErr(\(cs2))"
+                }
+            } else {
+                req = "reqCreateErr(\(rc))"
+            }
+        }
+
         // identifier/team/flags（经 bundle）
         var extra = ""
         var infoCodeRef: CFTypeRef?
@@ -410,7 +447,7 @@ final class PrismTunnelController {
         }
         // 注意：Swift ARC 自动管理 CF 对象，不能也无需手动 CFRelease。
 
-        return "bnd=\(bnd) bin=\(bin) app=\(app) \(exeInfo)\(extra)"
+        return "bnd=\(bnd) bin=\(bin) app=\(app) req=\(req) \(exeInfo)\(extra)"
     }
 
     /// 检查开发者模式状态与扩展注册情况。
@@ -1696,45 +1733,24 @@ final class PrismTunnelController {
             PrismTunnelController.lastManagerCount = all.count
             NSLog("[PrismVPN] loadAllFromPreferences 成功, 找到 \(all.count) 个 manager")
 
-            // 主动清理（覆盖升级后 code=14 的第一道防线）：
-            // - keep：属于本 App 且 providerBundleIdentifier 与当前
-            //   预期扩展完全一致的 manager，只保留一个
-            // - trash：provider 已变更（旧主 App ID / 重复 manager），
-            //   继续使用必然 code=14，先删除
-            var keep: NETunnelProviderManager?
-            var trash: [NETunnelProviderManager] = []
-            for manager in all {
-                let proto = manager.protocolConfiguration as? NETunnelProviderProtocol
-                let isOurs = proto?.serverAddress == managerServerTag
-                let providerID = proto?.providerBundleIdentifier
-                if isOurs, providerID == extensionBundleIdentifier {
-                    if keep == nil {
-                        keep = manager
-                    } else {
-                        trash.append(manager) // 重复配置
-                    }
-                } else if isOurs
-                    || providerID?.hasSuffix(".PrismVPN") == true
-                {
-                    trash.append(manager)
-                }
-            }
-
+            // 影子配置清道夫（IPA.txt 方案一落地）：
+            // 「设置里提示需要更新 / 需两次增加 VPN 配置」= 系统里存在
+            // 引用失效扩展记录的悬空（Orphaned）配置——即使 providerBundle
+            // Identifier 看似匹配，其内部关联的扩展签名/注册状态可能早已
+            // 与当前安装脱节（多次重装不同 build 后尤其如此）。
+            // 因此【不复用任何旧 manager】：全部删除 → 延迟让 nesession-
+            // manager 处理删除事件 → 重 load 确认清空 → 全新创建。
             let provide: () -> Void = {
-                if let keep = keep {
-                    completion(.success(keep))
-                } else {
-                    completion(.success(NETunnelProviderManager()))
-                }
+                completion(.success(NETunnelProviderManager()))
             }
 
-            guard !trash.isEmpty else {
+            guard !all.isEmpty else {
                 provide()
                 return
             }
-            NSLog("[PrismVPN] 发现 \(trash.count) 个失效/重复 VPN 配置，删除中")
+            NSLog("[PrismVPN] 影子配置清道夫: 删除全部 \(all.count) 个既有配置（不复用）")
             let group = DispatchGroup()
-            for manager in trash {
+            for manager in all {
                 group.enter()
                 manager.removeFromPreferences { removeError in
                     if let removeError = removeError {
@@ -1743,7 +1759,24 @@ final class PrismTunnelController {
                     group.leave()
                 }
             }
-            group.notify(queue: .main, execute: provide)
+            // 删除后延迟 1.5s：nesessionmanager 异步处理配置删除，
+            // 立即重建会撞上尚未清理完的悬空状态（「需要两次操作」根因）
+            group.notify(queue: .main, execute: { [weak self] in
+                NSLog("[PrismVPN] 旧配置已删, 延迟 1.5s 后确认清空")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    NETunnelProviderManager.loadAllFromPreferences { rest, _ in
+                        let remaining = rest?.count ?? 0
+                        PrismTunnelController.lastManagerCount = remaining
+                        if remaining > 0 {
+                            NSLog("[PrismVPN] 警告: 删除后仍有 \(remaining) 个配置残留（幽灵条目，API 视角）")
+                        } else {
+                            NSLog("[PrismVPN] 清空确认: 0 个残留")
+                        }
+                        self?.clearSharedErrorFile()
+                        provide()
+                    }
+                }
+            })
         }
     }
 
