@@ -32,8 +32,31 @@ let MOBILE_GID: gid_t = 501
 
 func dumpEntitlements(from execPath: String) -> [String: Any] {
     var out = [String: Any]()
+
+    // SecTaskCreateFromPath / SecTaskCopyValueForEntitlement 在 iOS SDK
+    // 头文件中标注 macOS-only，Swift `import Security` 不可见（build 135
+    // 实证 cannot find in scope），但 iOS 的 Security.framework 二进制
+    // 确实导出——用 dlsym 动态绑定（TrollStore 生态 helper 的标准做法，
+    // 与下方 mcmContainerURL 绑定 objc_msgSend 同款模式）。
+    typealias CreateFromPathFn = @convention(c) (
+        CFAllocator?, CFURL, UnsafeMutablePointer<CFError?>?
+    ) -> CFTypeRef?
+    typealias CopyValueFn = @convention(c) (
+        CFTypeRef, CFString, UnsafeMutablePointer<CFError?>?
+    ) -> CFTypeRef?
+
+    guard
+        let createSym = dlsym(dlopen(nil, RTLD_LAZY), "SecTaskCreateFromPath"),
+        let copySym = dlsym(dlopen(nil, RTLD_LAZY), "SecTaskCopyValueForEntitlement")
+    else {
+        FileHandle.standardError.write("helper: sec-task bind fail\n".data(using: .utf8)!)
+        return out
+    }
+    let createFromPath = unsafeBitCast(createSym, to: CreateFromPathFn.self)
+    let copyValue = unsafeBitCast(copySym, to: CopyValueFn.self)
+
     let url = URL(fileURLWithPath: execPath) as CFURL
-    guard let task = SecTaskCreateFromPath(nil, url, nil) else {
+    guard let task = createFromPath(nil, url, nil) else {
         FileHandle.standardError.write("helper: ent dump fail \(execPath)\n".data(using: .utf8)!)
         return out
     }
@@ -47,11 +70,8 @@ func dumpEntitlements(from execPath: String) -> [String: Any] {
         "com.apple.private.persona-mgmt",
     ]
     for k in keys {
-        // SecTaskCopyValueForEntitlement 的 Swift 导入返回 CFTypeRef?
-        //（ARC 管理，非 Unmanaged），error 参数是 CFError? 而非
-        // Unmanaged<CFError>?——三处签名务必对齐 SDK，否则编译失败
         var err: CFError? = nil
-        if let v = SecTaskCopyValueForEntitlement(task, k as CFString, &err) {
+        if let v = copyValue(task, k as CFString, &err) {
             out[k] = v
         }
     }
