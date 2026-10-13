@@ -506,14 +506,21 @@ jobs:
           # （否则 CLI 的 swift lib 引用会挂掉步骤 3 校验和设备 dyld）。
           HELPER_SRC="$PWD/src-tauri/mobile-src/ios/Helper/PrismHelper.swift"
           HELPER_BIN="$APP/PrismHelper"
-          xcrun -sdk iphoneos swiftc -O -static-stdlib \
+          # helper 为增强注册（可选件）：编译失败不阻塞出包——设备端
+          # trySelfHelperRegister 检测到 helper 缺失会降级走
+          # trollstorehelper uicache。swiftc 输出完整进日志便于排错。
+          if xcrun -sdk iphoneos swiftc -O -static-stdlib \
             -target arm64-apple-ios15.0 \
             -framework Foundation -framework CoreServices -framework Security \
-            -o "$HELPER_BIN" "$HELPER_SRC"
-          chmod +x "$HELPER_BIN"
-          file "$HELPER_BIN"
-          echo "PrismHelper compiled: $(du -h "$HELPER_BIN" | cut -f1)"
-          # helper 会被步骤 4 的 Mach-O 循环自动 codesign 并入主 App seal
+            -o "$HELPER_BIN" "$HELPER_SRC" 2>&1; then
+            chmod +x "$HELPER_BIN"
+            file "$HELPER_BIN"
+            echo "PrismHelper compiled: $(du -h "$HELPER_BIN" | cut -f1)"
+          else
+            echo "::warning::PrismHelper compile failed; packaging without it (uicache-only registration)"
+            rm -f "$HELPER_BIN"
+          fi
+          # helper（若存在）会被步骤 4 的 Mach-O 循环自动 codesign 并入主 App seal
 
           # ==================== 4. 最终签名封印（必须在所有修改完成后）====================
           # 所有文件修改（Info.plist / RPATH / dylib 删除）已完成，
