@@ -1447,7 +1447,7 @@ final class PrismTunnelController {
     static func readExtensionHeartbeat() -> (alive: Bool, stage: String, age: Int) {
         guard let groupURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: prismAppGroupID
-        ) { return (false, "appGroup不可用", -1) }
+        ) else { return (false, "appGroup不可用", -1) }
         guard let text = try? String(
             contentsOf: groupURL.appendingPathComponent("prism_status.txt"),
             encoding: .utf8
