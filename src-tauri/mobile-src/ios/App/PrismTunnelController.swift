@@ -1382,11 +1382,27 @@ final class PrismTunnelController {
                 // observer 移除后的断开无人感知，UI 报成功而隧道已死
                 //（真机观测：App 显示成功但状态栏无 VPN 图标）。
                 // 因此 connected 后再观察 3s：期间断开 → 走 describeDisconnect
-                // 报真实原因；稳定 3s 才报成功。
-                NSLog("[PrismVPN] connected, 稳定观察 3s 后再报成功")
+                // 报真实原因；稳定 3s 后还要读扩展心跳——TrollStore 假
+                // 团队配置可能上报【假 connected】（扩展从未被拉起），
+                // 心跳是进程存活的唯一可靠证据（真机观测：状态 connected
+                // 但状态栏无图标、扩展 API 无监听 → 节点栏"暂无节点"）。
+                NSLog("[PrismVPN] connected, 稳定观察 3s + 心跳验证")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
                     // completed=true 说明期间已因断开/超时 finish，跳过
-                    finish(nil)
+                    let hb = PrismTunnelController.readExtensionHeartbeat()
+                    if hb.alive {
+                        NSLog("[PrismVPN] 心跳验证通过 (stage=\(hb.stage), age=\(hb.age)s)")
+                        finish(nil)
+                        return
+                    }
+                    NSLog("[PrismVPN] 假连接: 状态 connected 但扩展无心跳 (stage=\(hb.stage), age=\(hb.age)s)")
+                    finish(NSError(
+                        domain: "PrismVPN", code: -6,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "系统状态 connected 但扩展进程无心跳（stage=\(hb.stage), age=\(hb.age)s）" +
+                            "——扩展从未被系统拉起（TrollStore 假签名配置的状态显示不可信），" +
+                            "注册层仍需修复；这不是内核或配置问题"]
+                    ))
                 }
             case .disconnected:
                 // 解析真实断开原因（共享错误文件 → iOS16 系统 API → 通用描述）
@@ -1423,6 +1439,26 @@ final class PrismTunnelController {
             ))
         }
         RunLoop.main.add(timer!, forMode: .common)
+    }
+
+    /// 读取扩展心跳（prism_status.txt，扩展每 3s 刷新）。
+    /// TrollStore 假团队配置下系统可能上报假 connected（扩展进程从未
+    /// 被拉起），心跳是扩展存活的唯一可靠证据。
+    static func readExtensionHeartbeat() -> (alive: Bool, stage: String, age: Int) {
+        guard let groupURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: prismAppGroupID
+        ) { return (false, "appGroup不可用", -1) }
+        guard let text = try? String(
+            contentsOf: groupURL.appendingPathComponent("prism_status.txt"),
+            encoding: .utf8
+        ), !text.isEmpty else { return (false, "无心跳文件", -1) }
+        let parts = text.split(separator: " ")
+        guard let ts = Double(parts.first ?? "") else {
+            return (false, "心跳格式异常", -1)
+        }
+        let stage = parts.dropFirst().joined(separator: " ")
+        let age = Int(Date().timeIntervalSince1970 - ts)
+        return (age <= 10, stage, age)
     }
 
     /// 解析 VPN 断开原因，三级回退：
