@@ -49,7 +49,27 @@ private func clearSharedError() {
     )
 }
 
+// MARK: - 扩展心跳（存活可见化）
+//
+// 扩展 startTunnel 成功后若进程崩溃/被杀（Go panic、jetsam、watchdog），
+// 系统只是静默断开——主 App 侧 connection 一度 connected 会误报"启动成功"。
+// 扩展每 3s 刷新 App Group「prism_status.txt」心跳（unix 秒 + 阶段），
+// 主 App 据此判断扩展是否还活着。
+
+private func writeHeartbeat(_ stage: String) {
+    guard let groupURL = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: prismAppGroupID
+    ) else { return }
+    let ts = Int(Date().timeIntervalSince1970)
+    try? "\(ts) \(stage)".write(
+        to: groupURL.appendingPathComponent("prism_status.txt"),
+        atomically: true, encoding: .utf8)
+}
+
 final class PacketTunnelProvider: NEPacketTunnelProvider {
+
+    /// 心跳定时器（startTunnel 成功后启动，stopTunnel 停止）
+    private var heartbeatTimer: Timer?
 
     override func startTunnel(
         options: [String: NSObject]?,
@@ -57,6 +77,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     ) {
         prismProviderRef = self
         NSLog("[PrismVPN] startTunnel begin")
+        writeHeartbeat("start")
         // 清理上一轮残留错误，避免本次扩展进程崩溃（来不及写新错误）时
         // 主 App 读到陈旧内容被误导
         clearSharedError()
@@ -136,19 +157,36 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
 
             NSLog("[PrismVPN] PrismVPNStart succeeded, tunnel ready")
+            writeHeartbeat("running")
+            startHeartbeatTimer()
             completionHandler(nil)
         } catch {
             NSLog("[PrismVPN] startTunnel error: \(error.localizedDescription)")
             // 含 PrismVPNStart 返回的精确内核错误（Go error 原文）
             writeSharedError(error.localizedDescription)
+            writeHeartbeat("startFailed")
             completionHandler(error)
         }
+    }
+
+    /// 每 3s 刷新心跳：只要扩展进程活着，prism_status.txt 的时间戳就
+    /// 持续更新；进程死亡后心跳冻结，主 App 可据此判死
+    private func startHeartbeatTimer() {
+        heartbeatTimer?.invalidate()
+        let t = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { _ in
+            writeHeartbeat("alive")
+        }
+        RunLoop.main.add(t, forMode: .common)
+        heartbeatTimer = t
     }
 
     override func stopTunnel(
         with reason: NEProviderStopReason,
         completionHandler: @escaping () -> Void
     ) {
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+        writeHeartbeat("stopped:\(reason.rawValue)")
         PrismVPNStop()
         completionHandler()
     }

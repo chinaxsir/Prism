@@ -1377,7 +1377,17 @@ final class PrismTunnelController {
             NSLog("[PrismVPN] NEVPNStatusDidChange: \(status.rawValue)")
             switch status {
             case .connected:
-                finish(nil)
+                // 闪连即崩检测：startTunnel 成功 → connected → 扩展进程
+                // 随后崩溃/被杀 → 系统静默断开。若立即 finish(nil)，
+                // observer 移除后的断开无人感知，UI 报成功而隧道已死
+                //（真机观测：App 显示成功但状态栏无 VPN 图标）。
+                // 因此 connected 后再观察 3s：期间断开 → 走 describeDisconnect
+                // 报真实原因；稳定 3s 才报成功。
+                NSLog("[PrismVPN] connected, 稳定观察 3s 后再报成功")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    // completed=true 说明期间已因断开/超时 finish，跳过
+                    finish(nil)
+                }
             case .disconnected:
                 // 解析真实断开原因（共享错误文件 → iOS16 系统 API → 通用描述）
                 self.describeDisconnect(connection: connection) { desc, underlying in
@@ -1428,6 +1438,28 @@ final class PrismTunnelController {
         completion: @escaping (String, Error?) -> Void
     ) {
         let generic = "扩展启动后立即断开（status=disconnected）"
+
+        // 0. 扩展心跳判死：prism_status.txt 由扩展每 3s 刷新，时间戳
+        // 超过 15s 未更新 = 扩展进程已崩溃/被杀（Go panic、jetsam）。
+        // 这一信息在扩展来不及写错误文件时是唯一的死因线索。
+        if let groupURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: prismAppGroupID
+        ) {
+            let statusFile = groupURL.appendingPathComponent("prism_status.txt")
+            if let text = try? String(contentsOf: statusFile, encoding: .utf8),
+               let tsText = text.split(separator: " ").first,
+               let ts = Double(tsText)
+            {
+                let age = Date().timeIntervalSince1970 - ts
+                if age > 15 {
+                    let stage = text.split(separator: " ").dropFirst().joined(separator: " ")
+                    let crash = "扩展进程已崩溃（心跳停于 \(Int(age))s 前，阶段=\(stage)）"
+                    NSLog("[PrismVPN] \(crash)")
+                    completion(crash, nil)
+                    return
+                }
+            }
+        }
 
         // 1. 共享错误文件
         if let groupURL = FileManager.default.containerURL(
