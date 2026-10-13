@@ -1650,15 +1650,21 @@ final class PrismTunnelController {
         }
     }
 
-    /// 删除 App Group 中的 prism_error.txt（主 App 侧清理）。
-    /// code=14 场景下扩展进程根本不会启动，扩展端 clearSharedError
-    /// 无法执行，必须由主 App 在每轮启动前主动清除。
+    /// 删除 App Group 中的诊断残留（主 App 侧清理）。
+    /// - prism_error.txt：code=14 场景下扩展进程根本不会启动，扩展端
+    ///   clearSharedError 无法执行，必须由主 App 在每轮启动前主动清除
+    /// - prism_status.txt：扩展心跳。【必须同步清除】否则 10s 内重试
+    ///   启动时，上一轮扩展的旧心跳会被 readExtensionHeartbeat 误判为
+    ///   本次存活，假连接穿透心跳验证（build 130 真机复现）
     private func clearSharedErrorFile() {
         guard let groupURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: prismAppGroupID
         ) else { return }
         try? FileManager.default.removeItem(
             at: groupURL.appendingPathComponent("prism_error.txt")
+        )
+        try? FileManager.default.removeItem(
+            at: groupURL.appendingPathComponent("prism_status.txt")
         )
     }
 
