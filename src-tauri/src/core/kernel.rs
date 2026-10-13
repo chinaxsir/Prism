@@ -122,10 +122,6 @@ pub struct KernelConfig {
     pub api_secret: String,
     /// 生成的 sing-box 运行时配置（JSON）
     pub runtime_config: serde_json::Value,
-    /// iOS 本地代理模式：内核在主 App 进程内（FFI PrismKernelStart），
-    /// 停止走 PrismKernelStop 而非 NE 扩展隧道
-    #[serde(default)]
-    pub in_process: bool,
 }
 
 pub struct KernelHandle {
@@ -178,20 +174,12 @@ impl KernelHandle {
         };
         #[cfg(target_os = "ios")]
         let (child, pid): (Option<Child>, u32) = {
-            if config.in_process {
-                // 本地代理模式：进程内 FFI 启动 Go 内核（mixed 127.0.0.1:mixed_port）
-                crate::platform::ios::start_local_proxy(&config_path, &config.work_dir)
-                    .map_err(|e| anyhow::anyhow!("内核启动失败: {e}"))?;
-                tracing::info!("sing-box started in-process (local proxy mode)");
-                (None, std::process::id())
-            } else {
-                let content = std::str::from_utf8(&config_bytes)
-                    .map_err(|e| anyhow::anyhow!("内核配置编码错误: {e}"))?;
-                crate::platform::ios::start_tunnel(content)
-                    .map_err(|e| anyhow::anyhow!("VPN 启动失败: {e}"))?;
-                tracing::info!("iOS packet tunnel extension start requested");
-                (None, std::process::id())
-            }
+            let content = std::str::from_utf8(&config_bytes)
+                .map_err(|e| anyhow::anyhow!("内核配置编码错误: {e}"))?;
+            crate::platform::ios::start_tunnel(content)
+                .map_err(|e| anyhow::anyhow!("VPN 启动失败: {e}"))?;
+            tracing::info!("iOS packet tunnel extension start requested");
+            (None, std::process::id())
         };
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
         let (child, pid): (Option<Child>, u32) = {
@@ -258,13 +246,7 @@ impl KernelHandle {
                 crate::platform::android::stop_service();
             }
             #[cfg(target_os = "ios")]
-            {
-                if config.in_process {
-                    crate::platform::ios::stop_local_proxy();
-                } else {
-                    crate::platform::ios::stop_tunnel();
-                }
-            }
+            crate::platform::ios::stop_tunnel();
             #[cfg(not(any(target_os = "ios", target_os = "android")))]
             {
                 if let Some(mut c) = child {
@@ -334,13 +316,7 @@ impl KernelHandle {
         }
 
         #[cfg(target_os = "ios")]
-        {
-            if self.config.in_process {
-                crate::platform::ios::stop_local_proxy();
-            } else {
-                crate::platform::ios::stop_tunnel();
-            }
-        }
+        crate::platform::ios::stop_tunnel();
 
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
         clear_kernel_pid(self.pid);

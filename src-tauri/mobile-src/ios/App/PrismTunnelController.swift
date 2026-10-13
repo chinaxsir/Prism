@@ -130,6 +130,21 @@ final class PrismTunnelController {
     /// 旧签名身份，App 内 API 不可见/不可删，必须去系统设置手动删除
     static var lastManagerCount = -1
 
+    /// 连接成功后的长期断开监听（installDisconnectWatcher 安装/拆除）
+    private var disconnectWatcher: NSObjectProtocol?
+
+    /// 最近一次成功发起连接的 manager：看门狗判死后经它强制
+    /// stopVPNTunnel 重置系统 VPN 状态（IPA.txt 主 App 端方案）
+    private var activeManager: NETunnelProviderManager?
+
+    /// 巨魔看门狗定时器：连接成功后每 4s 轮询扩展心跳，
+    /// 扩展被 Jetsam 静默强杀且系统丢弃断开通知时兜底判死
+    private var vpnWatchdogTimer: Timer?
+
+    /// 非预期断开回调（看门狗判死时触发；Swift→Rust 暂无回调通道，
+    /// 断开原因同时写入 App Group prism_error.txt 供诊断与下次启动回显）
+    var onVpnUnexpectedDisconnect: ((String) -> Void)?
+
     /// 把 NSError 完整描述（domain/code/userInfo）输出，便于真机定位
     static func describe(error: Error) -> String {
         let ns = error as NSError
@@ -1288,6 +1303,8 @@ final class PrismTunnelController {
                     attemptsRemaining: attemptsRemaining, completion: completion
                 )
             case .success(let saved):
+                // 记住本次连接的 manager：看门狗判死 / 停止后清理都要用它
+                self.activeManager = saved
                 do {
                     try saved.connection.startVPNTunnel()
                     NSLog("[PrismVPN] startVPNTunnel 调用成功")
@@ -1393,6 +1410,14 @@ final class PrismTunnelController {
                     if hb.alive {
                         NSLog("[PrismVPN] 心跳验证通过 (stage=\(hb.stage), age=\(hb.age)s)")
                         finish(nil)
+                        // 连接成功后启动巨魔看门狗：扩展被 Jetsam 静默强杀
+                        // 且系统丢弃断开通知时，靠心跳时间戳兜底判死
+                        self.startVpnWatchdog()
+                        // 连接成功后启动长期断开监听：扩展崩溃/系统断开会
+                        // 触发 NEVPNStatusDidChange(disconnected)，若无人
+                        // 感知，App 将永远显示"已连接"而隧道实际已死
+                        //（build 132 真机观测）
+                        self.installDisconnectWatcher(connection: connection)
                         return
                     }
                     NSLog("[PrismVPN] 假连接: 状态 connected 但扩展无心跳 (stage=\(hb.stage), age=\(hb.age)s)")
@@ -1441,6 +1466,46 @@ final class PrismTunnelController {
         RunLoop.main.add(timer!, forMode: .common)
     }
 
+    /// 连接成功后的长期断开监听。
+    /// 扩展进程崩溃 / 系统回收 / 内核失败 cancelTunnelWithError 都会以
+    /// NEVPNStatusDidChange(.disconnected) 体现；若无人在场感知，UI 将
+    /// 永远停留在"已连接"。这里把断开原因写进共享错误文件并打日志，
+    /// 用户下次重试启动时即可看到真实原因（startAttempt 开头才会清理）。
+    private func installDisconnectWatcher(connection: NEVPNConnection) {
+        // 旧的长期监听先拆除，避免重复安装导致多个 observer 叠加
+        if let old = disconnectWatcher {
+            NotificationCenter.default.removeObserver(old)
+            disconnectWatcher = nil
+        }
+        disconnectWatcher = NotificationCenter.default.addObserver(
+            forName: NSNotification.Name.NEVPNStatusDidChange,
+            object: connection,
+            queue: .main
+        ) { [weak self] _ in
+            guard connection.status == .disconnected else { return }
+            // 立即拆除自身：一次断开只报告一次
+            if let token = self?.disconnectWatcher {
+                NotificationCenter.default.removeObserver(token)
+                self?.disconnectWatcher = nil
+            }
+            // 同步拆除看门狗：VPN 已断开，心跳冻结是预期行为，不再判死
+            self?.stopVpnWatchdog()
+            NSLog("[PrismVPN] 连接成功后检测到断开，读取原因")
+            self?.describeDisconnect(connection: connection) { desc, _ in
+                NSLog("[PrismVPN] 连接后断开原因: \(desc)")
+                if let groupURL = FileManager.default.containerURL(
+                    forSecurityApplicationGroupIdentifier: prismAppGroupID
+                ) {
+                    let ts = Int(Date().timeIntervalSince1970)
+                    try? "\(ts) 连接后断开: \(desc)".write(
+                        to: groupURL.appendingPathComponent("prism_error.txt"),
+                        atomically: true, encoding: .utf8
+                    )
+                }
+            }
+        }
+    }
+
     /// 读取扩展心跳（prism_status.txt，扩展每 3s 刷新）。
     /// TrollStore 假团队配置下系统可能上报假 connected（扩展进程从未
     /// 被拉起），心跳是扩展存活的唯一可靠证据。
@@ -1459,6 +1524,77 @@ final class PrismTunnelController {
         let stage = parts.dropFirst().joined(separator: " ")
         let age = Int(Date().timeIntervalSince1970 - ts)
         return (age <= 10, stage, age)
+    }
+
+    /// 读取 App Group 共享错误文件（扩展写入的内核错误原文/断开原因）。
+    /// 看门狗判死时优先取这里的精确报错，读不到再给通用 Jetsam 描述
+    static func readSharedErrorFile() -> String? {
+        guard let groupURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: prismAppGroupID
+        ) else { return nil }
+        guard let text = try? String(
+            contentsOf: groupURL.appendingPathComponent("prism_error.txt"),
+            encoding: .utf8
+        ), !text.isEmpty else { return nil }
+        return text
+    }
+
+    // MARK: - 巨魔看门狗：扩展被 Jetsam 静默强杀的兜底判死
+    //
+    // TrollStore App 的插件极易受到 iOS Jetsam 内存监控（15MB/50MB）
+    // 的物理制裁直接被强杀，此时 iOS 可能静默丢弃断开通知，App 将
+    // 永远显示"已连接"。连接成功后每 4s 轮询扩展心跳文件
+    //（prism_status.txt，扩展每 3s 刷新），时间戳冻结（>10s 未更新）
+    // 即判定内核死亡，强制重置本地 VPN 状态并回报错误。
+
+    private func startVpnWatchdog() {
+        stopVpnWatchdog()
+        // Timer 创建须在主线程（scheduledTimer 挂当前 runloop）
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.startVpnWatchdog() }
+            return
+        }
+        vpnWatchdogTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
+            guard let self = self,
+                  let manager = self.activeManager,
+                  manager.connection.status == .connected
+            else { return }
+
+            let hb = PrismTunnelController.readExtensionHeartbeat()
+            // alive = 心跳时间戳距今 ≤ 10s（readExtensionHeartbeat 内置判定，
+            // 等价于 IPA.txt 的 alive && (now - timestamp < 10)）
+            guard hb.alive else {
+                NSLog("[PrismVPN] 巨魔扩展心跳丢失 (stage=\(hb.stage), age=\(hb.age)s)，判定为内核已在后台崩溃！")
+                self.stopVpnWatchdog()
+
+                // 读取精确报错；扩展来不及写文件时给通用 Jetsam 描述
+                let errorMsg = PrismTunnelController.readSharedErrorFile()
+                    ?? "插件因内存不足(Jetsam)或其他原因被系统强杀"
+
+                // 1. 断开原因落盘：断开原因回显与下次启动诊断都从这里读取
+                if let groupURL = FileManager.default.containerURL(
+                    forSecurityApplicationGroupIdentifier: prismAppGroupID
+                ) {
+                    let ts = Int(Date().timeIntervalSince1970)
+                    try? "\(ts) 看门狗判死: \(errorMsg)".write(
+                        to: groupURL.appendingPathComponent("prism_error.txt"),
+                        atomically: true, encoding: .utf8
+                    )
+                }
+
+                // 2. 通知监听方（Swift→Rust 暂无回调通道，预留扩展点）
+                self.onVpnUnexpectedDisconnect?(errorMsg)
+
+                // 3. 强行重置本地 VPN 状态（防止 iOS 卡在挂起状态）
+                manager.connection.stopVPNTunnel()
+                return
+            }
+        }
+    }
+
+    private func stopVpnWatchdog() {
+        vpnWatchdogTimer?.invalidate()
+        vpnWatchdogTimer = nil
     }
 
     /// 解析 VPN 断开原因，三级回退：
@@ -1530,6 +1666,8 @@ final class PrismTunnelController {
     }
 
     func stop(completion: @escaping (Error?) -> Void) {
+        // 主动停止：先拆看门狗，避免停止期间心跳冻结被误判为崩溃
+        stopVpnWatchdog()
         loadOrCreateManager { result in
             switch result {
             case .failure(let error):
@@ -1538,6 +1676,7 @@ final class PrismTunnelController {
                 manager.connection.stopVPNTunnel()
                 // 等待 disconnected 确认（与 start 对称）
                 self.waitForDisconnected(connection: manager.connection, timeout: 10) { _ in
+                    self.activeManager = nil
                     completion(nil)
                 }
             }
