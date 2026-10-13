@@ -139,8 +139,10 @@ final class PrismTunnelController {
         return "domain=\(ns.domain) code=\(ns.code) desc=\(ns.localizedDescription) userInfo={\(userInfo)}"
     }
 
-    /// 遍历 App 包 PlugIns 下的 .appex，返回声明了 packet-tunnel-provider
-    /// 扩展点的那个的真实 CFBundleIdentifier；找不到返回 nil
+    /// 遍历 App 包 PlugIns 下的 .appex，返回声明了 packet-tunnel
+    /// 扩展点的那个的真实 CFBundleIdentifier；找不到返回 nil。
+    /// 注意扩展点标识是 packet-tunnel（无 -provider 后缀，WireGuard
+    /// 官方同款）；-provider 是 entitlements 数组值，两者易混淆。
     static func discoverExtensionBundleID() -> String? {
         guard let pluginsURL = Bundle.main.builtInPlugInsURL,
               let entries = try? FileManager.default.contentsOfDirectory(
@@ -151,7 +153,7 @@ final class PrismTunnelController {
                   let info = bundle.infoDictionary
             else { continue }
             let point = (info["NSExtension"] as? [String: Any])?["NSExtensionPointIdentifier"] as? String
-            if point == "com.apple.networkextension.packet-tunnel-provider",
+            if point == "com.apple.networkextension.packet-tunnel",
                let bid = info["CFBundleIdentifier"] as? String, !bid.isEmpty {
                 return bid
             }
@@ -178,7 +180,7 @@ final class PrismTunnelController {
         guard let info = bundle.infoDictionary,
               let ext = info["NSExtension"] as? [String: Any],
               let point = ext["NSExtensionPointIdentifier"] as? String,
-              point == "com.apple.networkextension.packet-tunnel-provider"
+              point == "com.apple.networkextension.packet-tunnel"
         else { return "Info.plist 扩展点声明缺失或错误" }
 
         guard let execURL = bundle.executableURL,
@@ -773,16 +775,19 @@ final class PrismTunnelController {
 
             // 方案1: posix_spawn pluginkit -a/-e —— 已废弃：iOS 无
             //        pluginkit CLI（/usr/bin/pluginkit 不存在，spawn 恒
-            //        ENOENT）。改为两层 root 注册：
+            //        ENOENT）。注册交给：
             //        a) TrollStore 自带 trollstorehelper uicache（官方注册）
             //        b) 随包 PrismHelper（root 级 registerApplicationDictionary
             //           + registerPlugin: + 权限修复 + pkd kickstart）
             tryRootHelperUICache()
             trySelfHelperRegister()
 
-            // 方案2: LSApplicationWorkspace 私有 API
-            // TrollStore CoreTrust 绕过允许调用私有类
-            tryLSApplicationWorkspace(appexURL: appexURL)
+            // 方案2（原 tryLSApplicationWorkspace，mobile 身份
+            // registerApplicationDictionary）已移除：以 mobile 身份传入的
+            // 字典不如 TrollStore 安装时完整，会在 LaunchServices 里
+            // 覆盖掉安装时生成的 _LSBundlePlugins 注册记录，反而清空
+            // 主 App 的 plugInKitPlugins（lsPlug=plugins不可读 的来源）。
+            // LaunchServices 层注册统一由 root 级 uicache/PrismHelper 负责。
 
             // 方案3: dlsym 多框架/多符号名尝试（兜底）
             // Apple 平台 C 符号在符号表中带下划线前缀：_LSRegisterURL
@@ -815,209 +820,6 @@ final class PrismTunnelController {
                 NSLog("[PrismVPN] LSRegisterURL not found in any framework")
             }
         }
-    }
-
-    /// 通过 LSApplicationWorkspace 私有 API 注册 app 及其 appex。
-    ///
-    /// TrollStore root helper（RootHelper/uicache.m 的 registerPath）证实，
-    /// 注册 app 与其 PlugIns 的唯一正确 API 是：
-    ///   -[LSApplicationWorkspace registerApplicationDictionary:]
-    /// 该方法接收一个描述完整的字典；appex 通过字典里的
-    /// `_LSBundlePlugins` 键（每个 plugin 标 ApplicationType=PluginKitPlugin）
-    /// 一并注册到 pluginkit。旧代码猜的 registerApplicationWithBundleID:atURL:
-    /// 在 iOS 上并不存在（诊断"bid:url 不可响应"）。
-    private static func tryLSApplicationWorkspace(appexURL: URL) {
-        guard let wsAnyClass = NSClassFromString("LSApplicationWorkspace")
-        else {
-            NSLog("[PrismVPN] LSApplicationWorkspace class not found")
-            lsAppWorkspaceResult = "class未找到"
-            return
-        }
-        // NSClassFromString 返回 AnyClass（元类型），cast AnyObject 后
-        // 才能调用 perform/responds（根元类继承自 NSObject）。
-        let wsClass = wsAnyClass as AnyObject
-        let defaultSel = NSSelectorFromString("defaultWorkspace")
-        guard wsClass.responds(to: defaultSel),
-              let workspace = wsClass.perform(defaultSel)?.takeUnretainedValue()
-        else {
-            NSLog("[PrismVPN] defaultWorkspace not available")
-            lsAppWorkspaceResult = "defaultWorkspace不可用"
-            return
-        }
-
-        let regSel = NSSelectorFromString("registerApplicationDictionary:")
-        guard workspace.responds(to: regSel) else {
-            NSLog("[PrismVPN] registerApplicationDictionary: not responds")
-            lsAppWorkspaceResult = "regDict不可响应"
-            return
-        }
-
-        let mainBid = Bundle.main.bundleIdentifier ?? "com.prism.proxy"
-        let appexBid = extensionBundleIdentifier
-        let mainEnt = knownMainEntitlements()
-        let appexEnt = knownAppexEntitlements()
-
-        // App Group 共享容器（主 App 与 appex 同一组）。
-        // 官方 uicache 用 MCMSharedDataContainer createIfNecessary 构造，
-        // 我们用 containerURL 读到的路径等价（同一 group 容器）。
-        var groupContainers = [String: String]()
-        if let gURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: prismAppGroupID) {
-            groupContainers[prismAppGroupID] = gURL.path
-        }
-
-        // plugin 数据容器（官方 uicache 用 MCMPluginKitPluginDataContainer
-        // containerWithIdentifier:createIfNecessary:YES 构造——pkd 处理
-        // PluginKitPlugin 时预期该字段存在）
-        var pluginContainerPath: String?
-        if let mcmClass = NSClassFromString("MCMPluginKitPluginDataContainer"),
-           let mcm = mcmClass as AnyObject as? NSObjectProtocol {
-            let containerSel = NSSelectorFromString(
-                "containerWithIdentifier:createIfNecessary:existed:error:")
-            // ObjC 实例方法多参调用需 objc_msgSend 精确签名
-            typealias ContainerFn = @convention(c) (
-                AnyObject, Selector, NSString, Bool, UnsafeMutablePointer<Bool>?,
-                UnsafeMutablePointer<CFError?>?
-            ) -> CFTypeRef?
-            let h = dlopen(nil, 1)
-            if mcm.responds(to: containerSel),
-               let sym = dlsym(h, "objc_msgSend") {
-                let fn = unsafeBitCast(sym, to: ContainerFn.self)
-                let appexBid = extensionBundleIdentifier
-                if let c = fn(mcm, containerSel, appexBid as NSString, true, nil, nil) {
-                    let urlSel = NSSelectorFromString("url")
-                    if let obj = unsafeBitCast(c, to: NSObject.self)
-                        .perform(urlSel)?.takeUnretainedValue() as? URL {
-                        pluginContainerPath = obj.path
-                    }
-                }
-            }
-        }
-
-        // ---- appex（PluginKitPlugin）注册字典 ----
-        // 逐字段对齐 TrollStore RootHelper/uicache.m registerPath
-        var plugin: [String: Any] = [
-            "ApplicationType": "PluginKitPlugin",
-            "CFBundleIdentifier": appexBid,
-            "CodeInfoIdentifier": appexBid,
-            "CompatibilityState": 0,
-            "IsContainerized": true,
-            "Path": appexURL.path,
-            "PluginOwnerBundleID": mainBid,
-            "SignerOrganization": "Apple Inc.",
-            "SignatureVersion": 132352,
-            "SignerIdentity": "Apple iPhone OS Application Signing",
-            "Entitlements": appexEnt,
-        ]
-        if let pcPath = pluginContainerPath {
-            plugin["Container"] = pcPath
-            // 官方：isContainerized 时 HOME=容器、TMPDIR=容器/tmp
-            plugin["EnvironmentVariables"] = [
-                "CFFIXED_USER_HOME": pcPath,
-                "HOME": pcPath,
-                "TMPDIR": (pcPath as NSString).appendingPathComponent("tmp"),
-            ]
-        }
-        // TeamIdentifier 取自 appex entitlements（官方 dump 二进制后取
-        // com.apple.developer.team-identifier）
-        if let team = appexEnt["com.apple.developer.team-identifier"] as? String {
-            plugin["TeamIdentifier"] = team
-        }
-        if !groupContainers.isEmpty {
-            plugin["HasAppGroupContainers"] = true
-            plugin["GroupContainers"] = groupContainers
-        }
-
-        // ---- 主 App 注册字典 ----
-        var dict: [String: Any] = [
-            "ApplicationType": "User",
-            "CFBundleIdentifier": mainBid,
-            "CodeInfoIdentifier": mainBid,
-            "CompatibilityState": 0,
-            "IsContainerized": true,
-            "Container": NSHomeDirectory(),
-            "IsDeletable": true,
-            "Path": Bundle.main.bundlePath,
-            "SignerOrganization": "Apple Inc.",
-            "SignatureVersion": 132352,
-            "SignerIdentity": "Apple iPhone OS Application Signing",
-            "IsAdHocSigned": true,
-            "LSInstallType": 1,
-            "HasMIDBasedSINF": 0,
-            "MissingSINF": 0,
-            "FamilyID": 0,
-            "IsOnDemandInstallCapable": 0,
-            "Entitlements": mainEnt,
-            "EnvironmentVariables": [
-                "CFFIXED_USER_HOME": NSHomeDirectory(),
-                "HOME": NSHomeDirectory(),
-                "TMPDIR": (NSHomeDirectory() as NSString).appendingPathComponent("tmp"),
-            ],
-            "_LSBundlePlugins": [appexBid: plugin],
-        ]
-        if let team = mainEnt["com.apple.developer.team-identifier"] as? String {
-            dict["TeamIdentifier"] = team
-        }
-        if !groupContainers.isEmpty {
-            dict["HasAppGroupContainers"] = true
-            dict["GroupContainers"] = groupContainers
-        }
-
-        // registerApplicationDictionary: 返回 BOOL（非对象），perform 无法
-        // 可靠取回；而 Swift SDK 将 objc_msgSend 标记为 variadic 不可直接用。
-        // 故通过 dlopen(NULL)/dlsym 运行时拿到 objc_msgSend 指针（libobjc
-        // 已加载，必能找到），再 unsafeBitCast 成 1 参函数指针精确调用。
-        typealias RegFn = @convention(c) (AnyObject, Selector, NSDictionary) -> Bool
-        let h = dlopen(nil, 1) // RTLD_LAZY，NULL 返回全局作用域
-        if let sym = dlsym(h, "objc_msgSend") {
-            let fn = unsafeBitCast(sym, to: RegFn.self)
-            let ok = fn(workspace, regSel, dict as NSDictionary)
-            lsAppWorkspaceResult = "regDict=\(ok)"
-            NSLog("[PrismVPN] registerApplicationDictionary: ret=\(ok)")
-        } else {
-            // dlsym 失败则退回 perform（调用仍会发生，只是拿不到 BOOL）
-            workspace.perform(regSel, with: dict as NSDictionary)
-            lsAppWorkspaceResult = "regDict已调用(perform)"
-            NSLog("[PrismVPN] registerApplicationDictionary: invoked via perform")
-        }
-    }
-
-    /// 主 App 应有的 entitlements（与 CI 签入的 TrollStore.entitlements.plist
-    /// 一致）。iOS 上 SecTask* 是未导出的 SPI（Swift 无法引用），故按已知
-    /// 值构造。
-    private static func knownMainEntitlements() -> [String: Any] {
-        let mainBid = Bundle.main.bundleIdentifier ?? "com.prism.proxy"
-        return [
-            "application-identifier": "TROLLTROLL.\(mainBid)",
-            "com.apple.developer.team-identifier": "TROLLTROLL",
-            "com.apple.developer.networking.networkextension":
-                ["packet-tunnel-provider"],
-            "com.apple.security.application-groups": [prismAppGroupID],
-            "keychain-access-groups": ["TROLLTROLL.\(mainBid)"],
-            // TrollStore 平台特权（与 CI 签入的 TrollStore.entitlements.plist
-            // 一致）：官方 README "Unsandboxing" 完整配方——platform-application
-            // 是 no-sandbox 生效前提；AppDataContainers 是 no-sandbox +
-            // platform-application 下访问自身容器所需；persona-mgmt 为
-            // root spawn 所需（前提即 not sandboxed）
-            "platform-application": true,
-            "com.apple.private.security.no-sandbox": true,
-            "com.apple.private.security.storage.AppDataContainers": true,
-            "com.apple.private.persona-mgmt": true,
-        ]
-    }
-
-    /// appex 应有的 entitlements（与 CI 签入的 PrismVPN.entitlements.plist
-    /// 一致）。appex 在独立进程，故按已知值构造。
-    private static func knownAppexEntitlements() -> [String: Any] {
-        let appexBid = extensionBundleIdentifier
-        return [
-            "application-identifier": "TROLLTROLL.\(appexBid)",
-            "com.apple.developer.team-identifier": "TROLLTROLL",
-            "com.apple.developer.networking.networkextension":
-                ["packet-tunnel-provider"],
-            "com.apple.security.application-groups": [prismAppGroupID],
-            "keychain-access-groups": ["TROLLTROLL.\(appexBid)"],
-        ]
     }
 
     /// 通过 posix_spawn 运行 pluginkit 子命令。

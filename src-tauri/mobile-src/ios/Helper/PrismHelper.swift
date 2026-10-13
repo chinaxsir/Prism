@@ -20,6 +20,7 @@
 
 import Darwin
 import Foundation
+import Security
 
 let MOBILE_UID: uid_t = 501
 let MOBILE_GID: gid_t = 501
@@ -43,9 +44,12 @@ func dumpEntitlements(from execPath: String) -> [String: Any] {
         "com.apple.private.persona-mgmt",
     ]
     for k in keys {
-        var err: Unmanaged<CFError>? = nil
+        // SecTaskCopyValueForEntitlement 的 Swift 导入返回 CFTypeRef?
+        //（ARC 管理，非 Unmanaged），error 参数是 CFError? 而非
+        // Unmanaged<CFError>?——三处签名务必对齐 SDK，否则编译失败
+        var err: CFError? = nil
         if let v = SecTaskCopyValueForEntitlement(task, k as CFString, &err) {
-            out[k] = v.takeRetainedValue()
+            out[k] = v
         }
     }
     return out
