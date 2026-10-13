@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- PrismHelper 专属 entitlements（TrollStore README "Unsandboxing" 配方）。
+	     CI 侧把它嵌入二进制签名，TrollStore 安装时 CoreTrust 重签会原样
+	     保留——缺 no-sandbox 的 helper 即使以 root 身份运行也在默认沙箱内，
+	     LSApplicationWorkspace（installd XPC）与 /var/mobile 路径访问全部
+	     被沙箱拦截，pkd 注册链路形同虚设。
+	     注意：绝不能加 get-task-allow 等受限键（iOS 16+ 要求开发者模式）；
+	     不需要 application-identifier / keychain（helper 不走签名身份校验）。 -->
+	<key>platform-application</key>
+	<true/>
+	<key>com.apple.private.security.no-sandbox</key>
+	<true/>
+	<key>com.apple.private.persona-mgmt</key>
+	<true/>
+</dict>
+</plist>

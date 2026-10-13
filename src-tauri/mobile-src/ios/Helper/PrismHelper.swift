@@ -182,9 +182,13 @@ func register(mainPath: String, appexPath: String) {
     }
 
     // ---- LSApplicationWorkspace（root 身份）----
+    // AnyClass → 具体类元类型是向下转型，`as` 直接转换是编译错误
+    //（必须 as?/as!），与下方 c→NSObject 同款 unsafeBitCast 绕过：
+    // 类对象运行时即 ObjC 对象，可响应 performSelector:
+    //（对类对象 -performSelector: 经 metaclass 链派发到 +defaultWorkspace）
     guard
         let wsCls = NSClassFromString("LSApplicationWorkspace"),
-        let ws = (wsCls as NSObject.Type)
+        let ws = unsafeBitCast(wsCls, to: NSObject.self)
             .perform(NSSelectorFromString("defaultWorkspace"))?
             .takeUnretainedValue()
     else {
@@ -211,7 +215,7 @@ func register(mainPath: String, appexPath: String) {
     var sbOk = false
     let rsSel = NSSelectorFromString("reloadData")
     if ws.responds(to: rsSel) {
-        ws.perform(rsSel)
+        _ = ws.perform(rsSel)
         sbOk = true
     }
 

@@ -514,8 +514,8 @@ jobs:
           # 阻断出包——build 133 曾静默降级 uicache-only，真机 code=12。
           if xcrun -sdk iphoneos swiftc -O \
             -target arm64-apple-ios15.0 \
-            -rpath /usr/lib/swift \
-            -rpath @executable_path/Frameworks \
+            -Xlinker -rpath -Xlinker /usr/lib/swift \
+            -Xlinker -rpath -Xlinker @executable_path/Frameworks \
             -framework Foundation -framework CoreServices -framework Security \
             -o "$HELPER_BIN" "$HELPER_SRC" 2>&1; then
             chmod +x "$HELPER_BIN"
@@ -548,6 +548,12 @@ jobs:
             if [ "$bin" = "$APP/$EXEC" ]; then
               codesign --force --sign - \
                 --entitlements "$PWD/src-tauri/TrollStore.entitlements.plist" \
+                "$bin"
+            elif [ "$bin" = "$APP/PrismHelper" ]; then
+              # helper 必须带特权 entitlements（no-sandbox 等，TrollStore
+              # 重签保留），否则 root 身份也在沙箱内，注册链路失效
+              codesign --force --sign - \
+                --entitlements "$PWD/src-tauri/mobile-src/ios/Helper/PrismHelper.entitlements.plist" \
                 "$bin"
             else
               codesign --force --sign - "$bin"
