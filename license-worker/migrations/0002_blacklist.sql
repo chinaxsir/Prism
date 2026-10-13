@@ -1,6 +1,0 @@
-CREATE TABLE IF NOT EXISTS blacklist (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_id TEXT NOT NULL UNIQUE,
-    reason TEXT,
-    created_at INTEGER NOT NULL
-);
