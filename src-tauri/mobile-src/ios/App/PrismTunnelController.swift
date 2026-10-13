@@ -96,7 +96,7 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
         let provisioning = PrismTunnelController.diagnoseProvisioning()
         let rtEnt = PrismTunnelController.runtimeEntitlementsSummary()
         let pkdReg = PrismTunnelController.diagnosePkdRegistration()
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) rtEnt=\(rtEnt) pkd=\(pkdReg) rootHelper=\(PrismTunnelController.rootHelperResult) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] rootHelper= 用 TrollStore 自带 root helper 执行官方 uicache 注册的结果（u0=成功）。pkd= 字段：lsPlug=LS 对 appex 的 plugin 视图；pkdDB=PlugInKit 数据库搜索。pkdDB 命中 → code 14 出在 nesessionmanager 校验层；未命中 → pkd 拒绝注册"
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) rtEnt=\(rtEnt) pkd=\(pkdReg) rootHelper=\(PrismTunnelController.rootHelperResult) selfHelper=\(PrismTunnelController.selfHelperResult) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] selfHelper= 随包 PrismHelper 以 root 执行的结果：reg ls=1/plugin=1=注册成功，fixperm fixed=N=权限修复数；rootHelper= TrollStore 官方 uicache（u0=成功）。若注册成功但仍 code 14 → 看 pkdDB 搜索是否命中，未命中则 pkd 在 nesessionmanager 校验层拒绝"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -736,9 +736,12 @@ final class PrismTunnelController {
 
             // 方案1: posix_spawn pluginkit -a/-e —— 已废弃：iOS 无
             //        pluginkit CLI（/usr/bin/pluginkit 不存在，spawn 恒
-            //        ENOENT）。改为用 TrollStore 自带 setuid root helper
-            //        执行官方 uicache 注册（与 TrollStore 安装时同源）
+            //        ENOENT）。改为两层 root 注册：
+            //        a) TrollStore 自带 trollstorehelper uicache（官方注册）
+            //        b) 随包 PrismHelper（root 级 registerApplicationDictionary
+            //           + registerPlugin: + 权限修复 + pkd kickstart）
             tryRootHelperUICache()
+            trySelfHelperRegister()
 
             // 方案2: LSApplicationWorkspace 私有 API
             // TrollStore CoreTrust 绕过允许调用私有类
@@ -1127,6 +1130,55 @@ final class PrismTunnelController {
         rootHelperResult = "helper=u\(exitCode)\(tail.isEmpty ? "" : " out=\(tail.prefix(100))")"
         NSLog("[PrismVPN] rootHelper: \(rootHelperResult)")
         return exitCode == 0
+    }
+
+    // MARK: - 随包 root helper（PrismHelper）强扭注册
+
+    static var selfHelperResult: String = "未调用"
+
+    /// 以 root persona spawn 随包的 PrismHelper CLI：
+    /// 1. register — root 身份 LSApplicationWorkspace.registerApplication
+    ///    Dictionary:（完整官方字典）+ registerPlugin: 强扭注册扩展，
+    ///    并 kickstart pkd/nesessionmanager 强制重载数据库
+    /// 2. fixperm  — PlugIns 目录/文件属主修回 mobile:mobile（目录/可执行
+    ///    0755、其余 0644），防 nesessionmanager 读沙盒时权限污染拒绝
+    /// helper 的 stdout 全部捕获进诊断（selfHelper= 字段）。
+    @discardableResult
+    static func trySelfHelperRegister() -> Bool {
+        guard
+            let helperPath = Bundle.main.path(forResource: "PrismHelper", ofType: nil),
+            FileManager.default.isExecutableFile(atPath: helperPath)
+        else {
+            selfHelperResult = "helper缺失"
+            return false
+        }
+        let mainPath = Bundle.main.bundlePath
+        let appexPath = mainPath + "/PlugIns/PrismVPN.appex"
+        guard FileManager.default.fileExists(atPath: appexPath) else {
+            selfHelperResult = "appex缺失"
+            return false
+        }
+
+        var all = [String]()
+        var ok = true
+        for cmd in ["register", "fixperm"] {
+            let (spawnErr, exitCode, output) = runSpawnTool(
+                path: helperPath, args: [cmd, mainPath, appexPath],
+                asRoot: true, captureOutput: true)
+            if spawnErr != 0 {
+                all.append("\(cmd):spawn=\(spawnErr)")
+                ok = false
+                continue
+            }
+            let lines = output.split(separator: "\n")
+                .map { String($0).trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            all.append("\(cmd):u\(exitCode)[\(lines.joined(separator: " | ").prefix(220))]")
+            if exitCode != 0 { ok = false }
+        }
+        selfHelperResult = all.joined(separator: " ")
+        NSLog("[PrismVPN] selfHelper: \(selfHelperResult)")
+        return ok
     }
 
     // MARK: 失效配置识别

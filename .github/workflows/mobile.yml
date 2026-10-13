@@ -1,7 +1,6 @@
 name: Mobile Build
 
-# 推送 main / tag v* / 手动触发：产出 Android APK 与 iOS 双 IPA
-# （TrollStore 巨魔版 + SideStore 普通版：无扩展/干净签名，免费 Apple ID 可签）
+# 推送 main / tag v* / 手动触发：产出 Android APK 与 TrollStore（巨魔）未签名 IPA
 # tag 触发时额外把 APK/IPA 作为 Release asset 上传，与桌面端（build.yml）共用同一 Release
 on:
   push:
@@ -301,7 +300,7 @@ jobs:
           files: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
 
   ios:
-    name: Build iOS IPAs
+    name: Build TrollStore IPA
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -390,7 +389,7 @@ jobs:
       - name: Build unsigned IPA
         run: npx tauri ios build --no-sign --verbose
 
-      - name: Prepare IPAs (TrollStore + SideStore)
+      - name: Prepare TrollStore IPA
         id: ipa
         run: |
           set -e
@@ -498,34 +497,23 @@ jobs:
           echo "--- rpaths after rewrite ---"
           otool -l "$MAIN_EXEC_PATH" | grep -A2 LC_RPATH | grep path
 
-          # ==================== 3.5 SideStore 普通版 fork ====================
-          # 从同一份预处理产物分叉（清理/rpath/版本号均已就绪）：
-          # - 移除整个 PlugIns（无 NE 扩展，本地代理模式不需要）
-          # - 全部 Mach-O 裸 ad-hoc 签名、无任何 entitlements，SideStore/
-          #   AltStore 用免费 Apple ID 重签时注入用户证书与 entitlements
-          # - 不生成 embedded.mobileprovision（SideStore 注入自己的 profile）
-          PLAIN_WORK=$(mktemp -d)
-          cp -R "$WORK/Payload" "$PLAIN_WORK/Payload"
-          PLAIN_APP=$(find "$PLAIN_WORK/Payload" -maxdepth 1 -name "*.app" -type d | head -1)
-          rm -rf "$PLAIN_APP/PlugIns"
-          find "$PLAIN_APP" -type f | while IFS= read -r f; do
-            if file "$f" | grep -q "Mach-O"; then
-              codesign --force --sign - "$f"
-            fi
-          done
-          # bundle 级签名重建 CodeResources（seal 覆盖上面全部二进制签名）
-          codesign --force --sign - "$PLAIN_APP"
-          chmod +x "$PLAIN_APP/$EXEC"
-          if [ -e "$PLAIN_APP/PlugIns" ]; then
-            echo "::error::plain ipa still contains PlugIns"; exit 1
-          fi
-          if codesign -d --entitlements - "$PLAIN_APP/$EXEC" 2>&1 | grep -q "networkextension"; then
-            echo "::error::plain ipa main app must not carry NE entitlements"; exit 1
-          fi
-          OUT_PLAIN="$PWD/Prism-$APP_VERSION-SideStore.ipa"
-          rm -f "$OUT_PLAIN"
-          (cd "$PLAIN_WORK" && zip -qry "$OUT_PLAIN" Payload)
-          echo "plain ipa: $OUT_PLAIN (appex removed, clean ad-hoc signed)"
+          # ==================== 3.5 编译 PrismHelper（随包 root helper）====
+          # 主 App 在设备上以 root persona（persona-mgmt + no-sandbox）
+          # spawn 它，以 root 身份用 LSApplicationWorkspace 强扭注册 VPN
+          # 扩展（registerApplicationDictionary: + registerPlugin:），并
+          # 修复 PlugIns 目录权限（mobile:mobile，目录/可执行 0755）。
+          # -static-stdlib：Swift stdlib 静态链接，运行时零 @rpath 依赖
+          # （否则 CLI 的 swift lib 引用会挂掉步骤 3 校验和设备 dyld）。
+          HELPER_SRC="$PWD/src-tauri/mobile-src/ios/Helper/PrismHelper.swift"
+          HELPER_BIN="$APP/PrismHelper"
+          xcrun -sdk iphoneos swiftc -O -static-stdlib \
+            -target arm64-apple-ios15.0 \
+            -framework Foundation -framework CoreServices -framework Security \
+            -o "$HELPER_BIN" "$HELPER_SRC"
+          chmod +x "$HELPER_BIN"
+          file "$HELPER_BIN"
+          echo "PrismHelper compiled: $(du -h "$HELPER_BIN" | cut -f1)"
+          # helper 会被步骤 4 的 Mach-O 循环自动 codesign 并入主 App seal
 
           # ==================== 4. 最终签名封印（必须在所有修改完成后）====================
           # 所有文件修改（Info.plist / RPATH / dylib 删除）已完成，
@@ -737,25 +725,16 @@ jobs:
           (cd "$WORK" && zip -qry "$OUT" Payload)
           echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
-      - name: Upload TrollStore IPA
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: Prism-TrollStore-ipa
           path: Prism-*-TrollStore.ipa
           if-no-files-found: error
 
-      - name: Upload SideStore IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: Prism-SideStore-ipa
-          path: Prism-*-SideStore.ipa
-          if-no-files-found: error
-
       # tag 构建时把 IPA 作为 Release asset 上传（与桌面端共用同一 Release）
-      - name: Upload IPAs to Release
+      - name: Upload IPA to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            Prism-*-TrollStore.ipa
-            Prism-*-SideStore.ipa
+          files: Prism-*-TrollStore.ipa
