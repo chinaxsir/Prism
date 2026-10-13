@@ -195,6 +195,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     fileprivate func openTun(optionsJSON: String) -> Int32 {
         NSLog("[PrismVPN] openTun called with options: \(optionsJSON)")
+        writeHeartbeat("openTun")
         guard let data = optionsJSON.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
@@ -255,13 +256,24 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             settingsError = error
             semaphore.signal()
         }
-        semaphore.wait()
+        // 【禁止无限等待】setTunnelNetworkSettings 的回调若被系统静默
+        // 丢弃（TrollStore 假签名配置的 TUN 注册可能不被 nehelper 处理），
+        // 无限 wait 会永久死锁 Go 线程：内核半启动（API 已监听、心跳
+        // 照刷），completionHandler 永不调用，状态机却报假 connected。
+        // 10s 超时后返回 -1，让内核真实地报告启动失败。
+        let waitResult = semaphore.wait(timeout: .now() + 10)
+        if waitResult == .timedOut {
+            NSLog("[PrismVPN] openTun: setTunnelNetworkSettings callback not received in 10s (system may not accept TUN settings for this signature)")
+            writeHeartbeat("tunTimeout")
+            return -1
+        }
 
         if let settingsError = settingsError {
             NSLog("[PrismVPN] openTun: setTunnelNetworkSettings failed: \(settingsError.localizedDescription)")
             return -1
         }
         NSLog("[PrismVPN] openTun: setTunnelNetworkSettings succeeded")
+        writeHeartbeat("tun-ok")
 
         // 取 packetFlow 文件描述符（与 SFI 相同的 KVC 路径）。
         // iOS 不同版本 KVC 键可能不同，依次尝试常见路径。
@@ -272,9 +284,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         )
         guard let fd = fd, fd >= 0 else {
             NSLog("[PrismVPN] openTun: failed to get packetFlow fileDescriptor (tried socket.fileDescriptor / socket.socketDescriptor)")
+            writeHeartbeat("tunFdFail")
             return -1
         }
         NSLog("[PrismVPN] openTun: got packetFlow fd=\(fd)")
+        writeHeartbeat("tun-fd")
         return fd
     }
 
