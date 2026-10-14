@@ -139,28 +139,48 @@ export default function Dashboard() {
             <div className="flex items-center gap-2 text-xs text-gray-400 mb-1">
               <span
                 className={`inline-block w-2 h-2 rounded-full ${
-                  running ? "bg-latency-good" : "bg-gray-500"
-                } ${running ? "animate-pulse" : ""}`}
+                  running
+                    ? "bg-latency-good"
+                    : status === "starting"
+                      ? "bg-amber-400"
+                      : status === "error"
+                        ? "bg-latency-bad"
+                        : "bg-gray-500"
+                } ${running || status === "starting" ? "animate-pulse" : ""}`}
               />
-              {running ? "已连接" : "未连接"}
+              {/* starting 必须有可见反馈（build 144 方案）：启动期可达
+                  数秒（VPN 授权/扩展拉起），若显示"未连接"用户会以为
+                  没反应而重复点击（后端幂等保护已兜底，但体验要明确） */}
+              {running
+                ? "已连接"
+                : status === "starting"
+                  ? "连接中…"
+                  : status === "error"
+                    ? "启动失败"
+                    : "未连接"}
             </div>
             <div className="text-2xl font-bold text-gray-100">
               {running ? formatUptime(uptimeSecs) : "Prism"}
             </div>
             <div className="text-xs text-gray-500 mt-1">
-              {running ? `运行模式 · ${MODE_LABEL[mode]}` : "点击右侧按钮启动代理"}
+              {running
+                ? `运行模式 · ${MODE_LABEL[mode]}`
+                : status === "starting"
+                  ? "正在建立 VPN 隧道，请稍候"
+                  : "点击右侧按钮启动代理"}
             </div>
           </div>
           <button
             onClick={toggle}
-            className={`shrink-0 flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-semibold transition-all ${
+            disabled={status === "starting"}
+            className={`shrink-0 flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
               running
                 ? "bg-latency-bad/20 text-latency-bad hover:bg-latency-bad/30"
                 : "bg-accent text-white hover:bg-accent-hover"
             }`}
           >
-            <Power size={16} />
-            {running ? "停止" : "启动"}
+            <Power size={16} className={status === "starting" ? "animate-pulse" : ""} />
+            {running ? "停止" : status === "starting" ? "启动中" : "启动"}
           </button>
         </div>
       </div>

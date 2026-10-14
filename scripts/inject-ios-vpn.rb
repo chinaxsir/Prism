@@ -116,6 +116,11 @@ def inject
     # 必须编译期写入，绝不能对 appex 用 install_name_tool 事后重写
     # （Xcode 直编的 Mach-O header 紧凑无 padding，重写越界损坏 → code 14）
     'LD_RUNPATH_SEARCH_PATHS' => '/usr/lib/swift $(inherited) @executable_path/Frameworks @executable_path/../../Frameworks',
+    # 显式部署目标 15.0（build 144 方案）：tauri 模板默认 target 偏低，
+    # 低 target 的 Swift 二进制会引用 back-deploy libswift_Concurrency
+    # （Frameworks 里的 ad-hoc 副本，撞 CS_REQUIRE_LV）；15.0+ 直接用
+    # 系统共享缓存内的并发库
+    'IPHONEOS_DEPLOYMENT_TARGET' => '15.0',
   }
   ext_target.build_configurations.each do |cfg|
     cfg.build_settings.merge!(common_settings)

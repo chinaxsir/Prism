@@ -1081,6 +1081,22 @@ final class PrismTunnelController {
     /// 唯一可靠的恢复方式是 removeFromPreferences 清除旧配置，
     /// 再用全新的 NETunnelProviderManager 重建。
     ///
+    /// 是否为 Code=14「VPN 插件未安装/未注册」错误（build 144 方案：
+    /// 该错误码是 rootHelper uicache 修复的唯一触发条件）
+    static func isVPNAppNotInstalled(_ error: Error) -> Bool {
+        let ns = error as NSError
+        if ns.domain == "NEVPNConnectionErrorDomain" && ns.code == 14 {
+            return true
+        }
+        if ns.domain == "NEVPNErrorDomain" && ns.code == 14 {
+            return true
+        }
+        let text = error.localizedDescription
+        return text.contains("not installed") || text.contains("未安装")
+    }
+
+    /// 失效/无效配置判定（曾用于自动重建重试的依据）。
+    ///
     /// 注意（build 143 方案）：自动重试清理已禁用——start() 恒传
     /// attemptsRemaining=0，recoverOrFinish 的 resetAllManagers 分支
     /// 不可达。失败路径绝不允许 removeFromPreferences（误删合法配置
@@ -1140,12 +1156,16 @@ final class PrismTunnelController {
         // 陈旧 prism_error.txt 而误判断开原因
         clearSharedErrorFile()
 
-        // 【关键修复】TrollStore 的 CoreTrust 绕过让 FrontBoard 接受主 App，
-        // 但 pluginkit（扩展注册守护进程）可能有自己的独立验证。如果
-        // pluginkit 未注册 appex，系统不知道扩展存在 → Code 14。
-        // 通过 dlsym 动态加载 LSRegisterURL，强制向 Launch Services 注册
-        // appex bundle，触发 pluginkit 扫描注册。
-        PrismTunnelController.registerAppexWithLaunchServices()
+        // 【build 144 方案·关键】启动路径对注册零干预：
+        // TrollStore 安装 IPA 时已经由官方 trollstorehelper 完成了最标准的
+        // 插件容器分配与 _LSBundlePlugins 注册（appex entitlements 纯净后
+        // 连 container-required 都会被 TrollStore 自动补齐）。此前在这里
+        // 无条件跑 selfHelper（PrismHelper register），用从零新建的字典
+        // 覆盖了官方注册——缺 NSExtension/CFBundleExecutable/TeamIdentifier，
+        // LaunchServices 里扩展点标识被抹掉 → nesessionmanager 立刻报
+        // Code=14 "VPN 插件未安装"（build 143 实证）。
+        // 现在仅当 startVPNTunnel 真正返回 Code=14 时，才在失败出口
+        // （recoverOrFinish）调一次 rootHelper uicache 修复。
 
         // 主动 pre-clean + 版本同步（同时解决三个问题）：
         //
@@ -1243,6 +1263,14 @@ final class PrismTunnelController {
         completion: @escaping (Error?) -> Void
     ) {
         guard attemptsRemaining > 0, PrismTunnelController.isStaleOrInvalid(error) else {
+            // 【build 144 方案】仅当真正报 Code=14（VPN 插件未安装/未注册）
+            // 时才调用一次 rootHelper（TrollStore 官方 trollstorehelper
+            // uicache）修复注册——它重建 _LSBundlePlugins，正是安装时的
+            // 原生注册方式。其余任何失败都绝不碰注册，也绝不删配置
+            if PrismTunnelController.isVPNAppNotInstalled(error) {
+                NSLog("[PrismVPN] Code=14 检测到插件未注册，调用 rootHelper uicache 修复")
+                PrismTunnelController.tryRootHelperUICache()
+            }
             completion(error)
             return
         }
@@ -1334,11 +1362,12 @@ final class PrismTunnelController {
             }
         )
 
-        // 兜底：2 秒内系统未发变更通知（如首次 save 后通知不触发的
-        // 边缘场景），直接走 reload+start。总等待时间 2s，不会明显拖慢
-        // 正常启动路径（正常 save 后通知应在 100~300ms 内到达）
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { _ in
-            NSLog("[PrismVPN] NEVPNConfigurationChange 未在 2s 内到达，兜底 reload+start")
+        // 兜底：0.5s 内系统未发变更通知就直接 reload+start（build 144
+        // 方案：启动路径已零干预注册，save 后 nesessionmanager 通常
+        // 100ms 内即广播通知；缩短兜底避免"点了连接没反应"的体感）。
+        // 正常路径由通知触发，定时器只在极端场景生效
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
+            NSLog("[PrismVPN] NEVPNConfigurationChange 未在 0.5s 内到达，兜底 reload+start")
             fireOnce()
         }
         RunLoop.main.add(timer!, forMode: .common)

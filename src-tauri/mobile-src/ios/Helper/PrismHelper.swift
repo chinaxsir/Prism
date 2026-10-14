@@ -220,51 +220,32 @@ private func runRegister(appBundlePath: String) {
     print("result=reg step=containers plugin=\(pluginContainerPath) groups=\(groupContainerMap.count)")
     fflush(stdout)
 
-    let pluginDict: [String: Any] = [
-        "ApplicationType": "PluginKitPlugin",
-        "CFBundleIdentifier": appexBundleID,
-        "BundleIdentifier": appexBundleID,
-        "CodeInfoIdentifier": appexBundleID,
-        "Path": appexBundlePath,
-        "Container": pluginContainerPath,
-        "Entitlements": appexEnt,
-        "GroupContainers": groupContainerMap,
-        "PluginOwnerBundleID": mainBundleID,
-        "SignerOrganization": "Apple Inc.",
-        "SignatureVersion": 132096,
-        "SignerIdentity": "Apple iPhone OS Application Signing",
-        "IsDeletable": 1,
-        "HasSettingsBundle": 0,
-        "EnvironmentVariables": [
-            "TMPDIR": "\(pluginContainerPath)/tmp",
-            "HOME": pluginContainerPath,
-            "CFFIXED_USER_HOME": pluginContainerPath
-        ]
-    ]
+    // 【build 144 方案】必须以 Info.plist 为基底合并字段：
+    // 从零新建的字典缺 NSExtension（扩展点声明）、CFBundleExecutable、
+    // TeamIdentifier 等关键项，一旦写回 LaunchServices 会把官方注册
+    // 的完整记录覆盖成残缺条目 → 扩展点标识被抹掉 → Code=14
+    // （build 143 实证）。只在官方字段之上补充容器/签名信息
+    guard let infoPlistRaw = NSDictionary(contentsOfFile: "\(appBundlePath)/Info.plist") as? [String: Any] else {
+        print("result=reg ls=0 plugin=0 err=noInfoPlist")
+        fflush(stdout)
+        return
+    }
+    guard let appexInfoPlistRaw = NSDictionary(contentsOfFile: "\(appexBundlePath)/Info.plist") as? [String: Any] else {
+        print("result=reg ls=0 plugin=0 err=noAppexInfoPlist")
+        fflush(stdout)
+        return
+    }
 
-    let appDict: [String: Any] = [
-        "ApplicationType": "User",
-        "CFBundleIdentifier": mainBundleID,
-        "BundleIdentifier": mainBundleID,
-        "CodeInfoIdentifier": mainBundleID,
-        "Path": appBundlePath,
-        "Container": mainContainerPath,
-        "Entitlements": mainEnt,
-        "GroupContainers": groupContainerMap,
-        "SignerOrganization": "Apple Inc.",
-        "SignatureVersion": 132096,
-        "SignerIdentity": "Apple iPhone OS Application Signing",
-        "IsDeletable": 1,
-        "HasSettingsBundle": 0,
-        "EnvironmentVariables": [
-            "TMPDIR": "\(mainContainerPath)/tmp",
-            "HOME": mainContainerPath,
-            "CFFIXED_USER_HOME": mainContainerPath
-        ],
-        "_LSBundlePlugins": [
-            appexBundleID: pluginDict
-        ]
-    ]
+    var pluginDict = appexInfoPlistRaw
+    pluginDict["Entitlements"] = appexEnt
+    pluginDict["GroupContainers"] = groupContainerMap
+    pluginDict["Container"] = pluginContainerPath
+
+    var appDict = infoPlistRaw
+    appDict["Entitlements"] = mainEnt
+    appDict["GroupContainers"] = groupContainerMap
+    appDict["Container"] = mainContainerPath
+    appDict["_LSBundlePlugins"] = [appexBundleID: pluginDict]
 
     guard let wsClass = NSClassFromString("LSApplicationWorkspace"),
           let defaultSel = NSSelectorFromString("defaultWorkspace") as Selector?,
@@ -312,42 +293,23 @@ private func runFixPerm(appBundlePath: String) {
     var failed = 0
     let fm = FileManager.default
 
-    // 1. 修复 Bundle 目录属主为 _installd (33:33)，可执行文件赋予 0755
-    let execRelativePaths: Set<String> = [
-        "Prism",
-        "PrismHelper",
-        "PlugIns/PrismVPN.appex/PrismVPN",
-        "Frameworks/libswift_Concurrency.dylib"
-    ]
+    // 【build 144 方案】不再对 Prism.app Bundle 做 chown/chmod：主 App
+    // spawn 的 helper 并非真正的 setuid 环境（persona 提权后对系统
+    // Bundle 目录 chown 仍会 EPERM），build 143 实证 fixed=0 failed=24
+    // 纯属无效循环。Bundle 属主由 TrollStore 官方安装时置好
+    // （_installd 33:33），无需也不应干预
 
-    chown(appBundlePath, 33, 33)
-    chmod(appBundlePath, 0o755)
-    if let enumerator = fm.enumerator(atPath: appBundlePath) {
+    // 修复插件数据容器属主为 mobile (501:501)
+    chown(pluginContainerPath, 501, 501)
+    fixed += 1
+    if let enumerator = fm.enumerator(atPath: pluginContainerPath) {
         for case let relPath as String in enumerator {
-            let fullPath = "\(appBundlePath)/\(relPath)"
-            if chown(fullPath, 33, 33) == 0 {
+            let fullPath = "\(pluginContainerPath)/\(relPath)"
+            if chown(fullPath, 501, 501) == 0 {
                 fixed += 1
             } else {
                 failed += 1
             }
-            var isDir: ObjCBool = false
-            if fm.fileExists(atPath: fullPath, isDirectory: &isDir) {
-                if isDir.boolValue || execRelativePaths.contains(relPath) {
-                    chmod(fullPath, 0o755)
-                } else {
-                    chmod(fullPath, 0o644)
-                }
-            }
-        }
-    }
-
-    // 2. 修复插件数据容器属主为 mobile (501:501)
-    chown(pluginContainerPath, 501, 501)
-    chmod(pluginContainerPath, 0o755)
-    if let enumerator = fm.enumerator(atPath: pluginContainerPath) {
-        for case let relPath as String in enumerator {
-            let fullPath = "\(pluginContainerPath)/\(relPath)"
-            chown(fullPath, 501, 501)
         }
     }
 

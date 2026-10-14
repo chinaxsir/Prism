@@ -312,10 +312,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func copyGeoDatabases(to workDir: URL) throws {
         for name in ["geoip.db", "geosite.db"] {
             guard let src = Bundle.main.url(forResource: name, withExtension: nil) else {
-                throw NSError(
-                    domain: "PrismVPN", code: 3,
-                    userInfo: [NSLocalizedDescriptionKey: "扩展包内缺少 \(name)"]
-                )
+                // 【build 144 方案】缺 geo 数据库时跳过而非抛异常：
+                // 只有用户规则用到 geoip/geosite 时内核才需要它们；
+                // 因可选资源缺失直接 failStart 会把「配置根本不用 geo
+                // 规则」的正常场景也打死（启动成功率优先）。
+                // 若内核真需要而缺失，sing-box 会给出更明确的错误并
+                // 写入 prism_error.txt
+                NSLog("[PrismVPN] 扩展包内缺少 \(name)，跳过拷贝（未使用 geo 规则时无影响）")
+                continue
             }
             let dst = workDir.appendingPathComponent(name)
             if FileManager.default.fileExists(atPath: dst.path) {

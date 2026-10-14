@@ -175,8 +175,15 @@ impl KernelHandle {
         #[cfg(target_os = "ios")]
         let (child, pid): (Option<Child>, u32) = {
             let content = std::str::from_utf8(&config_bytes)
-                .map_err(|e| anyhow::anyhow!("内核配置编码错误: {e}"))?;
-            crate::platform::ios::start_tunnel(content)
+                .map_err(|e| anyhow::anyhow!("内核配置编码错误: {e}"))?
+                .to_owned();
+            // start_tunnel 内部用 semaphore 等待扩展进程建立隧道（可阻塞
+            // 数秒）。Tauri 的 async command 跑在 Tokio worker 上，同步
+            // 阻塞会卡死整个 worker 池——前端所有 IPC（状态轮询、切页、
+            // UI 事件）全部无响应，"正在启动"状态丢失（build 144 方案）
+            tokio::task::spawn_blocking(move || crate::platform::ios::start_tunnel(&content))
+                .await
+                .map_err(|e| anyhow::anyhow!("VPN 启动任务异常退出: {e}"))?
                 .map_err(|e| anyhow::anyhow!("VPN 启动失败: {e}"))?;
             tracing::info!("iOS packet tunnel extension start requested");
             (None, std::process::id())
