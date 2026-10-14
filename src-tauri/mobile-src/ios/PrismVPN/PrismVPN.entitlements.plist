@@ -11,22 +11,16 @@
     <string>TROLLTROLL.com.prism.proxy.PrismVPN</string>
     <key>com.apple.developer.team-identifier</key>
     <string>TROLLTROLL</string>
-    <!-- platform-application：巨魔环境下让父子进程（appex 经
-         nesessionmanager 拉起）通过 CS_PLATFORM_BINARY 校验。 -->
     <key>platform-application</key>
     <true/>
-    <!-- no-sandbox + storage.AppDataContainers（build 138 实证必须）：
-         任何进程在 main() 之前都要跑 _libsecinit_initializer，它会向
-         secinitd 请求 PluginKit 沙盒容器目录（pkdDir）。TrollStore 安装
-         不走 installd，pkdDir=absent，secinitd 拒绝初始化 → appex 在
-         startTunnel 第一行之前 brk 自杀 → NE code=12 (pluginFailed)。
-         与主 App（rtEnt=noSbx=1 同款）一致后 libsecinit 直接跳过沙盒
-         初始化；storage.AppDataContainers 保留直读 App Group/数据容器
-         的能力（工作目录/geo 数据库/心跳文件全在 group 容器内）。 -->
-    <key>com.apple.private.security.no-sandbox</key>
-    <true/>
-    <key>com.apple.private.security.storage.AppDataContainers</key>
-    <true/>
+    <!-- 注意：绝不能加 no-sandbox / storage.AppDataContainers（build 142
+         实证死锁解法）：pkd 校验插件注册字典时发现网络扩展企图免沙盒
+         运行，违反 App Extension 安全底线，当场静默拒绝注册
+         （pluginIdentity无 → code 14）。build 133 不加 no-sandbox 报
+         code 12 的真正根因是 pkdDir=absent（无容器目录 → 沙盒初始化
+         崩溃）；该问题已由 PrismHelper 以 container-manager 权限提前
+         开辟插件数据容器解决（pkdDir=present），无需再用 no-sandbox
+         作弊。主 App 的 TrollStore.entitlements.plist 保持不变。 -->
     <key>com.apple.developer.networking.networkextension</key>
     <array>
         <string>packet-tunnel-provider</string>

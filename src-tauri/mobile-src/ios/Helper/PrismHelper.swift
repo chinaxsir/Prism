@@ -65,10 +65,11 @@ private typealias LSRegisterPluginFn = @convention(c) (
 // MARK: - 1. 提取 Mach-O 内嵌 Entitlements（带强兜底，绝不返回 0 项）
 
 private func extractEntitlements(fromBinary path: String, isAppex: Bool) -> [String: Any] {
+    // appex 兜底字典必须与 PrismVPN.entitlements.plist 纯净版一致：
+    // 绝不能含 no-sandbox——pkd 校验插件注册字典时发现网络扩展免沙盒
+    // 会当场静默拒绝（pluginIdentity无 → code 14，build 142 实证）
     let fallback: [String: Any] = isAppex ? [
         "platform-application": true,
-        "com.apple.private.security.no-sandbox": true,
-        "com.apple.private.security.storage.AppDataContainers": true,
         "application-identifier": "TROLLTROLL.\(appexBundleID)",
         "com.apple.developer.team-identifier": "TROLLTROLL",
         "com.apple.developer.networking.networkextension": ["packet-tunnel-provider"],

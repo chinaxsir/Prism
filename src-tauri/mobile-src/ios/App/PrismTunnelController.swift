@@ -1080,6 +1080,11 @@ final class PrismTunnelController {
     ///   "The VPN app used by the VPN configuration is not installed"
     /// 唯一可靠的恢复方式是 removeFromPreferences 清除旧配置，
     /// 再用全新的 NETunnelProviderManager 重建。
+    ///
+    /// 注意（build 143 方案）：自动重试清理已禁用——start() 恒传
+    /// attemptsRemaining=0，recoverOrFinish 的 resetAllManagers 分支
+    /// 不可达。失败路径绝不允许 removeFromPreferences（误删合法配置
+    /// → managers=0 → 反复授权弹窗）；本函数仅用于错误分类上报。
     static func isStaleOrInvalid(_ error: Error) -> Bool {
         var current: NSError? = error as NSError
         while let ns = current {
@@ -1178,9 +1183,11 @@ final class PrismTunnelController {
     }
 
     /// 启动前一次性预处理：遍历全部 VPN 配置，
-    /// - 旧签名/旧 bundle 的 Prism 条目 → removeFromPreferences
-    /// - 找到与当前 extensionBundleIdentifier 匹配的条目 → 主动 saveToPreferences
-    ///   让 iOS 把当前 App 版本号/签名时间戳同步进 VPN 配置（消除"需要更新"提示）
+    /// - 找到与当前 extensionBundleIdentifier 匹配的条目 → 直接结束清理，
+    ///   仅主动 saveToPreferences 让 iOS 把当前 App 版本号/签名时间戳
+    ///   同步进 VPN 配置（消除"需要更新"提示）——绝不删除任何配置
+    ///   （build 143 方案第 2 步：误删合法配置 → managers=0 → 反复授权弹窗）
+    /// - 仅在无任何匹配条目时，才清理旧签名/旧 bundle 的 Prism 残留
     private func preCleanAndSyncVersion(completion: @escaping () -> Void) {
         NETunnelProviderManager.loadAllFromPreferences { managers, error in
             guard let managers = managers else {
@@ -1192,6 +1199,7 @@ final class PrismTunnelController {
             }
             let group = DispatchGroup()
             var matched: NETunnelProviderManager?
+            var stale = [NETunnelProviderManager]()
             // 匹配判断用硬编码期望值而非运行时发现的 extensionBundleID：
             // discoverExtensionBundleID 失败回落时会误把本来匹配的配置
             // 当"旧残留"删掉 → 用户被迫二次授权弹窗（managers=0 的来源）
@@ -1202,20 +1210,25 @@ final class PrismTunnelController {
                 let isOurs = proto.providerBundleIdentifier?.hasSuffix(".PrismVPN") == true
                 guard isOurs else { continue }
                 if proto.providerBundleIdentifier == expectedExtID {
+                    // 匹配即结束清理（build 143 方案）：找到合法配置后
+                    // 不得再删除任何条目（包括其他 .PrismVPN 残留——
+                    // 宁可留旧条目也不能动合法配置）
                     matched = manager
-                } else {
-                    // 旧签名/旧 bundle ID 的残留条目 → 删除
-                    NSLog("[PrismVPN] 删除旧签名残留配置: \(proto.providerBundleIdentifier ?? "?")")
+                    break
+                }
+                stale.append(manager)
+            }
+            if let matched = matched {
+                // 主动 save 同步当前 App 版本号（消除"需要更新"红色提示）
+                NSLog("[PrismVPN] 匹配配置已存在，跳过清理，直接 save 同步版本号")
+                group.enter()
+                matched.saveToPreferences { _ in group.leave() }
+            } else {
+                for manager in stale {
+                    NSLog("[PrismVPN] 无匹配配置，仅清理旧签名残留: \(String(describing: (manager.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier))")
                     group.enter()
                     manager.removeFromPreferences { _ in group.leave() }
                 }
-            }
-            // 找到匹配条目 → 主动 saveToPreferences，
-            // 让 iOS 同步当前 App 版本号（消除"需要更新"红色提示）
-            if let matched = matched {
-                NSLog("[PrismVPN] 主动 save 同步 VPN 配置版本号")
-                group.enter()
-                matched.saveToPreferences { _ in group.leave() }
             }
             group.notify(queue: .main) { completion() }
         }
