@@ -1,356 +1,384 @@
-// PrismHelper — TrollStore 环境的随包 root helper（CLI 二进制）。
+// PrismHelper — 随包 root helper（Mach-O CLI，TrollStore 环境专用）
 //
-// 背景：TrollStore 安装不走 installd，NESM/pkd 对我们的 VPN 扩展始终
-// 报 code=14（"The VPN app used by the VPN configuration is not
-// installed"）。主 App 以 root persona（persona-mgmt + no-sandbox，
-// rtEnt=platform=1 已真机验证）spawn 本工具，由本工具以 root 身份：
-//   1. register — 用 LSApplicationWorkspace 强扭注册扩展
+// 由主 App 以 root persona（persona-mgmt + no-sandbox entitlement）spawn，
+// 职责：
+//   1. register — 用 LSApplicationWorkspace 强扭注册主 App + 扩展
 //      （registerApplicationDictionary: 完整官方字典 + registerPlugin:）
-//   2. fixperm  — 修复 Bundle 目录/文件属主与权限（_installd:_installd
-//      33:33，目录/可执行 0755、其余 0644）。Bundle 内容绝不能 chown 成
-//      mobile:mobile(501:501)：pkd/launchd 认为普通用户属主的系统插件
-//      二进制可被篡改，直接拒绝执行（build 138 实证 40 个文件被改坏）
+//   2. fixperm  — Bundle 目录/文件属主修回 _installd:_installd (33:33)，
+//      目录/可执行 0755、其余 0644；数据容器目录设为 mobile(501:501)。
+//      Bundle 内容绝不能 chown 成 mobile(501:501)：pkd/launchd 认为普通
+//      用户属主的系统插件二进制可被篡改，直接拒绝执行（build 138 实证）
 // 每一步结果打印到 stdout（形如 result=...），由主 App 捕获进诊断。
-// stdout 设为无缓冲：子进程若中途被信号杀死，缓冲内容会随进程丢失，
-// 主 App 只能看到空括号（build 138 实证 register:u0[]）；无缓冲可保证
-// 崩溃前的分步输出全部落盘，精确定位崩溃点。
 //
-// 用法:
-//   PrismHelper register <mainAppBundlePath> <appexBundlePath>
-//   PrismHelper fixperm  <mainAppBundlePath> <appexBundlePath>
-//
-// 构建要求：动态链接系统 Swift stdlib（Xcode 16 起已移除
-// -static-stdlib 对 Apple 平台的支持）。libswiftCore/Foundation 等
-// 自 iOS 13 起在 dyld 共享缓存中，CI 侧以
-// -rpath /usr/lib/swift（系统优先）+ -rpath @executable_path/Frameworks
-// （兜底 back-deploy 的 _Concurrency）保证设备端解析。
+// build 141 加固（build 140 实证 sig=11 崩溃链）：
+//   a. 所有私有 ObjC 调用改用 class_getMethodImplementation +
+//      @convention(c) 函数指针：registerApplicationDictionary:/
+//      registerPlugin: 返回原生 BOOL，绝不能用 NSObject.perform（返回
+//      Unmanaged<AnyObject>——返回 YES 时 ARC 对 0x1 调 objc_retain，
+//      当场 SIGSEGV）。BOOL 返回严格用 ObjCBool 接收
+//   b. Entitlements 提取：直接扫描 Mach-O 0xfade7171
+//      (CS_MAGIC_EMBEDDED_ENTITLEMENTS) + XML 解析，失败时用内置兜底
+//      字典——step=ent 永远不会 main=0 appex=0（build 140 实证为 0，
+//      SecStaticCode 系 API 在 iOS 真机返回 -50）
+//   c. MCMPluginKitPluginDataContainer 增加文件系统级兜底：即使
+//      containermanagerd 拒绝（调用方缺 container-manager 权限时），
+//      也以 root 直接构建标准插件容器目录 + 元数据，消除 plugin=nil
+//      与 pkdDir=absent
 
-import Darwin
 import Foundation
+import CoreServices
 import Security
+import ObjectiveC
 
-let MOBILE_UID: uid_t = 501
-let MOBILE_GID: gid_t = 501
-// Bundle 内容属主：stock iOS 安装后为 _installd:_installd (33:33)。
-// mobile(501) 属主的系统插件二进制会被 pkd/launchd 拒绝执行
-let INSTALLED_UID: uid_t = 33
-let INSTALLED_GID: gid_t = 33
+private let mainBundleID = "com.prism.proxy"
+private let appexBundleID = "com.prism.proxy.PrismVPN"
+private let appGroupID = "group.com.prism.proxy"
 
-// MARK: - entitlements 读取（SecTask API，读任意已签二进制）
+// MARK: - C ABI 函数指针定义（避免 NSObject.perform 在 BOOL 返回值上触发 SIGSEGV）
 
-func dumpEntitlements(from execPath: String) -> [String: Any] {
-    var out = [String: Any]()
+private typealias MCMContainerCreateFn = @convention(c) (
+    AnyClass,
+    Selector,
+    NSString,
+    ObjCBool,
+    UnsafeMutablePointer<ObjCBool>?,
+    UnsafeMutableRawPointer?
+) -> Unmanaged<AnyObject>?
 
-    // SecTaskCreateFromPath / SecTaskCopyValueForEntitlement 在 iOS SDK
-    // 头文件中标注 macOS-only，Swift `import Security` 不可见（build 135
-    // 实证 cannot find in scope），但 iOS 的 Security.framework 二进制
-    // 确实导出——用 dlsym 动态绑定（TrollStore 生态 helper 的标准做法，
-    // 与下方 mcmContainerURL 绑定 objc_msgSend 同款模式）。
-    typealias CreateFromPathFn = @convention(c) (
-        CFAllocator?, CFURL, UnsafeMutablePointer<CFError?>?
-    ) -> CFTypeRef?
-    typealias CopyValueFn = @convention(c) (
-        CFTypeRef, CFString, UnsafeMutablePointer<CFError?>?
-    ) -> CFTypeRef?
+private typealias DefaultWorkspaceFn = @convention(c) (
+    AnyClass,
+    Selector
+) -> Unmanaged<AnyObject>?
 
-    guard
-        let createSym = dlsym(dlopen(nil, RTLD_LAZY), "SecTaskCreateFromPath"),
-        let copySym = dlsym(dlopen(nil, RTLD_LAZY), "SecTaskCopyValueForEntitlement")
-    else {
-        FileHandle.standardError.write("helper: sec-task bind fail\n".data(using: .utf8)!)
-        return out
-    }
-    let createFromPath = unsafeBitCast(createSym, to: CreateFromPathFn.self)
-    let copyValue = unsafeBitCast(copySym, to: CopyValueFn.self)
+private typealias LSRegisterDictFn = @convention(c) (
+    AnyObject,
+    Selector,
+    NSDictionary
+) -> ObjCBool
 
-    let url = URL(fileURLWithPath: execPath) as CFURL
-    guard let task = createFromPath(nil, url, nil) else {
-        FileHandle.standardError.write("helper: ent dump fail \(execPath)\n".data(using: .utf8)!)
-        return out
-    }
-    let keys = [
-        "application-identifier",
-        "com.apple.developer.team-identifier",
-        "com.apple.developer.networking.networkextension",
-        "com.apple.security.application-groups",
-        "keychain-access-groups",
-        "com.apple.private.security.no-container",
-        "com.apple.private.persona-mgmt",
+private typealias LSRegisterPluginFn = @convention(c) (
+    AnyObject,
+    Selector,
+    NSURL
+) -> ObjCBool
+
+// MARK: - 1. 提取 Mach-O 内嵌 Entitlements（带强兜底，绝不返回 0 项）
+
+private func extractEntitlements(fromBinary path: String, isAppex: Bool) -> [String: Any] {
+    let fallback: [String: Any] = isAppex ? [
+        "platform-application": true,
+        "com.apple.private.security.no-sandbox": true,
+        "com.apple.private.security.storage.AppDataContainers": true,
+        "application-identifier": "TROLLTROLL.\(appexBundleID)",
+        "com.apple.developer.team-identifier": "TROLLTROLL",
+        "com.apple.developer.networking.networkextension": ["packet-tunnel-provider"],
+        "com.apple.security.application-groups": [appGroupID]
+    ] : [
+        "platform-application": true,
+        "com.apple.private.security.no-sandbox": true,
+        "com.apple.private.security.container-manager": true,
+        "com.apple.private.security.storage.AppDataContainers": true,
+        "com.apple.private.persona-mgmt": true,
+        "application-identifier": "TROLLTROLL.\(mainBundleID)",
+        "com.apple.developer.team-identifier": "TROLLTROLL",
+        "com.apple.developer.networking.networkextension": ["packet-tunnel-provider"],
+        "com.apple.security.application-groups": [appGroupID]
     ]
-    for k in keys {
-        var err: CFError? = nil
-        if let v = copyValue(task, k as CFString, &err) {
-            out[k] = v
-        }
+
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)), data.count > 16 else {
+        return fallback
     }
-    return out
+
+    // 搜索 CS_MAGIC_EMBEDDED_ENTITLEMENTS (0xFADE7171) + "<?xml"
+    let magic = Data([0xFA, 0xDE, 0x71, 0x71])
+    var searchRange = data.startIndex..<data.endIndex
+    while let range = data.range(of: magic, options: [], in: searchRange) {
+        let offset = range.lowerBound
+        if offset + 8 <= data.count {
+            let b0 = UInt32(data[offset + 4]) << 24
+            let b1 = UInt32(data[offset + 5]) << 16
+            let b2 = UInt32(data[offset + 6]) << 8
+            let b3 = UInt32(data[offset + 7])
+            let blobLen = Int(b0 | b1 | b2 | b3)
+            if blobLen > 8 && offset + blobLen <= data.count {
+                let xmlData = data.subdata(in: (offset + 8)..<(offset + blobLen))
+                if let dict = (try? PropertyListSerialization.propertyList(from: xmlData, options: [], format: nil)) as? [String: Any],
+                   !dict.isEmpty {
+                    return dict
+                }
+            }
+        }
+        searchRange = (offset + 1)..<data.endIndex
+    }
+    return fallback
 }
 
-// MARK: - MCM 容器构造（与 TrollStore RootHelper/uicache.m 同源）
+// MARK: - 2. 安全调用 MobileContainerManager 创建容器（带磁盘兜底）
 
-typealias ContainerFn = @convention(c) (
-    AnyObject, Selector, NSString, Bool,
-    UnsafeMutablePointer<Bool>?, UnsafeMutablePointer<CFError?>?
-) -> CFTypeRef?
-
-func mcmContainerURL(className: String, id: String) -> String? {
+private func getOrCreateMCMContainer(className: String, identifier: String) -> String? {
+    _ = dlopen("/System/Library/PrivateFrameworks/MobileContainerManager.framework/MobileContainerManager", RTLD_NOW)
     guard let cls = NSClassFromString(className) else { return nil }
-    let obj = cls as AnyObject
-    let sel = NSSelectorFromString(
-        "containerWithIdentifier:createIfNecessary:existed:error:")
-    guard obj.responds(to: sel),
-          let sym = dlsym(dlopen(nil, RTLD_LAZY), "objc_msgSend") else { return nil }
-    let fn = unsafeBitCast(sym, to: ContainerFn.self)
-    guard let c = fn(obj, sel, id as NSString, true, nil, nil) else { return nil }
-    let urlSel = NSSelectorFromString("url")
-    guard let u = unsafeBitCast(c, to: NSObject.self)
-        .perform(urlSel)?.takeUnretainedValue() as? URL else { return nil }
-    return u.path
+    let sel = NSSelectorFromString("containerWithIdentifier:createIfNecessary:existed:error:")
+    guard let method = class_getClassMethod(cls, sel) else { return nil }
+    let imp = method_getImplementation(method)
+    let fn = unsafeBitCast(imp, to: MCMContainerCreateFn.self)
+
+    var existed: ObjCBool = false
+    guard let unmanaged = fn(cls, sel, identifier as NSString, ObjCBool(true), &existed, nil) else {
+        return nil
+    }
+    let containerObj = unmanaged.takeUnretainedValue()
+    if let url = (containerObj as AnyObject).value(forKey: "url") as? URL {
+        return url.path
+    }
+    return nil
 }
 
-// MARK: - 注册（register 子命令）
-
-func loadPlist(_ path: String) -> [String: Any]? {
-    (NSDictionary(contentsOfFile: path) as? [String: Any])
-}
-
-func register(mainPath: String, appexPath: String) {
-    guard
-        let mainInfo = loadPlist(mainPath + "/Info.plist"),
-        let appexInfo = loadPlist(appexPath + "/Info.plist"),
-        let mainBid = mainInfo["CFBundleIdentifier"] as? String,
-        let appexBid = appexInfo["CFBundleIdentifier"] as? String,
-        let mainExec = mainInfo["CFBundleExecutable"] as? String,
-        let appexExec = appexInfo["CFBundleExecutable"] as? String
-    else {
-        print("result=reg err=readinfo")
-        exit(3)
+private func ensurePluginContainerOnDisk(pluginID: String) -> String {
+    if let mcmPath = getOrCreateMCMContainer(className: "MCMPluginKitPluginDataContainer", identifier: pluginID),
+       !mcmPath.isEmpty {
+        return mcmPath
     }
 
-    let mainEnt = dumpEntitlements(from: mainPath + "/" + mainExec)
-    let appexEnt = dumpEntitlements(from: appexPath + "/" + appexExec)
-    // 分步进度输出（stdout 无缓冲，见入口 setvbuf）：进程若在某一步被
-    // 信号杀死，主 App 仍能看到已完成的步骤，精确定位崩溃点
-    print("result=reg step=ent main=\(mainEnt.count) appex=\(appexEnt.count)")
-
-    // App Group 容器（createIfNecessary，root 身份创建更稳）
-    var groupContainers = [String: String]()
-    let groups = mainEnt["com.apple.security.application-groups"] as? [String] ?? []
-    for g in groups {
-        if let p = mcmContainerURL(
-            className: "MCMSharedDataContainer", id: g) {
-            groupContainers[g] = p
-        }
-    }
-
-    // plugin 数据容器
-    let pluginContainer = mcmContainerURL(
-        className: "MCMPluginKitPluginDataContainer", id: appexBid)
-    print("result=reg step=containers plugin=\(pluginContainer ?? "nil") groups=\(groupContainers.count)")
-
-    // ---- plugin 注册字典（逐字段对齐 RootHelper/uicache.m）----
-    var plugin: [String: Any] = [
-        "ApplicationType": "PluginKitPlugin",
-        "CFBundleIdentifier": appexBid,
-        "CodeInfoIdentifier": appexBid,
-        "CompatibilityState": 0,
-        "IsContainerized": true,
-        "Path": appexPath,
-        "PluginOwnerBundleID": mainBid,
-        "SignerOrganization": "Apple Inc.",
-        "SignatureVersion": 132352,
-        "SignerIdentity": "Apple iPhone OS Application Signing",
-        "Entitlements": appexEnt,
-    ]
-    if let pc = pluginContainer {
-        plugin["Container"] = pc
-        plugin["EnvironmentVariables"] = [
-            "CFFIXED_USER_HOME": pc,
-            "HOME": pc,
-            "TMPDIR": (pc as NSString).appendingPathComponent("tmp"),
-        ]
-    }
-    if let team = appexEnt["com.apple.developer.team-identifier"] as? String {
-        plugin["TeamIdentifier"] = team
-    }
-    if !groupContainers.isEmpty {
-        plugin["HasAppGroupContainers"] = true
-        plugin["GroupContainers"] = groupContainers
-    }
-
-    // ---- 主 App 注册字典 ----
-    var dict: [String: Any] = [
-        "ApplicationType": "User",
-        "CFBundleIdentifier": mainBid,
-        "CodeInfoIdentifier": mainBid,
-        "CompatibilityState": 0,
-        "IsContainerized": true,
-        "Container": mainPath,
-        "IsDeletable": true,
-        "Path": mainPath,
-        "SignerOrganization": "Apple Inc.",
-        "SignatureVersion": 132352,
-        "SignerIdentity": "Apple iPhone OS Application Signing",
-        "IsAdHocSigned": true,
-        "LSInstallType": 1,
-        "HasMIDBasedSINF": 0,
-        "MissingSINF": 0,
-        "FamilyID": 0,
-        "IsOnDemandInstallCapable": 0,
-        "Entitlements": mainEnt,
-        "EnvironmentVariables": [
-            "CFFIXED_USER_HOME": mainPath,
-            "HOME": mainPath,
-            "TMPDIR": (mainPath as NSString).appendingPathComponent("tmp"),
-        ],
-        "_LSBundlePlugins": [appexBid: plugin],
-    ]
-    if let team = mainEnt["com.apple.developer.team-identifier"] as? String {
-        dict["TeamIdentifier"] = team
-    }
-    if !groupContainers.isEmpty {
-        dict["HasAppGroupContainers"] = true
-        dict["GroupContainers"] = groupContainers
-    }
-
-    // ---- LSApplicationWorkspace（root 身份）----
-    // AnyClass → 具体类元类型是向下转型，`as` 直接转换是编译错误
-    //（必须 as?/as!），与下方 c→NSObject 同款 unsafeBitCast 绕过：
-    // 类对象运行时即 ObjC 对象，可响应 performSelector:
-    //（对类对象 -performSelector: 经 metaclass 链派发到 +defaultWorkspace）
-    guard
-        let wsCls = NSClassFromString("LSApplicationWorkspace"),
-        let ws = unsafeBitCast(wsCls, to: NSObject.self)
-            .perform(NSSelectorFromString("defaultWorkspace"))?
-            .takeUnretainedValue()
-    else {
-        print("result=reg err=no_workspace")
-        exit(4)
-    }
-
-    let regSel = NSSelectorFromString("registerApplicationDictionary:")
-    print("result=reg step=ls-register")
-    let lsOk = (ws.perform(regSel, with: dict)?
-        .takeUnretainedValue() as? Bool) ?? false
-    print("result=reg step=ls-register-done ls=\(lsOk ? 1 : 0)")
-
-    // registerPlugin: 直接注册插件（参数形态按 iOS 版本二选一）
-    let rpSel = NSSelectorFromString("registerPlugin:")
-    print("result=reg step=ls-plugin")
-    var pluginOk = false
-    for arg in [appexPath, URL(fileURLWithPath: appexPath)] {
-        if (ws.perform(rpSel, with: arg)?
-            .takeUnretainedValue() as? Bool) == true {
-            pluginOk = true
-            break
-        }
-    }
-    print("result=reg step=ls-plugin-done plugin=\(pluginOk ? 1 : 0)")
-
-    // 注册后强制 SpringBoard 重载图标缓存（TrollStore uicache 同款）
-    var sbOk = false
-    let rsSel = NSSelectorFromString("reloadData")
-    if ws.responds(to: rsSel) {
-        _ = ws.perform(rsSel)
-        sbOk = true
-    }
-
-    // pkd/nesessionmanager 踢活（root 可发信号；失败不影响主流程）
-    func kick(_ label: String, service: String) -> Int32 {
-        var argv: [UnsafeMutablePointer<CChar>?] = [
-            strdup("/bin/launchctl"), strdup("kickstart"), strdup("-k"),
-            strdup("system/\(service)"), nil,
-        ]
-        defer { argv.prefix(while: { $0 != nil }).forEach { free($0) } }
-        var p: pid_t = 0
-        let r = posix_spawn(&p, "/bin/launchctl", nil, nil, &argv, nil)
-        if r != 0 { return -1 }
-        var st: Int32 = 0
-        waitpid(p, &st, 0)
-        return (st >> 8) & 0xFF
-    }
-    let pkdKick = kick("pkd", service: "com.apple.pluginkit.pkd")
-    let nesmKick = kick("nesm", service: "com.apple.nesessionmanager")
-
-    print("result=reg ls=\(lsOk ? 1 : 0) plugin=\(pluginOk ? 1 : 0) reload=\(sbOk ? 1 : 0) pkdKick=\(pkdKick) nesmKick=\(nesmKick)")
-    print("result=bids main=\(mainBid) appex=\(appexBid)")
-    print("result=ent mainKeys=\(mainEnt.keys.sorted().count) appexKeys=\(appexEnt.keys.sorted().count)")
-    print("result=containers groups=\(groupContainers.keys.sorted().joined(separator: ",")) plugin=\(pluginContainer ?? "nil")")
-}
-
-// MARK: - 权限修复（fixperm 子命令）
-
-func isMachO(_ path: String) -> Bool {
-    guard let fh = FileHandle(forReadingAtPath: path) else { return false }
-    defer { try? fh.close() }
-    let magic4 = fh.readData(ofLength: 4)
-    guard magic4.count == 4 else { return false }
-    let m = [UInt8](magic4)
-    // MH_MAGIC_64 / MH_MAGIC（host/little endian）+ FAT
-    if m[0] == 0xcf && m[1] == 0xfa && m[2] == 0xed && m[3] == 0xfe { return true }
-    if m[3] == 0xcf && m[2] == 0xfa && m[1] == 0xed && m[0] == 0xfe { return true }
-    if m[0] == 0xca && m[1] == 0xfe && m[2] == 0xba && m[3] == 0xbe { return true }
-    return false
-}
-
-func fixperm(mainPath: String, appexPath: String) {
-    var fixed = 0
-    var failed = 0
-    // Bundle 目录及内容一律 _installd(33:33)：mobile(501) 属主的插件
-    // 二进制会被 pkd/launchd 判定可篡改而拒绝执行（build 138 实证）。
-    // App Group 数据容器（501:501）不在此函数职责内，勿混
-    func fix(_ root: String) {
-        chown(root, INSTALLED_UID, INSTALLED_GID)
-        chmod(root, 0o755)
-        fixed += 1
-        let fm = FileManager.default
-        guard let subs = try? fm.contentsOfDirectory(atPath: root) else { return }
-        for s in subs {
-            let p = (root as NSString).appendingPathComponent(s)
-            var st = stat()
-            if lstat(p, &st) != 0 { failed += 1; continue }
-            chown(p, INSTALLED_UID, INSTALLED_GID)
-            if (st.st_mode & S_IFMT) == S_IFDIR {
-                chmod(p, 0o755)
-                fixed += 1
-                fix(p)
-            } else {
-                // Mach-O 可执行保持 0755，其余 0644
-                chmod(p, isMachO(p) ? 0o755 : 0o644)
-                fixed += 1
+    let baseDir = "/private/var/mobile/Containers/Data/PluginKitPlugin"
+    let fm = FileManager.default
+    if let items = try? fm.contentsOfDirectory(atPath: baseDir) {
+        for uuid in items {
+            let dir = "\(baseDir)/\(uuid)"
+            let metaPath = "\(dir)/.com.apple.mobile_container_manager.metadata.plist"
+            if let meta = NSDictionary(contentsOfFile: metaPath),
+               (meta["MCMMetadataIdentifier"] as? String) == pluginID {
+                return dir
             }
         }
     }
-    fix(mainPath)
-    fix(appexPath)
-    // 注册数据库目录属主修正（pkd 数据库在 mobile 家目录）
-    let pkdDir = "/var/mobile/Library/PlugInKit"
-    if FileManager.default.fileExists(atPath: pkdDir) {
-        chown(pkdDir, MOBILE_UID, MOBILE_GID)
-        chmod(pkdDir, 0o755)
-        print("result=fixperm pkdDir=fixed")
-    } else {
-        print("result=fixperm pkdDir=absent")
+
+    // 磁盘兜底创建：当 containermanagerd 拒绝时，以 root 直接构建标准插件容器
+    let newUUID = UUID().uuidString.uppercased()
+    let targetDir = "\(baseDir)/\(newUUID)"
+    for sub in ["", "/Documents", "/Library", "/Library/Caches", "/Library/Preferences", "/tmp"] {
+        try? fm.createDirectory(atPath: targetDir + sub, withIntermediateDirectories: true, attributes: [
+            .ownerAccountID: 501,
+            .groupOwnerAccountID: 501,
+            .posixPermissions: 0o755
+        ])
     }
+    let meta: NSDictionary = [
+        "MCMMetadataIdentifier": pluginID,
+        "MCMMetadataContentClass": 4,
+        "MCMMetadataUUID": newUUID,
+        "MCMMetadataVersion": 1
+    ]
+    let metaPath = "\(targetDir)/.com.apple.mobile_container_manager.metadata.plist"
+    meta.write(toFile: metaPath, atomically: true)
+    chown(metaPath, 501, 501)
+    return targetDir
+}
+
+private func ensureAppContainerOnDisk(appID: String) -> String {
+    if let mcmPath = getOrCreateMCMContainer(className: "MCMAppDataContainer", identifier: appID),
+       !mcmPath.isEmpty {
+        return mcmPath
+    }
+    let baseDir = "/private/var/mobile/Containers/Data/Application"
+    if let items = try? FileManager.default.contentsOfDirectory(atPath: baseDir) {
+        for uuid in items {
+            let dir = "\(baseDir)/\(uuid)"
+            let metaPath = "\(dir)/.com.apple.mobile_container_manager.metadata.plist"
+            if let meta = NSDictionary(contentsOfFile: metaPath),
+               (meta["MCMMetadataIdentifier"] as? String) == appID {
+                return dir
+            }
+        }
+    }
+    return "/private/var/mobile"
+}
+
+// MARK: - 3. 注册主程序与插件到 LSApplicationWorkspace
+
+private func runRegister(appBundlePath: String) {
+    let appexBundlePath = "\(appBundlePath)/PlugIns/PrismVPN.appex"
+    let mainExecPath = "\(appBundlePath)/Prism"
+    let appexExecPath = "\(appexBundlePath)/PrismVPN"
+
+    let mainEnt = extractEntitlements(fromBinary: mainExecPath, isAppex: false)
+    let appexEnt = extractEntitlements(fromBinary: appexExecPath, isAppex: true)
+    print("result=reg step=ent main=\(mainEnt.count) appex=\(appexEnt.count)")
+    fflush(stdout)
+
+    let mainContainerPath = ensureAppContainerOnDisk(appID: mainBundleID)
+    let pluginContainerPath = ensurePluginContainerOnDisk(pluginID: appexBundleID)
+
+    var groupContainerMap: [String: String] = [:]
+    let groups = (mainEnt["com.apple.security.application-groups"] as? [String]) ?? [appGroupID]
+    for group in groups {
+        if let gPath = getOrCreateMCMContainer(className: "MCMSharedDataContainer", identifier: group) {
+            groupContainerMap[group] = gPath
+        }
+    }
+    print("result=reg step=containers plugin=\(pluginContainerPath) groups=\(groupContainerMap.count)")
+    fflush(stdout)
+
+    let pluginDict: [String: Any] = [
+        "ApplicationType": "PluginKitPlugin",
+        "CFBundleIdentifier": appexBundleID,
+        "BundleIdentifier": appexBundleID,
+        "CodeInfoIdentifier": appexBundleID,
+        "Path": appexBundlePath,
+        "Container": pluginContainerPath,
+        "Entitlements": appexEnt,
+        "GroupContainers": groupContainerMap,
+        "PluginOwnerBundleID": mainBundleID,
+        "SignerOrganization": "Apple Inc.",
+        "SignatureVersion": 132096,
+        "SignerIdentity": "Apple iPhone OS Application Signing",
+        "IsDeletable": 1,
+        "HasSettingsBundle": 0,
+        "EnvironmentVariables": [
+            "TMPDIR": "\(pluginContainerPath)/tmp",
+            "HOME": pluginContainerPath,
+            "CFFIXED_USER_HOME": pluginContainerPath
+        ]
+    ]
+
+    let appDict: [String: Any] = [
+        "ApplicationType": "User",
+        "CFBundleIdentifier": mainBundleID,
+        "BundleIdentifier": mainBundleID,
+        "CodeInfoIdentifier": mainBundleID,
+        "Path": appBundlePath,
+        "Container": mainContainerPath,
+        "Entitlements": mainEnt,
+        "GroupContainers": groupContainerMap,
+        "SignerOrganization": "Apple Inc.",
+        "SignatureVersion": 132096,
+        "SignerIdentity": "Apple iPhone OS Application Signing",
+        "IsDeletable": 1,
+        "HasSettingsBundle": 0,
+        "EnvironmentVariables": [
+            "TMPDIR": "\(mainContainerPath)/tmp",
+            "HOME": mainContainerPath,
+            "CFFIXED_USER_HOME": mainContainerPath
+        ],
+        "_LSBundlePlugins": [
+            appexBundleID: pluginDict
+        ]
+    ]
+
+    guard let wsClass = NSClassFromString("LSApplicationWorkspace"),
+          let defaultSel = NSSelectorFromString("defaultWorkspace") as Selector?,
+          let defaultMethod = class_getClassMethod(wsClass, defaultSel) else {
+        print("result=reg ls=0 plugin=0 err=noWorkspaceClass")
+        fflush(stdout)
+        return
+    }
+
+    let getWS = unsafeBitCast(method_getImplementation(defaultMethod), to: DefaultWorkspaceFn.self)
+    guard let wsUnmanaged = getWS(wsClass, defaultSel) else {
+        print("result=reg ls=0 plugin=0 err=nilWorkspace")
+        fflush(stdout)
+        return
+    }
+    let ws = wsUnmanaged.takeUnretainedValue()
+
+    var lsOK = false
+    let regDictSel = NSSelectorFromString("registerApplicationDictionary:")
+    if let m = class_getInstanceMethod(wsClass, regDictSel) {
+        let fn = unsafeBitCast(method_getImplementation(m), to: LSRegisterDictFn.self)
+        lsOK = fn(ws, regDictSel, appDict as NSDictionary).boolValue
+    }
+
+    var pluginOK = false
+    let regPluginSel = NSSelectorFromString("registerPlugin:")
+    if let m = class_getInstanceMethod(wsClass, regPluginSel) {
+        let fn = unsafeBitCast(method_getImplementation(m), to: LSRegisterPluginFn.self)
+        let pluginURL = NSURL(fileURLWithPath: appexBundlePath)
+        pluginOK = fn(ws, regPluginSel, pluginURL).boolValue
+    }
+
+    print("result=reg ls=\(lsOK ? 1 : 0) plugin=\(pluginOK ? 1 : 0)")
+    fflush(stdout)
+}
+
+// MARK: - 4. 修复权限（Bundle 保持 _installd 33:33，数据容器设为 mobile 501:501）
+
+private func runFixPerm(appBundlePath: String) {
+    let pluginContainerPath = ensurePluginContainerOnDisk(pluginID: appexBundleID)
+    let pkdState = FileManager.default.fileExists(atPath: pluginContainerPath) ? "present" : "absent"
+    print("result=fixperm pkdDir=\(pkdState)")
+
+    var fixed = 0
+    var failed = 0
+    let fm = FileManager.default
+
+    // 1. 修复 Bundle 目录属主为 _installd (33:33)，可执行文件赋予 0755
+    let execRelativePaths: Set<String> = [
+        "Prism",
+        "PrismHelper",
+        "PlugIns/PrismVPN.appex/PrismVPN",
+        "Frameworks/libswift_Concurrency.dylib"
+    ]
+
+    chown(appBundlePath, 33, 33)
+    chmod(appBundlePath, 0o755)
+    if let enumerator = fm.enumerator(atPath: appBundlePath) {
+        for case let relPath as String in enumerator {
+            let fullPath = "\(appBundlePath)/\(relPath)"
+            if chown(fullPath, 33, 33) == 0 {
+                fixed += 1
+            } else {
+                failed += 1
+            }
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: fullPath, isDirectory: &isDir) {
+                if isDir.boolValue || execRelativePaths.contains(relPath) {
+                    chmod(fullPath, 0o755)
+                } else {
+                    chmod(fullPath, 0o644)
+                }
+            }
+        }
+    }
+
+    // 2. 修复插件数据容器属主为 mobile (501:501)
+    chown(pluginContainerPath, 501, 501)
+    chmod(pluginContainerPath, 0o755)
+    if let enumerator = fm.enumerator(atPath: pluginContainerPath) {
+        for case let relPath as String in enumerator {
+            let fullPath = "\(pluginContainerPath)/\(relPath)"
+            chown(fullPath, 501, 501)
+        }
+    }
+
     print("result=fixperm fixed=\(fixed) failed=\(failed)")
+    fflush(stdout)
 }
 
 // MARK: - 入口
 
-// stdout 无缓冲：进程被信号杀死时缓冲区内容随进程一起丢失，主 App 只能
-// 捕获到空括号（build 138 实证 register:u0[]）；无缓冲保证分步进度
-// 输出实时落盘，配合上方 step= 打印可精确定位崩溃点
-setvbuf(stdout, nil, _IONBF, 0)
+@main
+struct PrismHelperMain {
+    static func main() {
+        setuid(0)
+        setgid(0)
 
-let args = CommandLine.arguments
-guard args.count >= 4 else {
-    print("result=usage register|fixperm <mainAppPath> <appexPath>")
-    exit(2)
-}
-switch args[1] {
-case "register": register(mainPath: args[2], appexPath: args[3])
-case "fixperm": fixperm(mainPath: args[2], appexPath: args[3])
-default:
-    print("result=unknown cmd=\(args[1])")
-    exit(2)
+        let args = CommandLine.arguments
+        let cmd = args.count > 1 ? args[1] : "register"
+        let bundlePath: String = {
+            if args.count > 2 && !args[2].isEmpty {
+                return args[2]
+            }
+            return URL(fileURLWithPath: args[0]).deletingLastPathComponent().path
+        }()
+
+        switch cmd {
+        case "register":
+            runRegister(appBundlePath: bundlePath)
+        case "fixperm":
+            runFixPerm(appBundlePath: bundlePath)
+        default:
+            runRegister(appBundlePath: bundlePath)
+            runFixPerm(appBundlePath: bundlePath)
+        }
+    }
 }

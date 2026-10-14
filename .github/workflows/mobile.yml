@@ -517,9 +517,9 @@ jobs:
 
           # ==================== 3.5 编译 PrismHelper（随包 root helper）====
           # 主 App 在设备上以 root persona（persona-mgmt + no-sandbox）
-          # spawn 它，以 root 身份用 LSApplicationWorkspace 强扭注册 VPN
-          # 扩展（registerApplicationDictionary: + registerPlugin:），并
-          # 修复 PlugIns 目录权限（mobile:mobile，目录/可执行 0755）。
+          # spawn 它，以 root 身份修复 Bundle 属主（_installd 33:33）并
+          # 用 LSApplicationWorkspace 强扭注册 VPN 扩展
+          # （registerApplicationDictionary: + registerPlugin:）。
           #
           # 为什么必须是 Mach-O 而非 shell 脚本（build 137 实证）：
           # AMFI 严禁 posix_spawn 执行非 Mach-O 的 .sh（EPERM，spawn=1）。

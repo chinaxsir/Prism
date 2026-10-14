@@ -791,11 +791,15 @@ final class PrismTunnelController {
             // 方案1: posix_spawn pluginkit -a/-e —— 已废弃：iOS 无
             //        pluginkit CLI（/usr/bin/pluginkit 不存在，spawn 恒
             //        ENOENT）。注册交给：
-            //        a) TrollStore 自带 trollstorehelper uicache（官方注册）
-            //        b) 随包 PrismRegister.sh（root 级 uicache/pluginkit
-            //           注册 + 权限修复 + pkd kickstart）
-            tryRootHelperUICache()
-            trySelfHelperRegister()
+            //        a) 随包 PrismHelper（root 级 fixperm + LSApplicationWorkspace
+            //           注册，写完整 _LSBundlePlugins 字典）
+            //        b) 注册失败时回退 TrollStore 官方 trollstorehelper uicache。
+            //           顺序绝不能反：uicache 以官方字典重建 _LSBundlePlugins，
+            //           在 PrismHelper 注册成功后再跑会覆盖刚写入的注册信息
+            //           （build 141 方案第 3 条）
+            if !trySelfHelperRegister() {
+                tryRootHelperUICache()
+            }
 
             // 方案2（原 tryLSApplicationWorkspace，mobile 身份
             // registerApplicationDictionary）已移除：以 mobile 身份传入的
@@ -996,12 +1000,12 @@ final class PrismTunnelController {
     static var selfHelperResult: String = "未调用"
 
     /// 以 root persona spawn 随包的 PrismHelper（Mach-O CLI）：
-    /// 1. register — root 身份 LSApplicationWorkspace.registerApplication
-    ///    Dictionary:（完整官方字典）+ registerPlugin: 强扭注册扩展，
-    ///    并 kickstart pkd/nesessionmanager 强制重载数据库
-    /// 2. fixperm  — Bundle 目录/文件属主修回 _installd:_installd (33:33)
-    ///    （目录/可执行 0755、其余 0644）。绝不能是 mobile(501)——普通用户
-    ///    属主的系统插件二进制会被 pkd/launchd 拒绝执行
+    /// 1. fixperm  — Bundle 目录/文件属主修回 _installd:_installd (33:33)
+    ///    （目录/可执行 0755、其余 0644），数据容器 mobile(501:501)。
+    ///    绝不能是 mobile(501)——普通用户属主的系统插件二进制会被
+    ///    pkd/launchd 拒绝执行。必须先于 register 执行（build 141 方案）
+    /// 2. register — root 身份 LSApplicationWorkspace.registerApplication
+    ///    Dictionary:（完整官方字典）+ registerPlugin: 强扭注册扩展
     /// helper 的 stdout 全部捕获进诊断（selfHelper= 字段）。
     ///
     /// 注意路径必须用 bundleURL 直接构造：path(forResource:ofType:) 对
@@ -1033,14 +1037,17 @@ final class PrismTunnelController {
         }
 
         var all = [String]()
-        var ok = true
-        for cmd in ["register", "fixperm"] {
+        var spawnedOK = true
+        var registerText = ""
+        // fixperm 必须先于 register：Bundle 属主修成 _installd(33:33) 后
+        // 再注册，pkd/LaunchServices 读到的就是正确属主（build 141 方案）
+        for cmd in ["fixperm", "register"] {
             let (spawnErr, exitCode, termsig, output) = runSpawnTool(
                 path: helperPath, args: [cmd, mainPath, appexPath],
                 asRoot: true, captureOutput: true)
             if spawnErr != 0 {
                 all.append("\(cmd):spawn=\(spawnErr)")
-                ok = false
+                spawnedOK = false
                 continue
             }
             let lines = output.split(separator: "\n")
@@ -1050,11 +1057,16 @@ final class PrismTunnelController {
             // 不能只看 exitCode 判定成功——build 138 实证空括号误判）
             let sigNote = termsig != 0 ? " sig=\(termsig)" : ""
             all.append("\(cmd):u\(exitCode)\(sigNote)[\(lines.joined(separator: " | ").prefix(220))]")
-            if exitCode != 0 || termsig != 0 { ok = false }
+            if cmd == "register" { registerText = output }
+            if exitCode != 0 || termsig != 0 { spawnedOK = false }
         }
         selfHelperResult = all.joined(separator: " ")
         NSLog("[PrismVPN] selfHelper: \(selfHelperResult)")
-        return ok
+        // 注册成功判定：两步进程均正常退出，且 register 末行
+        // result=reg ls=1 plugin=1（LS 双注册均返回 YES）。
+        // 返回 false 时调用方才回退 TrollStore 官方 uicache
+        guard spawnedOK else { return false }
+        return registerText.contains("ls=1") && registerText.contains("plugin=1")
     }
 
     // MARK: 失效配置识别
