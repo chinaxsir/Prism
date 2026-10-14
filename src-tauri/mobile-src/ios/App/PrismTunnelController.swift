@@ -96,7 +96,7 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
         let provisioning = PrismTunnelController.diagnoseProvisioning()
         let rtEnt = PrismTunnelController.runtimeEntitlementsSummary()
         let pkdReg = PrismTunnelController.diagnosePkdRegistration()
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) rtEnt=\(rtEnt) pkd=\(pkdReg) rootHelper=\(PrismTunnelController.rootHelperResult) selfHelper=\(PrismTunnelController.selfHelperResult) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] selfHelper= 随包 PrismRegister.sh 以 root（/bin/sh）执行的结果：reg uicache rc=0=TrollStore 官方注册成功 / pluginkit rc=0=CLI 注册成功，fixperm done=权限修复完成；rootHelper= TrollStore 官方 uicache（u0=成功）。若注册成功但仍 code 14 → 看 pkdDB 搜索是否命中，未命中则 pkd 在 nesessionmanager 校验层拒绝"
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) rtEnt=\(rtEnt) pkd=\(pkdReg) rootHelper=\(PrismTunnelController.rootHelperResult) selfHelper=\(PrismTunnelController.selfHelperResult) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] selfHelper= 随包 PrismHelper 以 root 执行的结果：reg ls=1/plugin=1=注册成功，fixperm done=权限修复数；rootHelper= TrollStore 官方 uicache（u0=成功）。若注册成功但仍 code 14 → 看 pkdDB 搜索是否命中，未命中则 pkd 在 nesessionmanager 校验层拒绝"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -986,28 +986,37 @@ final class PrismTunnelController {
         return exitCode == 0
     }
 
-    // MARK: - 随包 root 注册脚本（PrismRegister.sh）
+    // MARK: - 随包 root helper（PrismHelper）强扭注册
 
     static var selfHelperResult: String = "未调用"
 
-    /// 以 root persona 经 /bin/sh 执行随包的注册脚本：
-    /// 1. register — 优先用 TrollStore 官方 trollstorehelper uicache 注册
-    ///    app+PlugIns（root 级 LS/pkd 正道，mobile 身份扫描不到 TrollStore
-    ///    目录所以主 App 侧恒"未定位"，root 扫描即得），兜底 pluginkit -a，
-    ///    并 kickstart pkd/nesessionmanager 重载数据库
+    /// 以 root persona spawn 随包的 PrismHelper（Mach-O CLI）：
+    /// 1. register — root 身份 LSApplicationWorkspace.registerApplication
+    ///    Dictionary:（完整官方字典）+ registerPlugin: 强扭注册扩展，
+    ///    并 kickstart pkd/nesessionmanager 强制重载数据库
     /// 2. fixperm  — PlugIns 目录/文件属主修回 mobile:mobile（目录/可执行
     ///    0755、其余 0644），防 nesessionmanager 读沙盒时权限污染拒绝
-    /// 用 shell 而非 Mach-O helper 的原因（build 133-136 实证）：TrollStore
-    /// 安装器统一重置 bundle 内文件权限（+x 丢失）叠加
-    /// path(forResource:ofType:) 对无扩展名文件的查找怪癖，二进制
-    /// PrismHelper 真机恒报 helper缺失；/bin/sh 解释执行只需读权限，
-    /// 完全绕开可执行位与签名问题。脚本的 stdout 全部捕获进诊断。
+    /// helper 的 stdout 全部捕获进诊断（selfHelper= 字段）。
+    ///
+    /// 注意路径必须用 bundleURL 直接构造：path(forResource:ofType:) 对
+    /// bundle 根目录无扩展名文件的查找有怪癖（build 136 真机 helper
+    /// 缺失的成因之一）。spawn 前先尝试恢复 +x（TrollStore 安装器可能
+    /// 统一重置 bundle 内文件权限；helper 由 CI 签名带主 App 同款
+    /// entitlements——裸签的 helper 以 root 启动会被系统拦截）。
+    /// 另：shell 脚本方案不可行——AMFI 严禁 posix_spawn 执行非 Mach-O
+    /// 的 .sh（build 137 实证 spawn=1 EPERM）。
     @discardableResult
     static func trySelfHelperRegister() -> Bool {
-        let scriptPath = Bundle.main.bundleURL
-            .appendingPathComponent("PrismRegister.sh").path
-        guard FileManager.default.fileExists(atPath: scriptPath) else {
+        let helperPath = Bundle.main.bundleURL
+            .appendingPathComponent("PrismHelper").path
+        if !FileManager.default.fileExists(atPath: helperPath) {
             selfHelperResult = "helper缺失"
+            return false
+        }
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: helperPath)
+        guard FileManager.default.isExecutableFile(atPath: helperPath) else {
+            selfHelperResult = "helper不可执行"
             return false
         }
         let mainPath = Bundle.main.bundlePath
@@ -1021,7 +1030,7 @@ final class PrismTunnelController {
         var ok = true
         for cmd in ["register", "fixperm"] {
             let (spawnErr, exitCode, output) = runSpawnTool(
-                path: "/bin/sh", args: [scriptPath, cmd, mainPath, appexPath],
+                path: helperPath, args: [cmd, mainPath, appexPath],
                 asRoot: true, captureOutput: true)
             if spawnErr != 0 {
                 all.append("\(cmd):spawn=\(spawnErr)")
@@ -1088,7 +1097,11 @@ final class PrismTunnelController {
     // MARK: 启动（带失效配置自愈，最多重试 1 次）
 
     func start(configPath: String, completion: @escaping (Error?) -> Void) {
-        startAttempt(configPath: configPath, attemptsRemaining: 1, completion: completion)
+        // attemptsRemaining=0：失败后严禁自动删配置重建——重建会触发
+        // 第二次"添加 VPN 配置"授权弹窗，且刚授权的配置被删光后
+        // managers=0（build 137 实证）。code=14/失效配置的恢复交给
+        // 用户手动重置（设置页的 reset 入口），或修好注册链路后自然消失
+        startAttempt(configPath: configPath, attemptsRemaining: 0, completion: completion)
     }
 
     private func startAttempt(
@@ -1158,12 +1171,16 @@ final class PrismTunnelController {
             }
             let group = DispatchGroup()
             var matched: NETunnelProviderManager?
+            // 匹配判断用硬编码期望值而非运行时发现的 extensionBundleID：
+            // discoverExtensionBundleID 失败回落时会误把本来匹配的配置
+            // 当"旧残留"删掉 → 用户被迫二次授权弹窗（managers=0 的来源）
+            let expectedExtID = "com.prism.proxy.PrismVPN"
             for manager in managers {
                 guard let proto = manager.protocolConfiguration
                     as? NETunnelProviderProtocol else { continue }
                 let isOurs = proto.providerBundleIdentifier?.hasSuffix(".PrismVPN") == true
                 guard isOurs else { continue }
-                if proto.providerBundleIdentifier == extensionBundleIdentifier {
+                if proto.providerBundleIdentifier == expectedExtID {
                     matched = manager
                 } else {
                     // 旧签名/旧 bundle ID 的残留条目 → 删除

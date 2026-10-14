@@ -28,12 +28,13 @@
 	<array>
 		<string>TROLLTROLL.com.prism.proxy</string>
 	</array>
-	<!-- 显式声明数据容器：no-sandbox 平台特权下 TrollStore 可能跳过
-	     分配标准沙盒数据目录，主 App 无容器时与插件共享的 App Group
-	     底层挂载异常，nesessionmanager 构建 VPN 会话时报 code=12
-	     "internal error"（build 133 真机诊断 noCnt=- 印证缺失）。 -->
-	<key>com.apple.private.security.container-required</key>
-	<string>com.prism.proxy</string>
+	<!-- 注意：绝不能加 com.apple.private.security.container-required。
+	     build 134-136 曾为修 noCnt 诊断误加此键，结果给 no-sandbox 的
+	     主 App 强行触发 Seatbelt 容器限制，废掉了全盘读取能力：
+	     /var/mobile/Library 与 /var/containers/Bundle/Application 均
+	     不可访问 → rootHelper=TrollStore未定位、pkdDB=mobLib不可枚举
+	     （build 133 时可枚举 156 项）。诊断里的 noCnt=- 检查的是
+	     no-container（为 - 是正常的），不是 container-required。 -->
 	<!-- TrollStore 平台特权（仅主 App）——官方 README "Unsandboxing" 完整配方：
 	     1) platform-application：no-sandbox/no-container 正常工作的前提，
 	        缺它时单加 no-sandbox/no-container 会导致启动即被杀

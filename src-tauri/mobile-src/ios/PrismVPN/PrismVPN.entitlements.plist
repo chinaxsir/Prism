@@ -11,6 +11,12 @@
     <string>TROLLTROLL.com.prism.proxy.PrismVPN</string>
     <key>com.apple.developer.team-identifier</key>
     <string>TROLLTROLL</string>
+    <!-- platform-application：巨魔环境下让父子进程（appex 经
+         nesessionmanager 拉起）通过 CS_PLATFORM_BINARY 校验。
+         注意：绝不能加 no-sandbox——扩展进程必须留在系统沙盒内，
+         VPN 会话的容器/偏好访问都依赖沙盒身份。 -->
+    <key>platform-application</key>
+    <true/>
     <key>com.apple.developer.networking.networkextension</key>
     <array>
         <string>packet-tunnel-provider</string>
