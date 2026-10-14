@@ -841,13 +841,13 @@ final class PrismTunnelController {
     /// asRoot 依赖 com.apple.private.persona-mgmt entitlement，用
     /// posix_spawn 运行外部工具（TrollStore TSUtil.m spawnRoot 同款机制）；
     /// captureOutput 时把 stdout 重定向到临时文件并在结束后读回。
-    /// 返回 (spawnErrno, 子进程exitCode, stdout)
+    /// 返回 (spawnErrno, 子进程exitCode, 终止信号(0=正常退出), stdout)
     private static func runSpawnTool(
         path: String,
         args: [String],
         asRoot: Bool,
         captureOutput: Bool
-    ) -> (spawn: Int32, exit: Int32, output: String) {
+    ) -> (spawn: Int32, exit: Int32, termsig: Int32, output: String) {
         var argv: [UnsafeMutablePointer<CChar>?] = [strdup(path)]
         for a in args { argv.append(strdup(a)) }
         argv.append(nil)
@@ -905,18 +905,22 @@ final class PrismTunnelController {
             spawnResult = posix_spawn(&pid, path, nil, &attr, &argv, nil)
         }
         guard spawnResult == 0 else {
-            return (spawnResult, -1, "")
+            return (spawnResult, -1, 0, "")
         }
         var status: Int32 = 0
         waitpid(pid, &status, 0)
         let exitCode = (status >> 8) & 0xFF // WEXITSTATUS
+        // 信号死亡（SIGSEGV/SIGABRT…）时 WEXITSTATUS 恒为 0，会被误判为
+        // 成功退出（build 138 实证 register:u0[] 的成因之一）——单独提取
+        // WTERMSIG（status 低 7 位，非 0 = 被信号杀死）
+        let termsig = status & 0x7F
 
         var output = ""
         if captureOutput, let outPath {
             output = (try? String(contentsOfFile: outPath, encoding: .utf8)) ?? ""
             unlink(outPath)
         }
-        return (0, exitCode, output)
+        return (0, exitCode, termsig, output)
     }
 
     // MARK: - root helper 注册
@@ -973,7 +977,7 @@ final class PrismTunnelController {
             return false
         }
         let appPath = Bundle.main.bundlePath
-        let (spawnErr, exitCode, output) = runSpawnTool(
+        let (spawnErr, exitCode, termsig, output) = runSpawnTool(
             path: helperPath, args: ["uicache", appPath],
             asRoot: true, captureOutput: true)
         if spawnErr != 0 {
@@ -981,9 +985,10 @@ final class PrismTunnelController {
             return false
         }
         let tail = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        rootHelperResult = "helper=u\(exitCode)\(tail.isEmpty ? "" : " out=\(tail.prefix(100))")"
+        let sigNote = termsig != 0 ? " sig=\(termsig)" : ""
+        rootHelperResult = "helper=u\(exitCode)\(sigNote)\(tail.isEmpty ? "" : " out=\(tail.prefix(100))")"
         NSLog("[PrismVPN] rootHelper: \(rootHelperResult)")
-        return exitCode == 0
+        return exitCode == 0 && termsig == 0
     }
 
     // MARK: - 随包 root helper（PrismHelper）强扭注册
@@ -994,8 +999,9 @@ final class PrismTunnelController {
     /// 1. register — root 身份 LSApplicationWorkspace.registerApplication
     ///    Dictionary:（完整官方字典）+ registerPlugin: 强扭注册扩展，
     ///    并 kickstart pkd/nesessionmanager 强制重载数据库
-    /// 2. fixperm  — PlugIns 目录/文件属主修回 mobile:mobile（目录/可执行
-    ///    0755、其余 0644），防 nesessionmanager 读沙盒时权限污染拒绝
+    /// 2. fixperm  — Bundle 目录/文件属主修回 _installd:_installd (33:33)
+    ///    （目录/可执行 0755、其余 0644）。绝不能是 mobile(501)——普通用户
+    ///    属主的系统插件二进制会被 pkd/launchd 拒绝执行
     /// helper 的 stdout 全部捕获进诊断（selfHelper= 字段）。
     ///
     /// 注意路径必须用 bundleURL 直接构造：path(forResource:ofType:) 对
@@ -1029,7 +1035,7 @@ final class PrismTunnelController {
         var all = [String]()
         var ok = true
         for cmd in ["register", "fixperm"] {
-            let (spawnErr, exitCode, output) = runSpawnTool(
+            let (spawnErr, exitCode, termsig, output) = runSpawnTool(
                 path: helperPath, args: [cmd, mainPath, appexPath],
                 asRoot: true, captureOutput: true)
             if spawnErr != 0 {
@@ -1040,8 +1046,11 @@ final class PrismTunnelController {
             let lines = output.split(separator: "\n")
                 .map { String($0).trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
-            all.append("\(cmd):u\(exitCode)[\(lines.joined(separator: " | ").prefix(220))]")
-            if exitCode != 0 { ok = false }
+            // sig=N 非零说明 helper 被信号杀死（此时 WEXITSTATUS 恒为 0，
+            // 不能只看 exitCode 判定成功——build 138 实证空括号误判）
+            let sigNote = termsig != 0 ? " sig=\(termsig)" : ""
+            all.append("\(cmd):u\(exitCode)\(sigNote)[\(lines.joined(separator: " | ").prefix(220))]")
+            if exitCode != 0 || termsig != 0 { ok = false }
         }
         selfHelperResult = all.joined(separator: " ")
         NSLog("[PrismVPN] selfHelper: \(selfHelperResult)")
@@ -1763,50 +1772,26 @@ final class PrismTunnelController {
             PrismTunnelController.lastManagerCount = all.count
             NSLog("[PrismVPN] loadAllFromPreferences 成功, 找到 \(all.count) 个 manager")
 
-            // 影子配置清道夫（IPA.txt 方案一落地）：
-            // 「设置里提示需要更新 / 需两次增加 VPN 配置」= 系统里存在
-            // 引用失效扩展记录的悬空（Orphaned）配置——即使 providerBundle
-            // Identifier 看似匹配，其内部关联的扩展签名/注册状态可能早已
-            // 与当前安装脱节（多次重装不同 build 后尤其如此）。
-            // 因此【不复用任何旧 manager】：全部删除 → 延迟让 nesession-
-            // manager 处理删除事件 → 重 load 确认清空 → 全新创建。
-            let provide: () -> Void = {
+            // 匹配即复用（IPA.txt 第 3 步 / ipa2.txt 清单 5）：
+            // 旧「影子配置清道夫」每次启动全删重建，是 managers=0 与
+            // 第二次「添加 VPN 配置」授权弹窗的根源（build 137/138 实证）。
+            // 旧签名残留条目已由 preCleanAndSyncVersion 处理（只删
+            // providerBundleIdentifier 不匹配的 .PrismVPN 条目），此处
+            // 匹配到的直接复用，找不到才新建。
+            let expectedExtID = "com.prism.proxy.PrismVPN"
+            let matched = all.first { manager in
+                (manager.protocolConfiguration as? NETunnelProviderProtocol)?
+                    .providerBundleIdentifier == expectedExtID
+            }
+            if let matched = matched {
+                NSLog("[PrismVPN] 复用既有 VPN 配置 (provider=\(expectedExtID))")
+                completion(.success(matched))
+            } else {
+                if !all.isEmpty {
+                    NSLog("[PrismVPN] \(all.count) 个配置均无匹配 provider，新建 manager")
+                }
                 completion(.success(NETunnelProviderManager()))
             }
-
-            guard !all.isEmpty else {
-                provide()
-                return
-            }
-            NSLog("[PrismVPN] 影子配置清道夫: 删除全部 \(all.count) 个既有配置（不复用）")
-            let group = DispatchGroup()
-            for manager in all {
-                group.enter()
-                manager.removeFromPreferences { removeError in
-                    if let removeError = removeError {
-                        NSLog("[PrismVPN] removeFromPreferences 失败: \(PrismTunnelController.describe(error: removeError))")
-                    }
-                    group.leave()
-                }
-            }
-            // 删除后延迟 1.5s：nesessionmanager 异步处理配置删除，
-            // 立即重建会撞上尚未清理完的悬空状态（「需要两次操作」根因）
-            group.notify(queue: .main, execute: { [weak self] in
-                NSLog("[PrismVPN] 旧配置已删, 延迟 1.5s 后确认清空")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    NETunnelProviderManager.loadAllFromPreferences { rest, _ in
-                        let remaining = rest?.count ?? 0
-                        PrismTunnelController.lastManagerCount = remaining
-                        if remaining > 0 {
-                            NSLog("[PrismVPN] 警告: 删除后仍有 \(remaining) 个配置残留（幽灵条目，API 视角）")
-                        } else {
-                            NSLog("[PrismVPN] 清空确认: 0 个残留")
-                        }
-                        self?.clearSharedErrorFile()
-                        provide()
-                    }
-                }
-            })
         }
     }
 

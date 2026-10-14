@@ -497,6 +497,24 @@ jobs:
           echo "--- rpaths after rewrite ---"
           otool -l "$MAIN_EXEC_PATH" | grep -A2 LC_RPATH | grep path
 
+          # ==================== 3.2 appex RPATH 校验（防回归）====================
+          # appex 的 /usr/lib/swift 置顶由 inject-ios-vpn.rb 编译期写入
+          # （LD_RUNPATH_SEARCH_PATHS），此处只校验不重写——appex 是 Xcode
+          # 直编的紧凑 Mach-O，install_name_tool 会越界写坏 header
+          # （amfid 判定格式损坏 → code 14，build 133 教训）。
+          # 缺 /usr/lib/swift 置顶时扩展在 main() 之前 dyld 崩溃 → code=12。
+          if [ -n "$APPEX" ] && [ -n "$APPEX_EXEC" ]; then
+            APPEX_FIRST_RPATH=$(otool -l "$APPEX/$APPEX_EXEC" | awk '
+              /cmd LC_RPATH/ { want=1; next }
+              want && /path / { sub(/^ *path /,""); sub(/ \(offset [0-9]+\).*/,""); print; exit }
+            ')
+            echo "appex first rpath: $APPEX_FIRST_RPATH"
+            if [ "$APPEX_FIRST_RPATH" != "/usr/lib/swift" ]; then
+              echo "::error::appex first LC_RPATH must be /usr/lib/swift, got: $APPEX_FIRST_RPATH (check inject-ios-vpn.rb LD_RUNPATH_SEARCH_PATHS)"
+              exit 1
+            fi
+          fi
+
           # ==================== 3.5 编译 PrismHelper（随包 root helper）====
           # 主 App 在设备上以 root persona（persona-mgmt + no-sandbox）
           # spawn 它，以 root 身份用 LSApplicationWorkspace 强扭注册 VPN

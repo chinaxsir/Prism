@@ -6,10 +6,14 @@
 // rtEnt=platform=1 已真机验证）spawn 本工具，由本工具以 root 身份：
 //   1. register — 用 LSApplicationWorkspace 强扭注册扩展
 //      （registerApplicationDictionary: 完整官方字典 + registerPlugin:）
-//   2. fixperm  — 修复 PlugIns 目录/文件属主与权限（mobile:mobile，
-//      目录 0755、可执行 0755、其余 0644），防 nesessionmanager 读
-//      沙盒时因权限污染拒绝
+//   2. fixperm  — 修复 Bundle 目录/文件属主与权限（_installd:_installd
+//      33:33，目录/可执行 0755、其余 0644）。Bundle 内容绝不能 chown 成
+//      mobile:mobile(501:501)：pkd/launchd 认为普通用户属主的系统插件
+//      二进制可被篡改，直接拒绝执行（build 138 实证 40 个文件被改坏）
 // 每一步结果打印到 stdout（形如 result=...），由主 App 捕获进诊断。
+// stdout 设为无缓冲：子进程若中途被信号杀死，缓冲内容会随进程丢失，
+// 主 App 只能看到空括号（build 138 实证 register:u0[]）；无缓冲可保证
+// 崩溃前的分步输出全部落盘，精确定位崩溃点。
 //
 // 用法:
 //   PrismHelper register <mainAppBundlePath> <appexBundlePath>
@@ -27,6 +31,10 @@ import Security
 
 let MOBILE_UID: uid_t = 501
 let MOBILE_GID: gid_t = 501
+// Bundle 内容属主：stock iOS 安装后为 _installd:_installd (33:33)。
+// mobile(501) 属主的系统插件二进制会被 pkd/launchd 拒绝执行
+let INSTALLED_UID: uid_t = 33
+let INSTALLED_GID: gid_t = 33
 
 // MARK: - entitlements 读取（SecTask API，读任意已签二进制）
 
@@ -121,6 +129,9 @@ func register(mainPath: String, appexPath: String) {
 
     let mainEnt = dumpEntitlements(from: mainPath + "/" + mainExec)
     let appexEnt = dumpEntitlements(from: appexPath + "/" + appexExec)
+    // 分步进度输出（stdout 无缓冲，见入口 setvbuf）：进程若在某一步被
+    // 信号杀死，主 App 仍能看到已完成的步骤，精确定位崩溃点
+    print("result=reg step=ent main=\(mainEnt.count) appex=\(appexEnt.count)")
 
     // App Group 容器（createIfNecessary，root 身份创建更稳）
     var groupContainers = [String: String]()
@@ -135,6 +146,7 @@ func register(mainPath: String, appexPath: String) {
     // plugin 数据容器
     let pluginContainer = mcmContainerURL(
         className: "MCMPluginKitPluginDataContainer", id: appexBid)
+    print("result=reg step=containers plugin=\(pluginContainer ?? "nil") groups=\(groupContainers.count)")
 
     // ---- plugin 注册字典（逐字段对齐 RootHelper/uicache.m）----
     var plugin: [String: Any] = [
@@ -217,11 +229,14 @@ func register(mainPath: String, appexPath: String) {
     }
 
     let regSel = NSSelectorFromString("registerApplicationDictionary:")
+    print("result=reg step=ls-register")
     let lsOk = (ws.perform(regSel, with: dict)?
         .takeUnretainedValue() as? Bool) ?? false
+    print("result=reg step=ls-register-done ls=\(lsOk ? 1 : 0)")
 
     // registerPlugin: 直接注册插件（参数形态按 iOS 版本二选一）
     let rpSel = NSSelectorFromString("registerPlugin:")
+    print("result=reg step=ls-plugin")
     var pluginOk = false
     for arg in [appexPath, URL(fileURLWithPath: appexPath)] {
         if (ws.perform(rpSel, with: arg)?
@@ -230,6 +245,7 @@ func register(mainPath: String, appexPath: String) {
             break
         }
     }
+    print("result=reg step=ls-plugin-done plugin=\(pluginOk ? 1 : 0)")
 
     // 注册后强制 SpringBoard 重载图标缓存（TrollStore uicache 同款）
     var sbOk = false
@@ -280,8 +296,11 @@ func isMachO(_ path: String) -> Bool {
 func fixperm(mainPath: String, appexPath: String) {
     var fixed = 0
     var failed = 0
+    // Bundle 目录及内容一律 _installd(33:33)：mobile(501) 属主的插件
+    // 二进制会被 pkd/launchd 判定可篡改而拒绝执行（build 138 实证）。
+    // App Group 数据容器（501:501）不在此函数职责内，勿混
     func fix(_ root: String) {
-        chown(root, MOBILE_UID, MOBILE_GID)
+        chown(root, INSTALLED_UID, INSTALLED_GID)
         chmod(root, 0o755)
         fixed += 1
         let fm = FileManager.default
@@ -290,7 +309,7 @@ func fixperm(mainPath: String, appexPath: String) {
             let p = (root as NSString).appendingPathComponent(s)
             var st = stat()
             if lstat(p, &st) != 0 { failed += 1; continue }
-            chown(p, MOBILE_UID, MOBILE_GID)
+            chown(p, INSTALLED_UID, INSTALLED_GID)
             if (st.st_mode & S_IFMT) == S_IFDIR {
                 chmod(p, 0o755)
                 fixed += 1
@@ -317,6 +336,11 @@ func fixperm(mainPath: String, appexPath: String) {
 }
 
 // MARK: - 入口
+
+// stdout 无缓冲：进程被信号杀死时缓冲区内容随进程一起丢失，主 App 只能
+// 捕获到空括号（build 138 实证 register:u0[]）；无缓冲保证分步进度
+// 输出实时落盘，配合上方 step= 打印可精确定位崩溃点
+setvbuf(stdout, nil, _IONBF, 0)
 
 let args = CommandLine.arguments
 guard args.count >= 4 else {

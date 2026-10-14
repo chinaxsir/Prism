@@ -12,10 +12,20 @@
     <key>com.apple.developer.team-identifier</key>
     <string>TROLLTROLL</string>
     <!-- platform-application：巨魔环境下让父子进程（appex 经
-         nesessionmanager 拉起）通过 CS_PLATFORM_BINARY 校验。
-         注意：绝不能加 no-sandbox——扩展进程必须留在系统沙盒内，
-         VPN 会话的容器/偏好访问都依赖沙盒身份。 -->
+         nesessionmanager 拉起）通过 CS_PLATFORM_BINARY 校验。 -->
     <key>platform-application</key>
+    <true/>
+    <!-- no-sandbox + storage.AppDataContainers（build 138 实证必须）：
+         任何进程在 main() 之前都要跑 _libsecinit_initializer，它会向
+         secinitd 请求 PluginKit 沙盒容器目录（pkdDir）。TrollStore 安装
+         不走 installd，pkdDir=absent，secinitd 拒绝初始化 → appex 在
+         startTunnel 第一行之前 brk 自杀 → NE code=12 (pluginFailed)。
+         与主 App（rtEnt=noSbx=1 同款）一致后 libsecinit 直接跳过沙盒
+         初始化；storage.AppDataContainers 保留直读 App Group/数据容器
+         的能力（工作目录/geo 数据库/心跳文件全在 group 容器内）。 -->
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <key>com.apple.private.security.storage.AppDataContainers</key>
     <true/>
     <key>com.apple.developer.networking.networkextension</key>
     <array>

@@ -108,7 +108,14 @@ def inject
                        '-framework Security -framework Foundation ' \
                        '-framework CoreFoundation -framework SystemConfiguration ' \
                        '-framework CoreServices',
-    'LD_RUNPATH_SEARCH_PATHS' => '$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks',
+    # /usr/lib/swift 必须排第一（build 138 实证）：appex 是 Swift 二进制，
+    # 默认 runpath 只有 @executable_path/{,../../}Frameworks——打包时
+    # Frameworks 已删空（只留 back-deploy _Concurrency），@rpath/
+    # libswiftCore.dylib 解析不到 / dyld 命中 ad-hoc back-deploy 副本
+    # （撞 CS_REQUIRE_LV）→ 扩展在 main() 之前崩溃 → code=12。
+    # 必须编译期写入，绝不能对 appex 用 install_name_tool 事后重写
+    # （Xcode 直编的 Mach-O header 紧凑无 padding，重写越界损坏 → code 14）
+    'LD_RUNPATH_SEARCH_PATHS' => '/usr/lib/swift $(inherited) @executable_path/Frameworks @executable_path/../../Frameworks',
   }
   ext_target.build_configurations.each do |cfg|
     cfg.build_settings.merge!(common_settings)

@@ -103,7 +103,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        let workDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        // 工作目录必须放 App Group 共享容器（build 138 实证）：扩展开启
+        // no-sandbox 后没有独立沙盒 Documents 目录，.documentDirectory 会
+        // 指向无权限的 /var/empty/Documents，内核建目录/拷 geo 数据库/
+        // 初始化 cache.db 全部失败。group 容器（group=OK）是唯一确定
+        // 可写的位置，与主 App 的诊断文件同容器
+        guard let groupURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: prismAppGroupID
+        ) else {
+            failStart(code: 3, message: "App Group 容器不可用", completionHandler: completionHandler)
+            return
+        }
+        let workDir = groupURL.appendingPathComponent("prism_work", isDirectory: true)
 
         // 在后台串行队列启动内核，释放主线程以接收 setTunnelNetworkSettings 的系统回调
         vpnQueue.async { [weak self] in
