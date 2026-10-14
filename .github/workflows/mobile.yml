@@ -535,10 +535,15 @@ jobs:
           # Foundation 等自 iOS 13 起在 dyld 共享缓存与 SDK tbd stub 中。
           # swiftc 不接受裸 -rpath（clang 专属参数，build 134 由此失败），
           # 必须经 -Xlinker 双参传递。
+          # -parse-as-library 必须加（build 141 实证）：swiftc 单文件编译
+          # 默认脚本模式（文件即 main 文件），与源码内 @main struct 冲突，
+          # 报 "'main' attribute cannot be used in a module that contains
+          # top-level code"；库模式下入口由 @main 提供。
           HELPER_SRC="$PWD/src-tauri/mobile-src/ios/Helper/PrismHelper.swift"
           HELPER_BIN="$APP/PrismHelper"
           if xcrun -sdk iphoneos swiftc -O \
             -target arm64-apple-ios15.0 \
+            -parse-as-library \
             -Xlinker -rpath -Xlinker /usr/lib/swift \
             -Xlinker -rpath -Xlinker @executable_path/Frameworks \
             -framework Foundation -framework CoreServices -framework Security \
