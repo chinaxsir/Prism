@@ -247,6 +247,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 // prismProtectSocket 回调无锁读取
                 refreshPhysicalInterfaceIndex()
 
+                // 删除旧 cache.db（build 156 用户方案）：配合 cache_file
+                // enabled=false，彻底防止恢复旧的超时节点
+                try? FileManager.default.removeItem(
+                    at: workDir.appendingPathComponent("cache.db")
+                )
+
                 let sanitizedConfig = self.sanitizeConfigForExtension(configText, workDir: workDir)
 
                 let callbacks = prism_vpn_cbs(
@@ -500,10 +506,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - 配置清洗（保持 build=147/148 已验证连通的最小逻辑）
 
-    /// 配置清洗（build 155 用户模板完整版）：
+    /// 配置清洗（build 156 用户模板完整版）：
     /// 1. tun 入站：开 sniff + sniff_override_destination（协议探测支撑
     ///    DNS 劫持与 QUIC 屏蔽规则）
-    /// 2. 出站识别（dns/block/主代理组）+ bind_interface 白名单绑定
+    /// 2. 出站识别（dns/block/主代理组）+ bind_interface 白名单绑定 +
+    ///    确保 dns-out/block/direct 出站存在
     /// 3. DNS 整体重写：dns-remote = tcp://1.1.1.1 走主代理组（走 VLESS
     ///    TCP，无 UDP 支持也能解析），dns-direct = 223.5.5.5 走 direct；
     ///    出站自身域名解析（outbound any）固定走 dns-direct，杜绝
@@ -511,8 +518,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// 4. route：DNS 劫持（protocol dns / port 53）、QUIC 屏蔽（protocol
     ///    quic / udp 443 → block）、私网直连规则置顶；auto_detect_interface
     ///    关闭 + default_interface 显式绑定物理网卡
-    /// 5. experimental：cache_file.store_selected=false（禁用 cache.db
-    ///    恢复旧节点——实测系统重启后恢复了 months 前的 stale 节点）
+    /// 5. experimental.cache_file：enabled=false（严禁写 store_selected——
+    ///    1.11.3 无此字段，严格 JSON 校验直接拒配置）
     /// 6. log 恒开 box.log
     private func sanitizeConfigForExtension(_ rawJSON: String, workDir: URL) -> String {
         guard let data = rawJSON.data(using: .utf8),
@@ -559,6 +566,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         var dnsOutboundTag = "dns-out"
         var blockOutboundTag = "block"
         var mainProxyTag = ""
+        var foundDns = false
+        var foundBlock = false
+        var hasDirectOutbound = false
         let realOutboundTypes: Set<String> = [
             "direct", "vless", "vmess", "trojan", "shadowsocks",
             "hysteria", "hysteria2", "tuic", "wireguard",
@@ -566,17 +576,37 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ]
         for i in outbounds.indices {
             let t = (outbounds[i]["type"] as? String) ?? ""
-            let tag = (outbounds[i]["tag"] as? String) ?? t
-            if t == "dns" && dnsOutboundTag == "dns-out" {
+            let tag = (outbounds[i]["tag"] as? String) ?? ""
+            if t == "dns" && !foundDns && !tag.isEmpty {
                 dnsOutboundTag = tag
-            } else if t == "block" && blockOutboundTag == "block" {
+                foundDns = true
+            } else if t == "block" && !foundBlock && !tag.isEmpty {
                 blockOutboundTag = tag
-            } else if t == "selector" && mainProxyTag.isEmpty {
+                foundBlock = true
+            } else if t == "direct" && !hasDirectOutbound {
+                hasDirectOutbound = true
+            } else if t == "selector" && mainProxyTag.isEmpty && !tag.isEmpty {
                 mainProxyTag = tag
             }
             if realOutboundTypes.contains(t) {
                 outbounds[i]["bind_interface"] = phyName
             }
+        }
+        // 确保路由规则引用的出站真实存在（缺失则启动报错——用户模板防踩坑）
+        if !hasDirectOutbound {
+            var directObj: [String: Any] = ["type": "direct", "tag": "direct"]
+            if !phyName.isEmpty {
+                directObj["bind_interface"] = phyName
+            }
+            outbounds.append(directObj)
+        }
+        if !foundDns {
+            outbounds.append(["type": "dns", "tag": "dns-out"])
+            dnsOutboundTag = "dns-out"
+        }
+        if !foundBlock {
+            outbounds.append(["type": "block", "tag": "block"])
+            blockOutboundTag = "block"
         }
         root["outbounds"] = outbounds
 
@@ -676,11 +706,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             ]
         }
 
-        // 5. experimental：store_selected=false + 移除 external_ui
+        // 5. experimental.cache_file：严禁写 store_selected——sing-box
+        //    1.11.3 CacheFileOptions 只有 enabled/path/cache_id/
+        //    store_fakeip/store_rdrc，未知字段触发 DisallowUnknownFields
+        //    拒绝整份配置（build 155 实证 extErr=create vpn service:
+        //    decode config）。改为 enabled=false 禁用缓存，配合 startTunnel
+        //    已删除旧 cache.db，不会再恢复 stale 节点
         var experimental = (root["experimental"] as? [String: Any]) ?? [:]
         var cacheFile = (experimental["cache_file"] as? [String: Any]) ?? [:]
+        cacheFile.removeValue(forKey: "store_selected")
+        cacheFile["enabled"] = false
         cacheFile["path"] = workDir.appendingPathComponent("cache.db").path
-        cacheFile["store_selected"] = false
         experimental["cache_file"] = cacheFile
         if var clashAPI = experimental["clash_api"] as? [String: Any] {
             clashAPI.removeValue(forKey: "external_ui")
