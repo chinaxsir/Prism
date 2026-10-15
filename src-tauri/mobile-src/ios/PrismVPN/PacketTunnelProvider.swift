@@ -18,32 +18,51 @@ import NetworkExtension
 private let prismAppGroupID = "group.com.prism.proxy"
 private var prismProviderRef: PacketTunnelProvider?
 
-private func writeSharedError(_ message: String) {
-    guard let groupURL = FileManager.default.containerURL(
+/// 主 App 传入的 config_path 所在目录（build 145 方案）：主 App 把
+/// prism_config.json 写进这个目录，扩展能读到它就证明目录 100% 可读写，
+/// 是比 containerURL 更可靠的共享目录（containermanagerd 对扩展可能
+/// 返回 nil / 沙盒拦截 group 容器）。startTunnel 读到 config_path 时设置
+private var resolvedSharedDirURL: URL?
+
+/// 共享目录候选列表（按可靠度排序）：config_path 父目录 → group 容器
+/// → 用户 Preferences（无沙盒权限时的最后兜底）。心跳/错误对所有候选
+/// 逐一写入，哪个成功算哪个，主 App 侧同样多目录读取
+private func sharedDirURLs() -> [URL] {
+    var urls: [URL] = []
+    if let resolved = resolvedSharedDirURL {
+        urls.append(resolved)
+    }
+    if let groupURL = FileManager.default.containerURL(
         forSecurityApplicationGroupIdentifier: prismAppGroupID
-    ) else { return }
-    let url = groupURL.appendingPathComponent("prism_error.txt")
-    try? message.write(to: url, atomically: true, encoding: .utf8)
+    ), !urls.contains(groupURL) {
+        urls.append(groupURL)
+    }
+    urls.append(URL(fileURLWithPath: "/private/var/mobile/Library/Preferences"))
+    return urls
+}
+
+private func writeSharedError(_ message: String) {
+    for dir in sharedDirURLs() {
+        let url = dir.appendingPathComponent("prism_error.txt")
+        try? message.write(to: url, atomically: true, encoding: .utf8)
+    }
 }
 
 private func clearSharedError() {
-    guard let groupURL = FileManager.default.containerURL(
-        forSecurityApplicationGroupIdentifier: prismAppGroupID
-    ) else { return }
-    try? FileManager.default.removeItem(
-        at: groupURL.appendingPathComponent("prism_error.txt")
-    )
+    for dir in sharedDirURLs() {
+        try? FileManager.default.removeItem(
+            at: dir.appendingPathComponent("prism_error.txt")
+        )
+    }
 }
 
 private func writeHeartbeat(_ stage: String) {
-    guard let groupURL = FileManager.default.containerURL(
-        forSecurityApplicationGroupIdentifier: prismAppGroupID
-    ) else { return }
     let ts = Int(Date().timeIntervalSince1970)
-    try? "\(ts) \(stage)".write(
-        to: groupURL.appendingPathComponent("prism_status.txt"),
-        atomically: true, encoding: .utf8
-    )
+    let text = "\(ts) \(stage)"
+    for dir in sharedDirURLs() {
+        let url = dir.appendingPathComponent("prism_status.txt")
+        try? text.write(to: url, atomically: true, encoding: .utf8)
+    }
 }
 
 final class PacketTunnelProvider: NEPacketTunnelProvider {
@@ -87,6 +106,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             .providerConfiguration?["config_path"] as? String,
            !configPath.isEmpty
         {
+            // config_path 所在目录 = 主 App 写 prism_config.json 的目录，
+            // 能读到本文件就证明该目录可读写 → 作为共享目录首选
+            resolvedSharedDirURL = URL(fileURLWithPath: configPath).deletingLastPathComponent()
+            writeHeartbeat("start-gotPath")
             do {
                 configText = try String(contentsOfFile: configPath, encoding: .utf8)
             } catch {
@@ -103,18 +126,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        // 工作目录必须放 App Group 共享容器（build 138 实证）：扩展开启
-        // no-sandbox 后没有独立沙盒 Documents 目录，.documentDirectory 会
-        // 指向无权限的 /var/empty/Documents，内核建目录/拷 geo 数据库/
-        // 初始化 cache.db 全部失败。group 容器（group=OK）是唯一确定
-        // 可写的位置，与主 App 的诊断文件同容器
-        guard let groupURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: prismAppGroupID
-        ) else {
-            failStart(code: 3, message: "App Group 容器不可用", completionHandler: completionHandler)
+        // 工作目录优先放 config_path 父目录（与主 App 读写路径 100% 一致，
+        // kernel.log/cache.db 主 App 侧诊断可见），group 容器兜底（build 138
+        // 实证扩展无沙盒 Documents，.documentDirectory 指向无权限目录）
+        let sharedDir = resolvedSharedDirURL
+            ?? FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: prismAppGroupID
+            )
+        guard let workBase = sharedDir else {
+            failStart(code: 3, message: "共享目录不可用（config_path 与 App Group 均不可用）", completionHandler: completionHandler)
             return
         }
-        let workDir = groupURL.appendingPathComponent("prism_work", isDirectory: true)
+        let workDir = workBase.appendingPathComponent("prism_work", isDirectory: true)
 
         // 在后台串行队列启动内核，释放主线程以接收 setTunnelNetworkSettings 的系统回调
         vpnQueue.async { [weak self] in
@@ -310,15 +333,27 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func copyGeoDatabases(to workDir: URL) throws {
+        // 主 App 包根目录兜底：appex 位于 <主App>/PlugIns/PrismVPN.appex，
+        // 上两级即主 App bundle（geo 数据库可能随主 App resources 分发）
+        let hostAppBundle = Bundle.main.bundleURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
         for name in ["geoip.db", "geosite.db"] {
-            guard let src = Bundle.main.url(forResource: name, withExtension: nil) else {
+            var src = Bundle.main.url(forResource: name, withExtension: nil)
+            if src == nil {
+                let hostPath = hostAppBundle.appendingPathComponent(name).path
+                if FileManager.default.fileExists(atPath: hostPath) {
+                    src = URL(fileURLWithPath: hostPath)
+                }
+            }
+            guard let src = src else {
                 // 【build 144 方案】缺 geo 数据库时跳过而非抛异常：
                 // 只有用户规则用到 geoip/geosite 时内核才需要它们；
                 // 因可选资源缺失直接 failStart 会把「配置根本不用 geo
                 // 规则」的正常场景也打死（启动成功率优先）。
                 // 若内核真需要而缺失，sing-box 会给出更明确的错误并
                 // 写入 prism_error.txt
-                NSLog("[PrismVPN] 扩展包内缺少 \(name)，跳过拷贝（未使用 geo 规则时无影响）")
+                NSLog("[PrismVPN] 扩展包与主 App 包均缺少 \(name)，跳过拷贝（未使用 geo 规则时无影响）")
                 continue
             }
             let dst = workDir.appendingPathComponent(name)

@@ -13,14 +13,21 @@
     <string>TROLLTROLL</string>
     <key>platform-application</key>
     <true/>
-    <!-- 注意：绝不能加 no-sandbox / storage.AppDataContainers（build 142
-         实证死锁解法）：pkd 校验插件注册字典时发现网络扩展企图免沙盒
-         运行，违反 App Extension 安全底线，当场静默拒绝注册
-         （pluginIdentity无 → code 14）。build 133 不加 no-sandbox 报
-         code 12 的真正根因是 pkdDir=absent（无容器目录 → 沙盒初始化
-         崩溃）；该问题已由 PrismHelper 以 container-manager 权限提前
-         开辟插件数据容器解决（pkdDir=present），无需再用 no-sandbox
-         作弊。主 App 的 TrollStore.entitlements.plist 保持不变。 -->
+    <!-- build 145 恢复 no-sandbox（build 142 的归因已修正）：Code=14 的
+         真凶是 PrismHelper selfHelper 用残缺字典覆盖了 TrollStore 官方
+         注册表（build 138/140 带 no-sandbox 时期注册同样成功，appex=6
+         证明 pkd 并未拒绝免沙盒扩展）。恢复后扩展可畅通读写 App Group
+         下的 prism_config.json / 心跳 / 错误文件，不再被沙盒静默拦截。
+         memory.increased-memory-limit：申请提升网络扩展 Jetsam 内存上限
+         （官方 key 为 kernel.*，此处两个变体都带上以兼容不同系统版本）。 -->
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <key>com.apple.private.security.storage.AppDataContainers</key>
+    <true/>
+    <key>com.apple.developer.memory.increased-memory-limit</key>
+    <true/>
+    <key>com.apple.developer.kernel.increased-memory-limit</key>
+    <true/>
     <key>com.apple.developer.networking.networkextension</key>
     <array>
         <string>packet-tunnel-provider</string>

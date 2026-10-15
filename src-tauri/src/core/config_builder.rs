@@ -473,7 +473,18 @@ pub fn build(
         }
 
         // 规则 → sing-box route.rules（多订阅按记录顺序拼接，先订阅优先）
+        //
+        // iOS 精简（build 145 方案）：机场订阅常内联数万条域名/IP 规则
+        // （实测 2.47MB），网络扩展进程 Jetsam 内存红线仅 15~50MB，Go
+        // json.Unmarshal 构建规则 AST 瞬间 40MB+ 必被 SIGKILL（code=12
+        // 且来不及写错误文件）。iOS 丢弃订阅内联规则，只保留自定义规则
+        // 与 block_quic，分流退化为默认出站（节点/策略组全保留）；桌面
+        // 与 Android 不受扩展内存红线约束，保持完整规则
+        let keep_subscription_rules = !cfg!(target_os = "ios");
         for line in &profile.rules {
+            if !keep_subscription_rules {
+                continue;
+            }
             let parsed = parse_rule_line(line, &apply, &mut warnings);
             if final_tag.is_none() {
                 final_tag = parsed.final_target;
@@ -728,6 +739,22 @@ pub fn build(
         },
         "experimental": experimental
     });
+
+    // iOS 体积校验（build 145 方案）：网络扩展解析配置的内存峰值与
+    // JSON 体积正相关，>100KB 说明订阅节点/组本身过大（内联规则已在
+    // 构建期丢弃），打警告供诊断日志远程确认瘦身是否达标
+    #[cfg(target_os = "ios")]
+    {
+        let size = serde_json::to_vec(&config).map(|v| v.len()).unwrap_or(0);
+        if size > 100 * 1024 {
+            warnings.push(format!(
+                "iOS 配置体积 {size} 字节超出网络扩展安全预算（100KB），\
+                 若启动仍被强杀需进一步裁剪节点出站"
+            ));
+        } else {
+            warnings.push(format!("iOS 配置体积 {size} 字节（安全预算内）"));
+        }
+    }
 
     if total_nodes == 0 && total_groups == 0 {
         // 诊断信息：帮助定位是订阅为空、provider 未下载、还是节点类型不支持

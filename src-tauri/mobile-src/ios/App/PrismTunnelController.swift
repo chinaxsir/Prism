@@ -96,7 +96,7 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
         let provisioning = PrismTunnelController.diagnoseProvisioning()
         let rtEnt = PrismTunnelController.runtimeEntitlementsSummary()
         let pkdReg = PrismTunnelController.diagnosePkdRegistration()
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) rtEnt=\(rtEnt) pkd=\(pkdReg) rootHelper=\(PrismTunnelController.rootHelperResult) selfHelper=\(PrismTunnelController.selfHelperResult) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] selfHelper= 随包 PrismHelper 以 root 执行的结果：reg ls=1/plugin=1=注册成功，fixperm done=权限修复数；rootHelper= TrollStore 官方 uicache（u0=成功）。若注册成功但仍 code 14 → 看 pkdDB 搜索是否命中，未命中则 pkd 在 nesessionmanager 校验层拒绝"
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) rtEnt=\(rtEnt) pkd=\(pkdReg) rootHelper=\(PrismTunnelController.rootHelperResult) selfHelper=\(PrismTunnelController.selfHelperResult) hb=\(PrismTunnelController.diagnoseExtensionHeartbeat()) extErr=\(PrismTunnelController.diagnoseExtensionError()) crash=\(PrismTunnelController.latestExtensionCrashSummary()) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] hb= 扩展心跳最后阶段（无=没进 startTunnel，start-gotPath/openTun/tun-ok=对应阶段）；extErr= 扩展写出的精确错误；crash= 最新 PrismVPN/Jetsam 崩溃报告头部。selfHelper= 随包 PrismHelper 以 root 执行的结果；rootHelper= TrollStore 官方 uicache（u0=成功）"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -152,6 +152,92 @@ final class PrismTunnelController {
             "\(k)=\(v)"
         }.joined(separator: "; ")
         return "domain=\(ns.domain) code=\(ns.code) desc=\(ns.localizedDescription) userInfo={\(userInfo)}"
+    }
+
+    // MARK: - 扩展心跳/错误/崩溃诊断（build 145 方案）
+
+    /// 扩展共享文件读取目录（与扩展多路写入对应）：App Group 容器、
+    /// 主 App configPath 所在目录（同一位置，二者取其一即可）、
+    /// 用户 Preferences（扩展无沙盒时的最后兜底）
+    private static func extensionSharedDirs() -> [URL] {
+        var urls: [URL] = []
+        if let groupURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.com.prism.proxy"
+        ) {
+            urls.append(groupURL)
+        }
+        urls.append(URL(fileURLWithPath: "/private/var/mobile/Library/Preferences"))
+        return urls
+    }
+
+    /// 读取扩展心跳 prism_status.txt 的最后阶段（多目录取最新）。
+    /// hb=无 → 扩展没进入 startTunnel()（main() 前崩溃/Jetsam）；
+    /// hb=start-gotPath/openTun/tun-ok → 精确定位卡死阶段
+    static func diagnoseExtensionHeartbeat() -> String {
+        let fm = FileManager.default
+        var best: (text: String, mtime: Date)?
+        for dir in extensionSharedDirs() {
+            let path = dir.appendingPathComponent("prism_status.txt").path
+            guard let text = try? String(contentsOfFile: path, encoding: .utf8),
+                  let attrs = try? fm.attributesOfItem(atPath: path),
+                  let mtime = attrs[.modificationDate] as? Date
+            else { continue }
+            if best == nil || mtime > best!.mtime {
+                best = (text, mtime)
+            }
+        }
+        guard let best = best else { return "无" }
+        let age = Int(Date().timeIntervalSince(best.mtime))
+        return "\(best.text) (距今\(age)s)".replacingOccurrences(of: "\n", with: " ")
+    }
+
+    /// 读取扩展写出的精确错误 prism_error.txt（多目录取最新）
+    static func diagnoseExtensionError() -> String {
+        let fm = FileManager.default
+        var best: (text: String, mtime: Date)?
+        for dir in extensionSharedDirs() {
+            let path = dir.appendingPathComponent("prism_error.txt").path
+            guard let text = try? String(contentsOfFile: path, encoding: .utf8), !text.isEmpty,
+                  let attrs = try? fm.attributesOfItem(atPath: path),
+                  let mtime = attrs[.modificationDate] as? Date
+            else { continue }
+            if best == nil || mtime > best!.mtime {
+                best = (text, mtime)
+            }
+        }
+        guard let best = best else { return "无" }
+        return best.text.prefix(200).replacingOccurrences(of: "\n", with: " ")
+    }
+
+    /// 读取系统 CrashReporter 下最新的 PrismVPN 崩溃报告或 Jetsam 报告
+    /// （主 App 持 no-sandbox 可直接读；扩展被 SIGKILL 时唯一的一手证据）
+    static func latestExtensionCrashSummary() -> String {
+        let dirs = [
+            "/private/var/mobile/Library/Logs/CrashReporter",
+            "/private/var/mobile/Library/Logs/CrashReporter/Retired"
+        ]
+        let fm = FileManager.default
+        var latestFile: (path: String, mtime: Date)?
+        for dir in dirs {
+            guard let items = try? fm.contentsOfDirectory(atPath: dir) else { continue }
+            for item in items where item.contains("PrismVPN") || item.contains("JetsamEvent") {
+                let full = "\(dir)/\(item)"
+                guard let attrs = try? fm.attributesOfItem(atPath: full),
+                      let mtime = attrs[.modificationDate] as? Date
+                else { continue }
+                if latestFile == nil || mtime > latestFile!.mtime {
+                    latestFile = (full, mtime)
+                }
+            }
+        }
+        guard let file = latestFile else { return "无crash日志" }
+        guard let content = try? String(contentsOfFile: file.path, encoding: .utf8) else {
+            return "不可读:\((file.path as NSString).lastPathComponent)"
+        }
+        let name = (file.path as NSString).lastPathComponent
+        // 截取前 400 字符（含 bug_type / exception / termination / dyld 错误详情）
+        let head = String(content.prefix(400)).replacingOccurrences(of: "\n", with: " ")
+        return "\(name):\(head)"
     }
 
     /// 遍历 App 包 PlugIns 下的 .appex，返回声明了 packet-tunnel
