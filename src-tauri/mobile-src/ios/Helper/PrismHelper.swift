@@ -357,18 +357,37 @@ struct PrismHelperMain {
 /// 杀掉后台驻留的旧版 PrismVPN 扩展进程（build 150 方案）：TrollStore
 /// 覆盖安装只杀主 App 不杀扩展，旧 PrismVPN 进程挂在 nesessionmanager
 /// 上但磁盘二进制已被新版覆盖，占住 VPN 会话导致新版 startTunnel 无法
-/// 被拉起（Code=12 且 hb=无）。killext 用 killall -9 强杀清场
+/// 被拉起（Code=12 且 hb=无）。
+/// iOS 无 Process/NSTask（macOS 专属）：用 libproc 枚举全部进程，
+/// 按可执行文件名匹配 PrismVPN 后 SIGKILL 清场。
 private func runKillExt() {
-    let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-    proc.arguments = ["-9", "PrismVPN"]
-    do {
-        try proc.run()
-        proc.waitUntilExit()
-        NSLog("[PrismHelper] killext PrismVPN exit=\(proc.terminationStatus)")
-    } catch {
-        // iOS 15+ 系统自带 /usr/bin/killall；若缺失则退回 posix_spawn
-        // 语义无效——直接报告失败，由调用方走 uicache 兜底
-        NSLog("[PrismHelper] killext failed: \(error.localizedDescription)")
+    let target = "PrismVPN"
+    let selfPid = getpid()
+
+    // 第一次调用取进程数，多留 16 个余量再取全表（防竞态遗漏）
+    let total = proc_listallpids(nil, 0)
+    guard total > 0 else {
+        print("result=killext err=no-processes")
+        fflush(stdout)
+        return
     }
+    let cap = total + 16
+    var pids = [pid_t](repeating: 0, count: cap)
+    let count = proc_listallpids(&pids, Int32(MemoryLayout<pid_t>.stride * cap))
+
+    var killed = 0
+    for i in 0..<max(Int(count), 0) {
+        let pid = pids[i]
+        guard pid > 0, pid != selfPid else { continue }
+        var path = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(pid, &path, 4096) > 0 else { continue }
+        let execPath = String(cString: path)
+        let execName = execPath.split(separator: "/").last.map(String.init) ?? ""
+        if execName == target, kill(pid, SIGKILL) == 0 {
+            killed += 1
+            NSLog("[PrismHelper] killext SIGKILL pid=\(pid) path=\(execPath)")
+        }
+    }
+    print("result=killext killed=\(killed)")
+    fflush(stdout)
 }
