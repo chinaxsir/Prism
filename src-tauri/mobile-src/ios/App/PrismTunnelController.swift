@@ -936,9 +936,12 @@ final class PrismTunnelController {
             //           顺序绝不能反：uicache 以官方字典重建 _LSBundlePlugins，
             //           在 PrismHelper 注册成功后再跑会覆盖刚写入的注册信息
             //           （build 141 方案第 3 条）
-            if !trySelfHelperRegister() {
-                tryRootHelperUICache()
-            }
+            // 注册统一由 TrollStore 安装时的官方 trollstorehelper uicache
+            // 完成。App 运行期严禁再调 rootHelper/selfHelper：uicache 第一步
+            // 会 unregisterApplication 注销运行中的 App → nehelper/
+            // nesessionmanagerd 立刻将 VPN 会话标记失效 → Code=12 且 hb=无
+            // （build 133/138/140/153 实证；TrollStore 安装 IPA 时已执行过
+            // uicache，App 内绝不能二次调用）
 
             // 方案2（原 tryLSApplicationWorkspace，mobile 身份
             // registerApplicationDictionary）已移除：以 mobile 身份传入的
@@ -1330,10 +1333,11 @@ final class PrismTunnelController {
         // 供失败诊断（此前每次尝试开头都清，错误证据全被抹掉）
         clearSharedErrorFile()
         PrismTunnelController.code12SelfHealed = false
-        // 覆盖安装检测：CFBundleVersion 变化说明磁盘二进制已更新，
-        // 后台可能仍驻留旧版扩展进程占住 nesessionmanager——先杀旧扩展
-        // + uicache 刷新，避免 Code=12 且 hb=无
-        PrismTunnelController.checkAndKillStaleExtension()
+        // 【build 154 方案】覆盖安装检测移交 preCleanAndSyncVersion：
+        // 用 NETunnelProviderManager disable/enable 重置会话，App 运行期
+        // 严禁调用 rootHelper(uicache)/selfHelper（uicache 会注销运行中的
+        // App → nesessionmanager 会话失效 → Code=12 且 hb=无，build 153 实证；
+        // 凡 rootHelper=helper=u0 的版本 133/138/140/153 全部 Code=12）
 
         // attemptsRemaining=0：失败后严禁自动删配置重建——重建会触发
         // 第二次"添加 VPN 配置"授权弹窗，且刚授权的配置被删光后
@@ -1433,6 +1437,26 @@ final class PrismTunnelController {
                 stale.append(manager)
             }
             if let matched = matched {
+                // 【build 154 方案】版本变化（TrollStore 覆盖安装）：
+                // nesessionmanagerd 内存里缓存着绑定旧版本的插件会话
+                // （managers=1），直接复用必报 Code=12。用 disable/enable
+                // 循环强制系统销毁旧会话并重新绑定新版本 appex——无需
+                // 用户重新授权，也绝不调用 rootHelper uicache
+                let current = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+                let last = UserDefaults.standard.string(forKey: "prism_last_build_version")
+                if last != current {
+                    UserDefaults.standard.set(current, forKey: "prism_last_build_version")
+                    NSLog("[PrismVPN] 检测到覆盖安装 \(last ?? "无") -> \(current)：重置 VPN 会话（disable/enable）")
+                    matched.connection.stopVPNTunnel()
+                    matched.isEnabled = false
+                    group.enter()
+                    matched.saveToPreferences { _ in
+                        matched.isEnabled = true
+                        matched.saveToPreferences { _ in
+                            matched.loadFromPreferences { _ in group.leave() }
+                        }
+                    }
+                }
                 // 主动 save 同步当前 App 版本号（消除"需要更新"红色提示）
                 NSLog("[PrismVPN] 匹配配置已存在，跳过清理，直接 save 同步版本号")
                 group.enter()
@@ -1457,26 +1481,33 @@ final class PrismTunnelController {
         completion: @escaping (Error?) -> Void
     ) {
         guard attemptsRemaining > 0, PrismTunnelController.isStaleOrInvalid(error) else {
-            // 【build 144 方案】仅当真正报 Code=14（VPN 插件未安装/未注册）
-            // 时才调用一次 rootHelper（TrollStore 官方 trollstorehelper
-            // uicache）修复注册——它重建 _LSBundlePlugins，正是安装时的
-            // 原生注册方式。其余任何失败都绝不碰注册，也绝不删配置
+            // 【build 154 方案】App 运行期严禁调用 rootHelper（uicache 会
+            // 注销运行中的 App → 会话失效）。Code=14 不再尝试修复注册，
+            // 仅记录诊断交回上层
             if PrismTunnelController.isVPNAppNotInstalled(error) {
-                NSLog("[PrismVPN] Code=14 检测到插件未注册，调用 rootHelper uicache 修复")
-                PrismTunnelController.tryRootHelperUICache()
+                NSLog("[PrismVPN] Code=14 插件未注册（App 运行期不再调 uicache，交由用户重装/TrollStore 处理）")
             }
-            // 【build 150 方案第 2 步】Code=12 且扩展无心跳：旧版扩展进程
-            // 驻留占住 nesessionmanager（TrollStore 覆盖安装后首启必现）——
-            // 杀旧进程 + uicache 后自动重试一次（防循环：每次 start 会话
-            // 仅允许一次自愈）
+            // 【build 154 方案】Code=12 且 hb=无：坏配置已彻底损坏——
+            // 一次性 removeFromPreferences 删掉坏配置，让用户下一次点击
+            // 启动时重新生成干净配置（不自动重试，防死循环）
             if !PrismTunnelController.code12SelfHealed,
                PrismTunnelController.isCode12WithNoHeartbeat(error)
             {
                 PrismTunnelController.code12SelfHealed = true
-                NSLog("[PrismVPN] Code=12 且 hb=无：清理驻留旧版扩展进程后自动重试一次")
-                PrismTunnelController.killStaleExtensionProcess()
-                PrismTunnelController.tryRootHelperUICache()
-                startAttempt(configPath: configPath, attemptsRemaining: 0, completion: completion)
+                NSLog("[PrismVPN] Code=12 且 hb=无：删除损坏的 VPN 配置，待用户下次启动重建")
+                NETunnelProviderManager.loadAllFromPreferences { managers, _ in
+                    let group = DispatchGroup()
+                    for manager in managers ?? [] {
+                        if let proto = manager.protocolConfiguration
+                            as? NETunnelProviderProtocol,
+                           proto.providerBundleIdentifier?.hasSuffix(".PrismVPN") == true
+                        {
+                            group.enter()
+                            manager.removeFromPreferences { _ in group.leave() }
+                        }
+                    }
+                    group.notify(queue: .main) { completion(error) }
+                }
                 return
             }
             completion(error)

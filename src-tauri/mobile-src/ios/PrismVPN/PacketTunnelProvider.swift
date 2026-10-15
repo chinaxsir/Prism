@@ -501,8 +501,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - 配置清洗（保持 build=147/148 已验证连通的最小逻辑）
 
     /// 配置清洗：TUN 入站适配 + 路径重定向 + DNS "local"/"system" 替换 +
-    /// 出站显式绑定物理网卡（build 151：bind_interface/default_interface，
-    /// auto_detect_interface 关闭——1.11.3 回调链路未触发，见第 4 步注释）。
+    /// 强制开启 box.log + 出站显式绑定物理网卡（build 154：bind_interface
+    /// 白名单 + default_interface，走拨号器第一分支不依赖平台回调；
+    /// auto_detect_interface 保持 true 作兜底——已核实无冲突校验）。
     /// 不注入 dns detour（sing-box 新版对 "detour to an empty direct
     /// outbound makes no sense" 直接报错）。JSON 解析失败时原样返回
     private func sanitizeConfigForExtension(_ rawJSON: String, workDir: URL) -> String {
@@ -513,9 +514,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         // 0. tun 入站适配 iOS NetworkExtension：移除桌面端固定网卡名
-        //    （iOS 由系统分配 utunN）；strict_route 在 NE 下不支持；
-        //    stack 强制 gvisor（with_gvisor 已随内核编译，system 栈在
-        //    NE 下会被内核丢弃注入回 utun 的本地 NAT 包）
+        //    （iOS 由系统分配 utunN）；strict_route 在 NE 下不支持。
+        //    不强行修改 stack 字段（build 154 用户模板：防止未编译
+        //    gvisor 时报错）
         var inbounds = (root["inbounds"] as? [[String: Any]]) ?? []
         var hasTun = false
         for i in inbounds.indices {
@@ -525,7 +526,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 inbounds[i]["strict_route"] = false
                 inbounds[i]["auto_route"] = true
                 inbounds[i]["mtu"] = 1400
-                inbounds[i]["stack"] = "gvisor"
                 if inbounds[i]["inet4_address"] == nil && inbounds[i]["address"] == nil {
                     inbounds[i]["inet4_address"] = "172.19.0.1/30"
                 }
@@ -539,7 +539,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 "mtu": 1400,
                 "auto_route": true,
                 "strict_route": false,
-                "stack": "gvisor",
             ], at: 0)
         }
         root["inbounds"] = inbounds
@@ -582,27 +581,26 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             root["experimental"] = experimental
         }
 
-        // 3. log.output → workDir/box.log（仅文件输出需要重定向）
-        if var logObj = root["log"] as? [String: Any],
-           let output = logObj["output"] as? String,
-           !output.isEmpty,
-           output != "stdout",
-           output != "stderr"
-        {
-            logObj["output"] = workDir.appendingPathComponent("box.log").path
-            root["log"] = logObj
-        }
+        // 3. 强制开启 box.log 文件输出（即使原配置未设置 log.output 也要
+        //    写入，消除诊断 box=无；build 154 用户模板）
+        var logObj = (root["log"] as? [String: Any]) ?? [:]
+        logObj["disabled"] = false
+        logObj["level"] = "info"
+        logObj["output"] = workDir.appendingPathComponent("box.log").path
+        root["log"] = logObj
 
-        // 4. route + 出站显式绑定物理网卡（build 151 核心修复）：
-        //    build 150 依赖 route.auto_detect_interface=true → 平台回调
-        //    prismProtectSocket 逐 socket 绑定，但 sing-box 1.11.3 并不把
-        //    route 全局项传播到出站拨号器，回调从未被触发 → 出站全部掉回
-        //    utun 死循环（实测连 direct 都超时）。改为显式绑定：Go 原生
-        //    bindIfaceToDialer 直接 Darwin IP_BOUND_IF，完全绕开回调链路。
-        //    bind_interface 优先级最高；default_interface 兜底覆盖漏网出站
+        // 4. route + 出站显式绑定物理网卡（build 151 引入，build 154 保留）：
+        //    显式 bind_interface 走 sing-box 拨号器第一分支
+        //    （common/dialer/default.go: BindInterface != "" → control.
+        //    BindToInterface），不依赖 NetworkManager/平台回调——build 150
+        //    实测回调链路（auto_detect_interface → ProtectFunc）未生效，
+        //    出站全部掉回 utun 死循环（连 direct 都超时）。
+        //    已核实 sing-box 1.11.3 无 auto_detect_interface 与
+        //    default_interface/bind_interface 的冲突校验（仅与
+        //    network_strategy 冲突，未设置），可安全并存
         let phyName = cachedPhysicalIfName
         var route = (root["route"] as? [String: Any]) ?? [:]
-        route["auto_detect_interface"] = false
+        route["auto_detect_interface"] = true
         if !phyName.isEmpty {
             route["default_interface"] = phyName
         }
@@ -635,13 +633,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         root["route"] = route
 
-        // 5. 所有实际出站绑定物理网卡（排除策略组/伪出站——它们经 final
-        //    链到真实出站，由被引用者自己绑定）
+        // 5. 实际出站绑定物理网卡——白名单方式（build 154 用户模板）：
+        //    策略组/伪出站（selector/urltest/block/dns）不绑定，由其 final
+        //    链引用的真实出站自己绑定
         if !phyName.isEmpty, var outbounds = root["outbounds"] as? [[String: Any]] {
-            let skipTypes: Set<String> = ["selector", "urltest", "block", "dns"]
+            let realOutboundTypes: Set<String> = [
+                "direct", "vless", "vmess", "trojan", "shadowsocks",
+                "hysteria", "hysteria2", "tuic", "wireguard",
+                "http", "socks", "ssh", "anytls",
+            ]
             for i in outbounds.indices {
                 let t = (outbounds[i]["type"] as? String) ?? ""
-                if !skipTypes.contains(t) {
+                if realOutboundTypes.contains(t) {
                     outbounds[i]["bind_interface"] = phyName
                 }
             }
