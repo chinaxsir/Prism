@@ -154,9 +154,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 )
                 PrismVPNSetCallbacks(callbacks)
 
+                // build 146 方案第 1 步：清洗配置中指向主 App 私有容器的
+                // 路径（Rust 生成配置时用主 App app_data_dir 作 cache_file
+                // 等路径，build 145 实证扩展进程读它被 Seatbelt 拦截：
+                // initialize cache-file ... operation not permitted），
+                // 全部重定向到扩展可写的 workDir
+                let sanitizedConfig = self.sanitizeConfigForExtension(configText, workDir: workDir)
+
                 // PrismVPNStart 内部会同步回调 openTun，启动后台协程后立即返回
                 //（nil = 成功，非 nil = 错误字符串）
-                let errorPtr = configText.withCString { configPtr in
+                let errorPtr = sanitizedConfig.withCString { configPtr in
                     workDir.path.withCString { dirPtr in
                         PrismVPNStart(
                             UnsafeMutablePointer(mutating: configPtr),
@@ -193,6 +200,88 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.failStart(code: 2, message: error.localizedDescription, completionHandler: completionHandler)
             }
         }
+    }
+
+    /// 将配置中指向主 App 私有容器（/Containers/Data/Application/...）的
+    /// 路径统一重定向到扩展可写的 workDir，防止 sing-box 初始化
+    /// cache-file/log/external_ui/rule_set 时触发 operation not permitted
+    ///（build 145 实证 cache.db 是第一块沙盒铁板，此处一次性清完同类路径）。
+    /// JSON 解析失败时原样返回（内核会给出更明确的错误）
+    private func sanitizeConfigForExtension(_ rawJSON: String, workDir: URL) -> String {
+        guard let data = rawJSON.data(using: .utf8),
+              var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else {
+            return rawJSON
+        }
+
+        // 1. experimental.cache_file.path → workDir/cache.db；
+        //    clash_api 移除 external_ui（扩展进程内无需下载/挂载 Web UI
+        //    静态目录，避免 mkdir 权限报错）
+        if var experimental = root["experimental"] as? [String: Any] {
+            if var cacheFile = experimental["cache_file"] as? [String: Any] {
+                cacheFile["path"] = workDir.appendingPathComponent("cache.db").path
+                experimental["cache_file"] = cacheFile
+            }
+            if var clashAPI = experimental["clash_api"] as? [String: Any] {
+                clashAPI.removeValue(forKey: "external_ui")
+                clashAPI.removeValue(forKey: "external_ui_download_url")
+                experimental["clash_api"] = clashAPI
+            }
+            root["experimental"] = experimental
+        }
+
+        // 2. log.output → workDir/box.log（仅文件输出需要重定向）
+        if var logObj = root["log"] as? [String: Any],
+           let output = logObj["output"] as? String,
+           !output.isEmpty,
+           output != "stdout",
+           output != "stderr"
+        {
+            logObj["output"] = workDir.appendingPathComponent("box.log").path
+            root["log"] = logObj
+        }
+
+        // 3. route.geoip / route.geosite 本地路径 → workDir（geo 数据库
+        //    已由 copyGeoDatabases 拷入 workDir）
+        if var route = root["route"] as? [String: Any] {
+            if var geoip = route["geoip"] as? [String: Any], geoip["path"] != nil {
+                geoip["path"] = workDir.appendingPathComponent("geoip.db").path
+                route["geoip"] = geoip
+            }
+            if var geosite = route["geosite"] as? [String: Any], geosite["path"] != nil {
+                geosite["path"] = workDir.appendingPathComponent("geosite.db").path
+                route["geosite"] = geosite
+            }
+            // 4. local rule_set：主 App 私有容器内的 .srs 重定向到
+            //    workDir/rulesets/<文件名>（主 App 启动前已拷入共享目录）
+            if var ruleSets = route["rule_set"] as? [[String: Any]] {
+                var changed = false
+                for i in ruleSets.indices {
+                    if (ruleSets[i]["type"] as? String) == "local",
+                       let oldPath = ruleSets[i]["path"] as? String,
+                       oldPath.contains("/Containers/Data/Application/")
+                    {
+                        let fileName = (oldPath as NSString).lastPathComponent
+                        ruleSets[i]["path"] = workDir
+                            .appendingPathComponent("rulesets", isDirectory: true)
+                            .appendingPathComponent(fileName).path
+                        changed = true
+                    }
+                }
+                if changed {
+                    route["rule_set"] = ruleSets
+                }
+            }
+            root["route"] = route
+        }
+
+        guard let newData = try? JSONSerialization.data(withJSONObject: root),
+              let newText = String(data: newData, encoding: .utf8)
+        else {
+            return rawJSON
+        }
+        NSLog("[PrismVPN] 配置路径清洗完成（cache_file/log/geo/rule_set → workDir）")
+        return newText
     }
 
     private func failStart(code: Int, message: String, completionHandler: @escaping (Error?) -> Void) {

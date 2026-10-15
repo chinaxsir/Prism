@@ -59,6 +59,38 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
         return -1
     }
 
+    // build 146 方案第 2 步：本地 .srs 规则集存放在主 App 私有沙盒
+    //（Application Support/com.prism.proxy/rulesets/），扩展进程无
+    // no-sandbox 读不到主 App 私有容器。启动前整目录拷入 App Group 的
+    // prism_work/rulesets/，扩展侧清洗函数会把 local rule_set 路径
+    // 重定向到该位置。无 rulesets 目录时跳过（防御性，正常订阅不涉及）
+    if let appSupport = FileManager.default.urls(
+        for: .applicationSupportDirectory, in: .userDomainMask
+    ).first {
+        let rulesetsSrc = appSupport.appendingPathComponent(
+            "com.prism.proxy/rulesets", isDirectory: true)
+        if FileManager.default.fileExists(atPath: rulesetsSrc.path),
+           let groupURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: prismAppGroupID)
+        {
+            let rulesetsDst = groupURL.appendingPathComponent(
+                "prism_work/rulesets", isDirectory: true)
+            try? FileManager.default.createDirectory(
+                at: rulesetsDst, withIntermediateDirectories: true)
+            if let files = try? FileManager.default.contentsOfDirectory(
+                atPath: rulesetsSrc.path)
+            {
+                for file in files where file.hasSuffix(".srs") {
+                    let dst = rulesetsDst.appendingPathComponent(file)
+                    try? FileManager.default.removeItem(at: dst)
+                    try? FileManager.default.copyItem(
+                        at: rulesetsSrc.appendingPathComponent(file), to: dst)
+                }
+                NSLog("[PrismVPN] 已拷贝 \(files.count) 个本地规则集到共享目录")
+            }
+        }
+    }
+
     let semaphore = DispatchSemaphore(value: 0)
     var result: Int32 = 0
     var errorDesc: String = ""
