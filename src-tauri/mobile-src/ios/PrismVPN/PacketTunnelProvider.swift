@@ -34,6 +34,9 @@ private var prismProviderRef: PacketTunnelProvider?
 /// 不能每次回调都跑 getifaddrs（系统调用风暴 + 并发遍历链表有崩溃
 /// 风险）。启动时与低频定时刷新缓存，回调里无锁读原子变量
 private var cachedPhysicalIfIndex: Int32 = 0 // 0 = 未绑定（直连默认路由）
+/// 物理网卡名（en0 / pdp_ip0...），sanitize 用它写 route.default_interface
+/// 与出站 bind_interface（build 151：显式绑定，不依赖回调链路）
+private var cachedPhysicalIfName: String = ""
 
 private func refreshPhysicalInterfaceIndex() {
     var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
@@ -43,6 +46,9 @@ private func refreshPhysicalInterfaceIndex() {
     var wifiIdx: Int32 = 0
     var cellIdx: Int32 = 0
     var otherIdx: Int32 = 0
+    var wifiName = ""
+    var cellName = ""
+    var otherName = ""
 
     var ptr: UnsafeMutablePointer<ifaddrs>? = firstAddr
     while let current = ptr {
@@ -61,14 +67,17 @@ private func refreshPhysicalInterfaceIndex() {
                     if idx > 0 {
                         if name == "en0" {
                             wifiIdx = idx
+                            wifiName = name
                         } else if name.hasPrefix("en") {
-                            if wifiIdx == 0 { wifiIdx = idx }
+                            if wifiIdx == 0 { wifiIdx = idx; wifiName = name }
                         } else if name == "pdp_ip0" {
                             cellIdx = idx
+                            cellName = name
                         } else if name.hasPrefix("pdp_ip") {
-                            if cellIdx == 0 { cellIdx = idx }
+                            if cellIdx == 0 { cellIdx = idx; cellName = name }
                         } else if otherIdx == 0 {
                             otherIdx = idx
+                            otherName = name
                         }
                     }
                 }
@@ -77,9 +86,15 @@ private func refreshPhysicalInterfaceIndex() {
         ptr = current.pointee.ifa_next
     }
 
-    let best = wifiIdx != 0 ? wifiIdx : (cellIdx != 0 ? cellIdx : otherIdx)
-    if best != 0 {
-        cachedPhysicalIfIndex = best
+    if wifiIdx != 0 {
+        cachedPhysicalIfIndex = wifiIdx
+        cachedPhysicalIfName = wifiName
+    } else if cellIdx != 0 {
+        cachedPhysicalIfIndex = cellIdx
+        cachedPhysicalIfName = cellName
+    } else if otherIdx != 0 {
+        cachedPhysicalIfIndex = otherIdx
+        cachedPhysicalIfName = otherName
     }
 }
 
@@ -227,6 +242,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
                 try? self.copyGeoDatabases(to: workDir)
 
+                // 物理网卡索引/名字预缓存：先于 sanitize（要写
+                // route.default_interface 与出站 bind_interface），也供
+                // prismProtectSocket 回调无锁读取
+                refreshPhysicalInterfaceIndex()
+
                 let sanitizedConfig = self.sanitizeConfigForExtension(configText, workDir: workDir)
 
                 let callbacks = prism_vpn_cbs(
@@ -236,10 +256,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 )
                 PrismVPNSetCallbacks(callbacks)
                 self.writeHeartbeat("calling-PrismVPNStart")
-
-                // 物理网卡索引预缓存：Go 回调 prismProtectSocket 高频并发，
-                // 回调里只读原子缓存，系统调用全部收敛到启动期这一次
-                refreshPhysicalInterfaceIndex()
 
                 // PrismVPNStart 内部会同步回调 openTun，启动后台协程后立即返回
                 //（nil = 成功，非 nil = 错误字符串）
@@ -484,11 +500,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - 配置清洗（保持 build=147/148 已验证连通的最小逻辑）
 
-    /// 配置清洗：TUN 入站适配 + 路径重定向 + DNS "local"/"system" 替换。
-    /// build 150 严格回退：不再注入 dns detour（sing-box 新版对
-    /// "detour to an empty direct outbound makes no sense" 直接报错）、
-    /// 不再设置 default_interface（出站绑定完全由 prismProtectSocket
-    /// 按回调逐 socket 处理）。JSON 解析失败时原样返回
+    /// 配置清洗：TUN 入站适配 + 路径重定向 + DNS "local"/"system" 替换 +
+    /// 出站显式绑定物理网卡（build 151：bind_interface/default_interface，
+    /// auto_detect_interface 关闭——1.11.3 回调链路未触发，见第 4 步注释）。
+    /// 不注入 dns detour（sing-box 新版对 "detour to an empty direct
+    /// outbound makes no sense" 直接报错）。JSON 解析失败时原样返回
     private func sanitizeConfigForExtension(_ rawJSON: String, workDir: URL) -> String {
         guard let data = rawJSON.data(using: .utf8),
               var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -497,7 +513,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         // 0. tun 入站适配 iOS NetworkExtension：移除桌面端固定网卡名
-        //    （iOS 由系统分配 utunN）；strict_route 在 NE 下不支持
+        //    （iOS 由系统分配 utunN）；strict_route 在 NE 下不支持；
+        //    stack 强制 gvisor（with_gvisor 已随内核编译，system 栈在
+        //    NE 下会被内核丢弃注入回 utun 的本地 NAT 包）
         var inbounds = (root["inbounds"] as? [[String: Any]]) ?? []
         var hasTun = false
         for i in inbounds.indices {
@@ -507,6 +525,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 inbounds[i]["strict_route"] = false
                 inbounds[i]["auto_route"] = true
                 inbounds[i]["mtu"] = 1400
+                inbounds[i]["stack"] = "gvisor"
                 if inbounds[i]["inet4_address"] == nil && inbounds[i]["address"] == nil {
                     inbounds[i]["inet4_address"] = "172.19.0.1/30"
                 }
@@ -520,6 +539,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 "mtu": 1400,
                 "auto_route": true,
                 "strict_route": false,
+                "stack": "gvisor",
             ], at: 0)
         }
         root["inbounds"] = inbounds
@@ -573,10 +593,20 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             root["log"] = logObj
         }
 
-        // 4. route：开启 auto_detect_interface（sing-box 自动跟踪默认路由
-        //    切换 Wi-Fi/蜂窝）；geoip/geosite/rule_set 本地路径重定向
+        // 4. route + 出站显式绑定物理网卡（build 151 核心修复）：
+        //    build 150 依赖 route.auto_detect_interface=true → 平台回调
+        //    prismProtectSocket 逐 socket 绑定，但 sing-box 1.11.3 并不把
+        //    route 全局项传播到出站拨号器，回调从未被触发 → 出站全部掉回
+        //    utun 死循环（实测连 direct 都超时）。改为显式绑定：Go 原生
+        //    bindIfaceToDialer 直接 Darwin IP_BOUND_IF，完全绕开回调链路。
+        //    bind_interface 优先级最高；default_interface 兜底覆盖漏网出站
+        let phyName = cachedPhysicalIfName
         var route = (root["route"] as? [String: Any]) ?? [:]
-        route["auto_detect_interface"] = true
+        route["auto_detect_interface"] = false
+        if !phyName.isEmpty {
+            route["default_interface"] = phyName
+        }
+        // geoip/geosite/rule_set 本地路径重定向
         if var geoip = route["geoip"] as? [String: Any], geoip["path"] != nil {
             geoip["path"] = workDir.appendingPathComponent("geoip.db").path
             route["geoip"] = geoip
@@ -604,6 +634,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
         }
         root["route"] = route
+
+        // 5. 所有实际出站绑定物理网卡（排除策略组/伪出站——它们经 final
+        //    链到真实出站，由被引用者自己绑定）
+        if !phyName.isEmpty, var outbounds = root["outbounds"] as? [[String: Any]] {
+            let skipTypes: Set<String> = ["selector", "urltest", "block", "dns"]
+            for i in outbounds.indices {
+                let t = (outbounds[i]["type"] as? String) ?? ""
+                if !skipTypes.contains(t) {
+                    outbounds[i]["bind_interface"] = phyName
+                }
+            }
+            root["outbounds"] = outbounds
+        }
 
         guard let newData = try? JSONSerialization.data(withJSONObject: root),
               let newText = String(data: newData, encoding: .utf8)

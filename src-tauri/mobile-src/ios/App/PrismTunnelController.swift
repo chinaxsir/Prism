@@ -128,7 +128,7 @@ func prismIosVpnStart(_ config: UnsafePointer<CChar>) -> Int32 {
         let provisioning = PrismTunnelController.diagnoseProvisioning()
         let rtEnt = PrismTunnelController.runtimeEntitlementsSummary()
         let pkdReg = PrismTunnelController.diagnosePkdRegistration()
-        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) rtEnt=\(rtEnt) pkd=\(pkdReg) rootHelper=\(PrismTunnelController.rootHelperResult) selfHelper=\(PrismTunnelController.selfHelperResult) hb=\(PrismTunnelController.diagnoseExtensionHeartbeat()) extErr=\(PrismTunnelController.diagnoseExtensionError()) crash=\(PrismTunnelController.latestExtensionCrashSummary()) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] hb= 扩展心跳最后阶段（无=没进 startTunnel，start-gotPath/openTun/tun-ok=对应阶段）；extErr= 扩展写出的精确错误；crash= 最新 PrismVPN/Jetsam 崩溃报告头部。selfHelper= 随包 PrismHelper 以 root 执行的结果；rootHelper= TrollStore 官方 uicache（u0=成功）"
+        let full = "\(errorDesc)\n[诊断] build=\(buildId) app=\(Bundle.main.bundleIdentifier ?? "?") ext=\(extensionBundleIdentifier) group=\(groupOk ? "OK" : "nil") managers=\(PrismTunnelController.lastManagerCount) seal=\(sealOk) rtEnt=\(rtEnt) pkd=\(pkdReg) rootHelper=\(PrismTunnelController.rootHelperResult) selfHelper=\(PrismTunnelController.selfHelperResult) hb=\(PrismTunnelController.diagnoseExtensionHeartbeat()) extErr=\(PrismTunnelController.diagnoseExtensionError()) crash=\(PrismTunnelController.latestExtensionCrashSummary()) box=\(PrismTunnelController.diagnoseBoxLog()) static=\(staticCheck) devMode=\(devMode) provisioning=\(provisioning) lsReg=\(PrismTunnelController.lsRegisterResult) lsAppWS=\(PrismTunnelController.lsAppWorkspaceResult) PlugIns: \(diag) ; appex签名: \(sig) ; appex预检: \(preflight)\n[提示] hb= 扩展心跳最后阶段（无=没进 startTunnel，start-gotPath/openTun/tun-ok=对应阶段）；extErr= 扩展写出的精确错误；crash= 最新 PrismVPN/Jetsam 崩溃报告头部。selfHelper= 随包 PrismHelper 以 root 执行的结果；rootHelper= TrollStore 官方 uicache（u0=成功）"
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("prism_vpn_start_error.txt")
         NSLog("[PrismVPN] 写错误详情到 \(path): \(full)")
@@ -270,6 +270,27 @@ final class PrismTunnelController {
         // 截取前 400 字符（含 bug_type / exception / termination / dyld 错误详情）
         let head = String(content.prefix(400)).replacingOccurrences(of: "\n", with: " ")
         return "\(name):\(head)"
+    }
+
+    /// 读取扩展 prism_work/box.log 的末尾（sing-box 一手日志：出站绑定、
+    /// DNS、握手失败都会写这里；主 App 持 no-sandbox 直接读共享目录）
+    static func diagnoseBoxLog() -> String {
+        let fm = FileManager.default
+        var best: (text: String, mtime: Date)?
+        for dir in extensionSharedDirs() {
+            let path = dir.appendingPathComponent("prism_work/box.log").path
+            guard let text = try? String(contentsOfFile: path, encoding: .utf8),
+                  let attrs = try? fm.attributesOfItem(atPath: path),
+                  let mtime = attrs[.modificationDate] as? Date
+            else { continue }
+            if best == nil || mtime > best!.mtime {
+                best = (text, mtime)
+            }
+        }
+        guard let best = best else { return "无" }
+        let lines = best.text.split(separator: "\n").suffix(8)
+        guard !lines.isEmpty else { return "空" }
+        return lines.joined(separator: " | ")
     }
 
     /// 遍历 App 包 PlugIns 下的 .appex，返回声明了 packet-tunnel
