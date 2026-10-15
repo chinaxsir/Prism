@@ -270,6 +270,17 @@ impl KernelHandle {
             );
         }
 
+        // 4.5 iOS：内核就绪后自动测速选最低延迟节点（用户可随后在 UI 手动指定）
+        #[cfg(target_os = "ios")]
+        {
+            let auto_api = api.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = auto_select_best_proxy(&auto_api).await {
+                    tracing::warn!("自动选择节点失败: {e:#}");
+                }
+            });
+        }
+
         // 5. 订阅内核 WebSocket 数据流（traffic / connections / memory）
         let stream_tasks = super::events::spawn_all(
             &config.api_addr,
@@ -570,6 +581,7 @@ pub fn current_kernel_pid() -> Option<u32> {
 }
 
 /// 内核 API 客户端（与 external-controller 通信）
+#[derive(Clone)]
 pub struct KernelApi {
     base: String,
     client: reqwest::Client,
@@ -747,4 +759,101 @@ impl KernelApi {
         }
         Ok(())
     }
+
+    /// 单节点测延迟：GET /proxies/{name}/delay，返回毫秒数；超时/失败返回 None
+    pub async fn test_delay(&self, name: &str, url: &str, timeout_ms: u32) -> Option<u64> {
+        let resp = self
+            .client
+            .get(format!("{}/proxies/{}/delay", self.base, name))
+            .query(&[
+                ("url", url.to_string()),
+                ("timeout", timeout_ms.to_string()),
+            ])
+            .timeout(Duration::from_millis(timeout_ms as u64 + 2000))
+            .send()
+            .await
+            .ok()?;
+        let json = resp.json::<serde_json::Value>().await.ok()?;
+        json.get("delay").and_then(|d| d.as_u64())
+    }
+}
+
+/// 自动测速并选择延迟最低的节点（build 150 新需求：APP 运行后自动选优，
+/// 用户可随后在 UI 手动指定节点覆盖）。
+/// 流程：取 /proxies → 找第一个 Selector 主选择组 → 并发对其真实节点测延迟
+/// （排除内置出站与嵌套策略组，3 秒超时）→ 选最低者 select_proxy。
+/// 全部超时则放弃并保持默认选择，不影响启动流程。
+#[cfg(target_os = "ios")]
+async fn auto_select_best_proxy(api: &KernelApi) -> Result<()> {
+    const TEST_URL: &str = "http://www.gstatic.com/generate_204";
+    const TEST_TIMEOUT_MS: u32 = 3000;
+    /// 内置出站与不可选择项（不做真实测速）
+    const EXCLUDED: [&str; 8] = [
+        "direct", "block", "dns-out", "REJECT", "REJECT-DROP", "COMPATIBLE", "GLOBAL", "PASS",
+    ];
+
+    let proxies = api.get_proxies().await?;
+    let map = proxies
+        .get("proxies")
+        .and_then(|p| p.as_object())
+        .context("clash api 返回缺少 proxies 字段")?;
+
+    // 主选择组：第一个 Selector 类型的策略组
+    let (group, members) = map
+        .iter()
+        .find(|(_, v)| {
+            v.get("type")
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| t.eq_ignore_ascii_case("selector"))
+        })
+        .map(|(name, v)| {
+            let all: Vec<String> = v
+                .get("all")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (name.clone(), all)
+        })
+        .context("未找到 Selector 策略组")?;
+
+    // 只对真实节点测速：排除内置出站 + 嵌套策略组（含 all 成员列表的项）
+    let nodes: Vec<String> = members
+        .into_iter()
+        .filter(|m| !EXCLUDED.iter().any(|e| m.eq_ignore_ascii_case(e)))
+        .filter(|m| {
+            map.get(m)
+                .map(|info| info.get("all").is_none())
+                .unwrap_or(true)
+        })
+        .collect();
+    anyhow::ensure!(!nodes.is_empty(), "策略组 '{group}' 无可用节点");
+
+    // 并发测速（节点可达 50+，串行太慢）
+    let mut tasks: Vec<tokio::task::JoinHandle<Option<(String, u64)>>> =
+        Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let api = api.clone();
+        tasks.push(tokio::spawn(async move {
+            let delay = api.test_delay(&node, TEST_URL, TEST_TIMEOUT_MS).await?;
+            Some((node, delay))
+        }));
+    }
+
+    let mut best: Option<(String, u64)> = None;
+    for task in tasks {
+        if let Ok(Some((node, delay))) = task.await {
+            if best.as_ref().is_none_or(|(_, d)| delay < *d) {
+                best = Some((node, delay));
+            }
+        }
+    }
+
+    let (node, delay) = best.context("所有节点测速均超时，保持默认选择")?;
+    api.select_proxy(&group, &node).await?;
+    tracing::info!("自动选择节点: {node}（{delay}ms，组: {group}）");
+    Ok(())
 }

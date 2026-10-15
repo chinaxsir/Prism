@@ -1113,6 +1113,53 @@ final class PrismTunnelController {
         return exitCode == 0 && termsig == 0
     }
 
+    // MARK: 旧版扩展进程清理（build 150 方案第 2 步）
+
+    /// Code=12+hb无 自愈只执行一次（防反复重启死循环）
+    static var code12SelfHealed = false
+
+    /// Code=12 且扩展无心跳：旧版 PrismVPN 进程驻留占住 nesessionmanager
+    /// 的典型指纹（TrollStore 覆盖安装只杀主 App 不杀后台扩展，磁盘二进制
+    /// 已被新版覆盖 → 旧进程 XPC 失败，新版 startTunnel 根本不被拉起）
+    static func isCode12WithNoHeartbeat(_ error: Error) -> Bool {
+        guard diagnoseExtensionHeartbeat() == "无" else { return false }
+        var current = error as NSError
+        while true {
+            if current.domain == "NEVPNConnectionErrorDomain" || current.domain == "NEVPNErrorDomain" {
+                if current.code == 12 || current.code == 1 { return true }
+            }
+            guard let next = current.userInfo[NSUnderlyingErrorKey] as? NSError else { return false }
+            current = next
+        }
+    }
+
+    /// 覆盖安装检测：CFBundleVersion 变化说明磁盘二进制已更新，后台可能
+    /// 仍驻留旧版扩展进程。启动前先杀旧进程 + uicache 刷新（每次新版本
+    /// 仅执行一次，靠 UserDefaults 记录已处理的版本）
+    static func checkAndKillStaleExtension() {
+        let current = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        let last = UserDefaults.standard.string(forKey: "prism_last_build_version")
+        guard last != current else { return }
+        UserDefaults.standard.set(current, forKey: "prism_last_build_version")
+        NSLog("[PrismVPN] 检测到覆盖安装 \(last ?? "无") -> \(current)，清理驻留旧版扩展进程")
+        killStaleExtensionProcess()
+        tryRootHelperUICache()
+    }
+
+    /// 调用随包 PrismHelper killext（killall -9 PrismVPN）
+    static func killStaleExtensionProcess() {
+        let helperPath = Bundle.main.bundleURL
+            .appendingPathComponent("PrismHelper").path
+        guard FileManager.default.isExecutableFile(atPath: helperPath) else {
+            NSLog("[PrismVPN] killext 失败：PrismHelper 不存在")
+            return
+        }
+        let (spawnErr, exitCode, termsig, _) = runSpawnTool(
+            path: helperPath, args: ["killext"],
+            asRoot: true, captureOutput: false)
+        NSLog("[PrismVPN] killext spawn=\(spawnErr) exit=\(exitCode) sig=\(termsig)")
+    }
+
     // MARK: - 随包 root helper（PrismHelper）强扭注册
 
     static var selfHelperResult: String = "未调用"
@@ -1257,6 +1304,16 @@ final class PrismTunnelController {
     // MARK: 启动（带失效配置自愈，最多重试 1 次）
 
     func start(configPath: String, completion: @escaping (Error?) -> Void) {
+        // 【build 150 方案第 2 步】错误文件只在最外层入口清一次：
+        // startAttempt 重试/自愈路径不再清，保留第一轮 hb=/extErr= 现场
+        // 供失败诊断（此前每次尝试开头都清，错误证据全被抹掉）
+        clearSharedErrorFile()
+        PrismTunnelController.code12SelfHealed = false
+        // 覆盖安装检测：CFBundleVersion 变化说明磁盘二进制已更新，
+        // 后台可能仍驻留旧版扩展进程占住 nesessionmanager——先杀旧扩展
+        // + uicache 刷新，避免 Code=12 且 hb=无
+        PrismTunnelController.checkAndKillStaleExtension()
+
         // attemptsRemaining=0：失败后严禁自动删配置重建——重建会触发
         // 第二次"添加 VPN 配置"授权弹窗，且刚授权的配置被删光后
         // managers=0（build 137 实证）。code=14/失效配置的恢复交给
@@ -1269,10 +1326,8 @@ final class PrismTunnelController {
         attemptsRemaining: Int,
         completion: @escaping (Error?) -> Void
     ) {
-        // code=14 场景下扩展根本没被系统拉起，没有机会执行扩展端的
-        // clearSharedError；主 App 启动前先清，避免读到上一轮残留的
-        // 陈旧 prism_error.txt 而误判断开原因
-        clearSharedErrorFile()
+        // 【build 150】clearSharedErrorFile 已上移到 start() 入口只清一次；
+        // 重试/自愈路径保留上一轮心跳与错误现场，诊断串才能看到真实卡点
 
         // 【build 144 方案·关键】启动路径对注册零干预：
         // TrollStore 安装 IPA 时已经由官方 trollstorehelper 完成了最标准的
@@ -1388,6 +1443,20 @@ final class PrismTunnelController {
             if PrismTunnelController.isVPNAppNotInstalled(error) {
                 NSLog("[PrismVPN] Code=14 检测到插件未注册，调用 rootHelper uicache 修复")
                 PrismTunnelController.tryRootHelperUICache()
+            }
+            // 【build 150 方案第 2 步】Code=12 且扩展无心跳：旧版扩展进程
+            // 驻留占住 nesessionmanager（TrollStore 覆盖安装后首启必现）——
+            // 杀旧进程 + uicache 后自动重试一次（防循环：每次 start 会话
+            // 仅允许一次自愈）
+            if !PrismTunnelController.code12SelfHealed,
+               PrismTunnelController.isCode12WithNoHeartbeat(error)
+            {
+                PrismTunnelController.code12SelfHealed = true
+                NSLog("[PrismVPN] Code=12 且 hb=无：清理驻留旧版扩展进程后自动重试一次")
+                PrismTunnelController.killStaleExtensionProcess()
+                PrismTunnelController.tryRootHelperUICache()
+                startAttempt(configPath: configPath, attemptsRemaining: 0, completion: completion)
+                return
             }
             completion(error)
             return

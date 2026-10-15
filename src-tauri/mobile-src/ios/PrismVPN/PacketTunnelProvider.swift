@@ -12,14 +12,14 @@
 //   stopTunnel → 同一队列串行执行 PrismVPNStop（Go Close 同步回收）
 //   → stopped → completionHandler
 //
-// build 149 修复（VPN 已建立但无法上网/节点全超时/Clash API 无数据）：
-//   1. prism_protect_socket 真实现：出站 socket 绑定物理网卡
-//      （IP_BOUND_IF/IPV6_BOUND_IF），打破 utun 默认路由死循环
-//   2. sanitize：dns "local"/"system" → 223.5.5.5，防 mDNSResponder
-//      回环死锁（节点域名解析依赖已建立的隧道）
-//   3. openTun：excludedRoutes 排除 127.0.0.0/8 与局域网，保障主 App
-//      访问扩展内 Clash API（127.0.0.1）不被 utun 劫持
-//   4. sanitize：route.auto_detect_interface + default_interface 物理网卡
+// build 150 修复（build=149 实测 Code=12 且 hb=无）：
+//   根因 1：TrollStore 覆盖安装只杀主 App 不杀后台驻留的旧扩展进程，
+//   旧 PrismVPN 挂在 nesessionmanager 上但磁盘二进制已被新版覆盖，
+//   XPC 调用失败 → Code=12 且 startTunnel 根本不被拉起（hb=无）。
+//   修复：stopTunnel 完成后 exit(0) 干净退出，杜绝僵尸进程残留。
+//   根因 2：build 149 向 dns.servers 注入 detour="direct" 在 sing-box
+//   新版直接报错 "detour to an empty direct outbound makes no sense"。
+//   修复：回退该注入，保持 build=147/148 已验证连通的最小清洗。
 
 import Foundation
 import NetworkExtension
@@ -28,24 +28,21 @@ import Darwin
 private let prismAppGroupID = "group.com.prism.proxy"
 private var prismProviderRef: PacketTunnelProvider?
 
-// MARK: - 获取当前活跃的物理网卡 (en0 / pdp_ip0)，用于绑定出站 Socket 防止回环死锁
+// MARK: - 物理网卡索引（缓存 + 线程安全刷新）
 
-private struct PhysicalInterface {
-    let name: String
-    let index: UInt32
-}
+/// prismProtectSocket 可能被 sing-box 内核在多个 Go 线程高频并发调用，
+/// 不能每次回调都跑 getifaddrs（系统调用风暴 + 并发遍历链表有崩溃
+/// 风险）。启动时与低频定时刷新缓存，回调里无锁读原子变量
+private var cachedPhysicalIfIndex: Int32 = 0 // 0 = 未绑定（直连默认路由）
 
-private func findActivePhysicalInterface() -> PhysicalInterface? {
+private func refreshPhysicalInterfaceIndex() {
     var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
-    guard getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr else {
-        let fallbackIdx = if_nametoindex("en0")
-        return fallbackIdx > 0 ? PhysicalInterface(name: "en0", index: fallbackIdx) : nil
-    }
+    guard getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr else { return }
     defer { freeifaddrs(ifaddrPtr) }
 
-    var wifiCandidate: PhysicalInterface?
-    var cellularCandidate: PhysicalInterface?
-    var otherCandidate: PhysicalInterface?
+    var wifiIdx: Int32 = 0
+    var cellIdx: Int32 = 0
+    var otherIdx: Int32 = 0
 
     var ptr: UnsafeMutablePointer<ifaddrs>? = firstAddr
     while let current = ptr {
@@ -57,22 +54,21 @@ private func findActivePhysicalInterface() -> PhysicalInterface? {
             let family = Int32(addr.pointee.sa_family)
             if family == AF_INET || family == AF_INET6 {
                 let name = String(cString: current.pointee.ifa_name)
-                // 排除虚拟隧道网卡
                 if !name.hasPrefix("utun") && !name.hasPrefix("ipsec") && !name.hasPrefix("ppp")
                     && !name.hasPrefix("llw") && !name.hasPrefix("awdl")
                 {
-                    let idx = if_nametoindex(name)
+                    let idx = Int32(if_nametoindex(name))
                     if idx > 0 {
-                        if name == "en0" || name.hasPrefix("en") {
-                            if wifiCandidate == nil || name == "en0" {
-                                wifiCandidate = PhysicalInterface(name: name, index: idx)
-                            }
+                        if name == "en0" {
+                            wifiIdx = idx
+                        } else if name.hasPrefix("en") {
+                            if wifiIdx == 0 { wifiIdx = idx }
+                        } else if name == "pdp_ip0" {
+                            cellIdx = idx
                         } else if name.hasPrefix("pdp_ip") {
-                            if cellularCandidate == nil || name == "pdp_ip0" {
-                                cellularCandidate = PhysicalInterface(name: name, index: idx)
-                            }
-                        } else if otherCandidate == nil {
-                            otherCandidate = PhysicalInterface(name: name, index: idx)
+                            if cellIdx == 0 { cellIdx = idx }
+                        } else if otherIdx == 0 {
+                            otherIdx = idx
                         }
                     }
                 }
@@ -81,7 +77,10 @@ private func findActivePhysicalInterface() -> PhysicalInterface? {
         ptr = current.pointee.ifa_next
     }
 
-    return wifiCandidate ?? cellularCandidate ?? otherCandidate
+    let best = wifiIdx != 0 ? wifiIdx : (cellIdx != 0 ? cellIdx : otherIdx)
+    if best != 0 {
+        cachedPhysicalIfIndex = best
+    }
 }
 
 final class PacketTunnelProvider: NEPacketTunnelProvider {
@@ -116,8 +115,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - 共享目录与诊断写入
 
     /// 共享目录候选列表（按可靠度排序）：config_path 父目录 → group 容器
-    /// → 用户 Preferences（无沙盒权限时的最后兜底）。心跳/错误对所有候选
-    /// 逐一写入，哪个成功算哪个，主 App 侧同样多目录读取
+    /// → 用户 Preferences（无沙盒权限时的最后兜底，build 150 方案保留）。
+    /// 心跳/错误对所有候选逐一写入，哪个成功算哪个，主 App 侧同样多目录读取
     private func sharedDirURLs() -> [URL] {
         var urls: [URL] = []
         if let resolved = resolvedSharedDirURL {
@@ -238,6 +237,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 PrismVPNSetCallbacks(callbacks)
                 self.writeHeartbeat("calling-PrismVPNStart")
 
+                // 物理网卡索引预缓存：Go 回调 prismProtectSocket 高频并发，
+                // 回调里只读原子缓存，系统调用全部收敛到启动期这一次
+                refreshPhysicalInterfaceIndex()
+
                 // PrismVPNStart 内部会同步回调 openTun，启动后台协程后立即返回
                 //（nil = 成功，非 nil = 错误字符串）
                 let errorPtr = sanitizedConfig.withCString { configPtr in
@@ -253,18 +256,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     let message = String(cString: errorPtr)
                     PrismKernelFree(errorPtr)
                     throw NSError(domain: "PrismVPN", code: 2, userInfo: [NSLocalizedDescriptionKey: message])
-                }
-
-                // 启动成功返回后复查状态：期间若已收到 stopTunnel（快速开关），
-                // vpnQueue 串行保证排队的 PrismVPNStop 必在其后执行，此时不能
-                // 再向系统报"启动成功"，否则 NESM 会在已停止的会话上苦等超时
-                self.stateLock.lock()
-                let stopping = (self.currentState == .stopping)
-                if !stopping { self.currentState = .running }
-                self.stateLock.unlock()
-                if stopping {
-                    NSLog("[PrismVPN] start finished after stop requested; skip completion(nil)")
-                    return
                 }
 
                 NSLog("[PrismVPN] PrismVPNStart succeeded, tunnel ready")
@@ -330,6 +321,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             DispatchQueue.main.async {
                 completionHandler()
             }
+            // 【build 150 根因 1 修复】干净退出：iOS 网络扩展进程结束任务后
+            // 系统通常保留进程对象一段时间，TrollStore 覆盖安装只杀主 App
+            // 不杀扩展——旧版 PrismVPN 进程会继续挂在 nesessionmanager 上，
+            // 占住 VPN 会话导致新版 startTunnel 根本不被拉起（Code=12 且
+            // hb=无）。completionHandler 之后显式 exit，杜绝僵尸进程
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                NSLog("[PrismVPN] stopTunnel completed, exiting cleanly")
+                exit(0)
+            }
         }
     }
 
@@ -365,10 +365,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         dnsSettings.matchDomains = [""]
         settings.dnsSettings = dnsSettings
 
-        // IPv4 地址与路由（build 149 方案）：强制全局默认路由，并排除
-        // 127.0.0.0/8 本地回环与局域网网段——排除回环确保主 App 访问
-        // 127.0.0.1 Clash API 绝不被 utun 劫持；注意不排除 172.16.0.0/12，
-        // 因为 utun 自身地址通常为 172.19.0.1/30
+        // IPv4 地址与路由（build 150 回退 build=147/148 已验证逻辑）：
+        // includedRoutes 按 Go 传入的 route_address 生成（空则全局默认）；
+        // 不再加 excludedRoutes（149 版对回环排除的猜测在实测中无必要，
+        // 且多余路由可能引发系统侧行为差异）
         var v4Addresses = prefixes(json["inet4_address"])
         if v4Addresses.isEmpty {
             v4Addresses = prefixes(json["address"])
@@ -380,19 +380,20 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             addresses: v4Addresses.map(\.address),
             subnetMasks: v4Addresses.map { subnetMask(prefix: $0.prefix) }
         )
-        ipv4.includedRoutes = [NEIPv4Route.default()]
-        ipv4.excludedRoutes = [
-            NEIPv4Route(destinationAddress: "127.0.0.0", subnetMask: "255.0.0.0"),
-            NEIPv4Route(destinationAddress: "10.0.0.0", subnetMask: "255.0.0.0"),
-            NEIPv4Route(destinationAddress: "192.168.0.0", subnetMask: "255.255.0.0"),
-            NEIPv4Route(destinationAddress: "169.254.0.0", subnetMask: "255.255.0.0"),
-            NEIPv4Route(destinationAddress: "224.0.0.0", subnetMask: "240.0.0.0"),
-            NEIPv4Route(destinationAddress: "255.255.255.255", subnetMask: "255.255.255.255"),
-        ]
+        let v4Routes = prefixes(json["inet4_route_address"])
+        if v4Routes.isEmpty {
+            ipv4.includedRoutes = [NEIPv4Route.default()]
+        } else {
+            ipv4.includedRoutes = v4Routes.map {
+                if $0.prefix <= 0 || $0.address == "0.0.0.0" {
+                    return NEIPv4Route.default()
+                }
+                return NEIPv4Route(destinationAddress: $0.address, subnetMask: subnetMask(prefix: $0.prefix))
+            }
+        }
         settings.ipv4Settings = ipv4
 
-        // IPv6：可选栈，仅有效前缀参与（sing-box 传 inet6_address 时启用；
-        // 全局默认路由 + protect socket 绑定物理网卡保证出站不回环）
+        // IPv6：可选栈，仅有效前缀参与（sing-box 传 inet6_address 时启用）
         let v6Addresses = prefixes(json["inet6_address"]).filter { !$0.address.isEmpty && $0.prefix > 0 }
         if !v6Addresses.isEmpty {
             let ipv6 = NEIPv6Settings(
@@ -481,11 +482,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         return matchedFd
     }
 
-    // MARK: - 配置路径、TUN 入站、出站网卡绑定与 DNS 死锁清洗
+    // MARK: - 配置清洗（保持 build=147/148 已验证连通的最小逻辑）
 
-    /// 配置清洗（扩展进程视角）：路径重定向 + TUN 入站适配 + DNS 死锁
-    /// 防护 + 出站物理网卡绑定，JSON 解析失败时原样返回（内核会给出
-    /// 更明确的错误）
+    /// 配置清洗：TUN 入站适配 + 路径重定向 + DNS "local"/"system" 替换。
+    /// build 150 严格回退：不再注入 dns detour（sing-box 新版对
+    /// "detour to an empty direct outbound makes no sense" 直接报错）、
+    /// 不再设置 default_interface（出站绑定完全由 prismProtectSocket
+    /// 按回调逐 socket 处理）。JSON 解析失败时原样返回
     private func sanitizeConfigForExtension(_ rawJSON: String, workDir: URL) -> String {
         guard let data = rawJSON.data(using: .utf8),
               var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -493,11 +496,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return rawJSON
         }
 
-        let physicalIf = findActivePhysicalInterface()
-
         // 0. tun 入站适配 iOS NetworkExtension：移除桌面端固定网卡名
-        //    （iOS 由系统分配 utunN）；strict_route 在 NE 下不支持；
-        //    开启 sniff 供分流/分析页识别域名；无 tun 入站时补默认
+        //    （iOS 由系统分配 utunN）；strict_route 在 NE 下不支持
         var inbounds = (root["inbounds"] as? [[String: Any]]) ?? []
         var hasTun = false
         for i in inbounds.indices {
@@ -507,7 +507,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 inbounds[i]["strict_route"] = false
                 inbounds[i]["auto_route"] = true
                 inbounds[i]["mtu"] = 1400
-                inbounds[i]["sniff"] = true
                 if inbounds[i]["inet4_address"] == nil && inbounds[i]["address"] == nil {
                     inbounds[i]["inet4_address"] = "172.19.0.1/30"
                 }
@@ -521,15 +520,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 "mtu": 1400,
                 "auto_route": true,
                 "strict_route": false,
-                "sniff": true,
             ], at: 0)
         }
         root["inbounds"] = inbounds
 
-        // 1. dns 死锁防护（build 149 方案）：任何 "local"/"system"/dhcp
-        //    DNS 都依赖 mDNSResponder——openTun 把系统 DNS 指向 utun 后
-        //    会形成「必须先连上节点才能解析节点域名」的死锁，替换为
-        //    直连公共 DNS
+        // 1. dns 死锁防护：任何 "local"/"system"/dhcp DNS 都依赖
+        //    mDNSResponder——openTun 把系统 DNS 指向 utun 后会形成
+        //    「必须先连上节点才能解析节点域名」的死锁，替换为直连
+        //    公共 DNS。注意：绝不注入 detour（build 149 教训）
         if var dns = root["dns"] as? [String: Any],
            var servers = dns["servers"] as? [[String: Any]]
         {
@@ -538,9 +536,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                    (addr == "local" || addr == "system" || addr.hasPrefix("dhcp"))
                 {
                     servers[i]["address"] = "223.5.5.5"
-                    if servers[i]["detour"] == nil {
-                        servers[i]["detour"] = "direct"
-                    }
+                    servers[i].removeValue(forKey: "detour")
                 }
                 if (servers[i]["type"] as? String) == "local" {
                     servers[i]["type"] = "udp"
@@ -577,14 +573,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             root["log"] = logObj
         }
 
-        // 4. route：开启 auto_detect_interface 并设 default_interface 为
-        //    当前物理网卡（sing-box 出站绑定，与 protect_socket 双保险）；
-        //    geoip/geosite/rule_set 本地路径重定向到 workDir
+        // 4. route：开启 auto_detect_interface（sing-box 自动跟踪默认路由
+        //    切换 Wi-Fi/蜂窝）；geoip/geosite/rule_set 本地路径重定向
         var route = (root["route"] as? [String: Any]) ?? [:]
         route["auto_detect_interface"] = true
-        if let physicalIf = physicalIf {
-            route["default_interface"] = physicalIf.name
-        }
         if var geoip = route["geoip"] as? [String: Any], geoip["path"] != nil {
             geoip["path"] = workDir.appendingPathComponent("geoip.db").path
             route["geoip"] = geoip
@@ -618,7 +610,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         else {
             return rawJSON
         }
-        NSLog("[PrismVPN] 配置清洗完成（tun/dns/cache_file/log/route→物理网卡绑定）")
+        NSLog("[PrismVPN] 配置清洗完成（tun/dns/cache_file/log/route）")
         return newText
     }
 
@@ -699,37 +691,39 @@ private func prismOpenTun(_ json: UnsafePointer<CChar>?) -> Int32 {
     return provider.openTun(optionsJSON: String(cString: json))
 }
 
-/// 关键修复（build 149 方案第 1 步）：将 sing-box 的所有出站 Socket 强制
-/// 绑定到物理网卡 (en0/pdp_ip0)，防止 openTun 设置 0.0.0.0/0 默认路由后
-/// 出站流量再次掉进 utun 造成死循环与全部节点超时
+/// 关键修复（build 149 方案）：将 sing-box 的所有出站 Socket 强制绑定到
+/// 物理网卡 (en0/pdp_ip0)，防止 openTun 设置 0.0.0.0/0 默认路由后出站
+/// 流量再次掉进 utun 造成死循环与全部节点超时。回调只读预缓存的网卡
+/// 索引（build 150：线程安全，无 getifaddrs 并发风暴）
 @_cdecl("prism_protect_socket")
 private func prismProtectSocket(_ fd: Int32) -> Int32 {
-    guard fd >= 0, let phy = findActivePhysicalInterface() else {
-        return 0
-    }
-    var idx = phy.index
+    guard fd >= 0 else { return 0 }
+    let idx = cachedPhysicalIfIndex
+    guard idx > 0 else { return 0 }
+
     let ipBoundIf: Int32 = 25     // IP_BOUND_IF
     let ipv6BoundIf: Int32 = 125  // IPV6_BOUND_IF
 
     // 按 socket 实际地址族选择绑定选项（未决 socket 回退双栈都绑）
     var addr = sockaddr_storage()
     var addrLen = socklen_t(MemoryLayout<sockaddr_storage>.size)
-    let detected: Int32 = withUnsafeMutablePointer(to: &addr) {
+    var family: Int32 = AF_UNSPEC
+    withUnsafeMutablePointer(to: &addr) {
         $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { ptr in
             if getsockname(fd, ptr, &addrLen) == 0 {
-                return Int32(ptr.pointee.sa_family)
+                family = Int32(ptr.pointee.sa_family)
             }
-            return AF_UNSPEC
         }
     }
 
-    if detected == AF_INET6 {
-        _ = setsockopt(fd, IPPROTO_IPV6, ipv6BoundIf, &idx, socklen_t(MemoryLayout<UInt32>.size))
-    } else if detected == AF_INET {
-        _ = setsockopt(fd, IPPROTO_IP, ipBoundIf, &idx, socklen_t(MemoryLayout<UInt32>.size))
+    var index = idx
+    if family == AF_INET6 {
+        _ = setsockopt(fd, IPPROTO_IPV6, ipv6BoundIf, &index, socklen_t(MemoryLayout<UInt32>.size))
+    } else if family == AF_INET {
+        _ = setsockopt(fd, IPPROTO_IP, ipBoundIf, &index, socklen_t(MemoryLayout<UInt32>.size))
     } else {
-        if setsockopt(fd, IPPROTO_IP, ipBoundIf, &idx, socklen_t(MemoryLayout<UInt32>.size)) != 0 {
-            _ = setsockopt(fd, IPPROTO_IPV6, ipv6BoundIf, &idx, socklen_t(MemoryLayout<UInt32>.size))
+        if setsockopt(fd, IPPROTO_IP, ipBoundIf, &index, socklen_t(MemoryLayout<UInt32>.size)) != 0 {
+            _ = setsockopt(fd, IPPROTO_IPV6, ipv6BoundIf, &index, socklen_t(MemoryLayout<UInt32>.size))
         }
     }
     return 0
