@@ -358,29 +358,53 @@ struct PrismHelperMain {
 /// 覆盖安装只杀主 App 不杀扩展，旧 PrismVPN 进程挂在 nesessionmanager
 /// 上但磁盘二进制已被新版覆盖，占住 VPN 会话导致新版 startTunnel 无法
 /// 被拉起（Code=12 且 hb=无）。
-/// iOS 无 Process/NSTask（macOS 专属）：用 libproc 枚举全部进程，
-/// 按可执行文件名匹配 PrismVPN 后 SIGKILL 清场。
+/// iOS 无 Process/NSTask（macOS 专属）；libproc 的 proc_listallpids/
+/// proc_pidpath 又未全部暴露进 iOS Swift Darwin overlay（18.5 SDK 实证
+/// cannot find in scope），故运行时 dlsym 加载 libproc，按可执行文件名
+/// 匹配 PrismVPN 后 SIGKILL 清场。
 private func runKillExt() {
     let target = "PrismVPN"
     let selfPid = getpid()
 
+    guard let lib = dlopen("/usr/lib/system/libproc.dylib", RTLD_LAZY) else {
+        print("result=killext err=dlopen")
+        fflush(stdout)
+        return
+    }
+    typealias ListAllPidsFn = @convention(c) (UnsafeMutableRawPointer?, Int32) -> Int32
+    typealias PidPathFn = @convention(c) (pid_t, UnsafeMutablePointer<CChar>?, UInt32) -> Int32
+    guard let listSym = dlsym(lib, "proc_listallpids"),
+          let pathSym = dlsym(lib, "proc_pidpath") else {
+        print("result=killext err=dlsym")
+        fflush(stdout)
+        return
+    }
+    let listAllPids = unsafeBitCast(listSym, to: ListAllPidsFn.self)
+    let pidPath = unsafeBitCast(pathSym, to: PidPathFn.self)
+
     // 第一次调用取进程数，多留 16 个余量再取全表（防竞态遗漏）
-    let total = proc_listallpids(nil, 0)
+    let total = listAllPids(nil, 0)
     guard total > 0 else {
         print("result=killext err=no-processes")
         fflush(stdout)
         return
     }
-    let cap = total + 16
+    let cap = Int(total) + 16
     var pids = [pid_t](repeating: 0, count: cap)
-    let count = proc_listallpids(&pids, Int32(MemoryLayout<pid_t>.stride * cap))
+    let bufBytes = Int32(cap * MemoryLayout<pid_t>.stride)
+    let count = pids.withUnsafeMutableBytes { raw -> Int32 in
+        listAllPids(raw.baseAddress, bufBytes)
+    }
 
     var killed = 0
     for i in 0..<max(Int(count), 0) {
         let pid = pids[i]
         guard pid > 0, pid != selfPid else { continue }
         var path = [CChar](repeating: 0, count: 4096)
-        guard proc_pidpath(pid, &path, 4096) > 0 else { continue }
+        let len = path.withUnsafeMutableBufferPointer { buf -> Int32 in
+            pidPath(pid, buf.baseAddress, 4096)
+        }
+        guard len > 0 else { continue }
         let execPath = String(cString: path)
         let execName = execPath.split(separator: "/").last.map(String.init) ?? ""
         if execName == target, kill(pid, SIGKILL) == 0 {
