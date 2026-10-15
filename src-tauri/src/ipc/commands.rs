@@ -556,7 +556,14 @@ pub async fn get_core_status(state: State<'_, AppState>) -> Result<CoreStatusDto
 
     Ok(CoreStatusDto {
         status: *state.status.read(),
-        mode: *state.mode.read(),
+        // iOS 配置生成强制 TUN 入站（config_builder），settings 里存的
+        // systemProxy 仅为桌面语义；上报 Tun 避免仪表盘误导显示
+        // 「运行模式 · 系统代理」（build 148）
+        mode: if cfg!(target_os = "ios") {
+            RunMode::Tun
+        } else {
+            *state.mode.read()
+        },
         uptime_secs,
         main_selector: state.main_selector.read().clone(),
     })

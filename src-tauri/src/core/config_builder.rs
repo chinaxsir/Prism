@@ -735,7 +735,15 @@ pub fn build(
         "route": {
             "rules": route_rules,
             "final": final_tag,
-            "auto_detect_interface": true
+            // iOS 扩展进程内必须关闭（build 148 方案）：auto_detect_interface
+            // 走 PF_ROUTE 读系统默认路由——扩展里默认路由就是自己的 utun，
+            // sing-box 会把全部出站（节点连接/DNS）绑定到 utun，形成出站
+            // 黑洞/回环：节点延迟测试全部超时、连接记录与流量全为 0、
+            // 无法代理上网（build 147 真机实证）。官方 SFI 靠注入
+            // PlatformInterface 自动排除 tun 接口，我们独立运行 libbox
+            // 没有该层；iOS 上扩展进程的出站流量由 NetworkExtension 系统
+            // 层自动路由到物理接口，无需（也不应）绑定任何接口
+            "auto_detect_interface": cfg!(not(target_os = "ios"))
         },
         "experimental": experimental
     });
