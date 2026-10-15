@@ -24,6 +24,12 @@ private var prismProviderRef: PacketTunnelProvider?
 /// 返回 nil / 沙盒拦截 group 容器）。startTunnel 读到 config_path 时设置
 private var resolvedSharedDirURL: URL?
 
+/// openTun 内部最近一次失败原因（build 146 方案）：由 failStart 拼接
+/// 输出，防止被 Go 侧笼统的 "platform open_tun failed" 覆盖；
+/// 最近心跳阶段用于 failStart 时保留精确卡点
+private var prismLastOpenTunError: String?
+private var prismLastHeartbeatStage = "init"
+
 /// 共享目录候选列表（按可靠度排序）：config_path 父目录 → group 容器
 /// → 用户 Preferences（无沙盒权限时的最后兜底）。心跳/错误对所有候选
 /// 逐一写入，哪个成功算哪个，主 App 侧同样多目录读取
@@ -49,6 +55,7 @@ private func writeSharedError(_ message: String) {
 }
 
 private func clearSharedError() {
+    prismLastOpenTunError = nil
     for dir in sharedDirURLs() {
         try? FileManager.default.removeItem(
             at: dir.appendingPathComponent("prism_error.txt")
@@ -57,6 +64,7 @@ private func clearSharedError() {
 }
 
 private func writeHeartbeat(_ stage: String) {
+    prismLastHeartbeatStage = stage
     let ts = Int(Date().timeIntervalSince1970)
     let text = "\(ts) \(stage)"
     for dir in sharedDirURLs() {
@@ -153,6 +161,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     under_extension: prismUnderExtension
                 )
                 PrismVPNSetCallbacks(callbacks)
+                writeHeartbeat("calling-PrismVPNStart")
 
                 // build 146 方案第 1 步：清洗配置中指向主 App 私有容器的
                 // 路径（Rust 生成配置时用主 App app_data_dir 作 cache_file
@@ -212,6 +221,24 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
               var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else {
             return rawJSON
+        }
+
+        // 0. tun 入站参数清洗（build 146 方案）：适配 iOS NetworkExtension——
+        //    移除桌面端固定网卡名（iOS 由系统分配 utunN，指定名会导致
+        //    openTun 后内核侧建接口失败）；strict_route 在 NE 下不支持；
+        //    mtu 规范为 1400（与 openTun 侧兜底一致）
+        if var inbounds = root["inbounds"] as? [[String: Any]] {
+            var changed = false
+            for i in inbounds.indices where (inbounds[i]["type"] as? String) == "tun" {
+                inbounds[i].removeValue(forKey: "interface_name")
+                inbounds[i]["strict_route"] = false
+                inbounds[i]["auto_route"] = true
+                inbounds[i]["mtu"] = 1400
+                changed = true
+            }
+            if changed {
+                root["inbounds"] = inbounds
+            }
         }
 
         // 1. experimental.cache_file.path → workDir/cache.db；
@@ -289,9 +316,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         stateLock.lock()
         currentState = .stopped
         stateLock.unlock()
-        writeSharedError(message)
-        writeHeartbeat("startFailed")
-        let err = NSError(domain: "PrismVPN", code: code, userInfo: [NSLocalizedDescriptionKey: message])
+        // build 146 方案：拼接 openTun 内部记录的具体原因（Go 的
+        // "platform open_tun failed" 只有笼统一句），并保留最近心跳阶段
+        var fullMessage = message
+        if let tunErr = prismLastOpenTunError, !tunErr.isEmpty {
+            fullMessage = "\(message) [openTun原因: \(tunErr)]"
+        }
+        writeSharedError(fullMessage)
+        writeHeartbeat("startFailed(\(prismLastHeartbeatStage))")
+        let err = NSError(domain: "PrismVPN", code: code, userInfo: [NSLocalizedDescriptionKey: fullMessage])
         DispatchQueue.main.async {
             completionHandler(err)
         }
@@ -339,38 +372,51 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         guard let data = optionsJSON.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            writeSharedError("openTun: JSON 解析失败")
+            prismLastOpenTunError = "optionsJSON 解析失败: \(optionsJSON.prefix(200))"
+            writeHeartbeat("tunJsonErr")
             return -1
         }
 
-        let mtu = (json["mtu"] as? NSNumber)?.int32Value ?? 9000
-        let dnsServer = json["dns_server"] as? String ?? ""
+        // build 146 方案：MTU 容错——Go 传 0/超大值时系统会直接拒绝，
+        // 规范到 [1280, 9000]，异常回退 1400
+        let rawMtu = (json["mtu"] as? NSNumber)?.int32Value ?? 1400
+        let mtu: Int32 = (rawMtu >= 1280 && rawMtu <= 9000) ? rawMtu : 1400
 
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
         settings.mtu = NSNumber(value: mtu)
 
-        if !dnsServer.isEmpty {
-            settings.dnsSettings = NEDNSSettings(servers: [dnsServer])
-        }
+        // DNS：matchDomains=[""] 才能全局接管系统 DNS；sing-box 传来的
+        // dns_server 为空时兜底公共 DNS，避免虚拟网卡无 DNS 栈
+        let dnsServer = json["dns_server"] as? String ?? ""
+        let cleanDNS = dnsServer.isEmpty ? "1.1.1.1" : dnsServer
+        let dnsSettings = NEDNSSettings(servers: [cleanDNS, "8.8.8.8"])
+        dnsSettings.matchDomains = [""]
+        settings.dnsSettings = dnsSettings
 
-        let v4Addresses = prefixes(json["inet4_address"])
-        if !v4Addresses.isEmpty {
-            let ipv4 = NEIPv4Settings(
-                addresses: v4Addresses.map(\.address),
-                subnetMasks: v4Addresses.map { subnetMask(prefix: $0.prefix) }
-            )
-            let v4Routes = prefixes(json["inet4_route_address"])
-            if v4Routes.isEmpty {
-                ipv4.includedRoutes = [NEIPv4Route.default()]
-            } else {
-                ipv4.includedRoutes = v4Routes.map {
-                    NEIPv4Route(destinationAddress: $0.address, subnetMask: subnetMask(prefix: $0.prefix))
+        // IPv4：地址为空时兜底 172.19.0.1/30，确保虚拟网卡必定激活 IPv4 栈
+        var v4Addresses = prefixes(json["inet4_address"])
+        if v4Addresses.isEmpty {
+            v4Addresses = [Prefix(address: "172.19.0.1", prefix: 30)]
+        }
+        let ipv4 = NEIPv4Settings(
+            addresses: v4Addresses.map(\.address),
+            subnetMasks: v4Addresses.map { subnetMask(prefix: $0.prefix) }
+        )
+        let v4Routes = prefixes(json["inet4_route_address"])
+        if v4Routes.isEmpty {
+            ipv4.includedRoutes = [NEIPv4Route.default()]
+        } else {
+            ipv4.includedRoutes = v4Routes.map {
+                if $0.prefix <= 0 || $0.address == "0.0.0.0" {
+                    return NEIPv4Route.default()
                 }
+                return NEIPv4Route(destinationAddress: $0.address, subnetMask: subnetMask(prefix: $0.prefix))
             }
-            settings.ipv4Settings = ipv4
         }
+        settings.ipv4Settings = ipv4
 
-        let v6Addresses = prefixes(json["inet6_address"])
+        // IPv6：可选栈，仅有效前缀参与
+        let v6Addresses = prefixes(json["inet6_address"]).filter { !$0.address.isEmpty && $0.prefix > 0 }
         if !v6Addresses.isEmpty {
             let ipv6 = NEIPv6Settings(
                 addresses: v6Addresses.map(\.address),
@@ -381,44 +427,81 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 ipv6.includedRoutes = [NEIPv6Route.default()]
             } else {
                 ipv6.includedRoutes = v6Routes.map {
-                    NEIPv6Route(destinationAddress: $0.address, networkPrefixLength: NSNumber(value: $0.prefix))
+                    if $0.prefix <= 0 || $0.address == "::" {
+                        return NEIPv6Route.default()
+                    }
+                    return NEIPv6Route(destinationAddress: $0.address, networkPrefixLength: NSNumber(value: $0.prefix))
                 }
             }
             settings.ipv6Settings = ipv6
         }
 
+        // 应用网络设置：10s 超时；若因 IPv6 格式问题失败，清掉 IPv6 栈
+        // 仅用 IPv4 重试一次（build 146 方案）
+        if let settingsError = applyNetworkSettingsSync(settings) {
+            settings.ipv6Settings = nil
+            if let retryError = applyNetworkSettingsSync(settings) {
+                prismLastOpenTunError = "setTunnelNetworkSettings失败: \(retryError)（原始错误: \(settingsError)）"
+                writeHeartbeat("tunSetErr")
+                return -1
+            }
+        }
+        writeHeartbeat("tun-ok")
+
+        // 取 packetFlow 文件描述符：iOS 16+ 上 KVC 路径（socket.fileDescriptor）
+        // 会返回 nil，需回退到 XNU 内核 utun 接口扫描（findTunnelFileDescriptor）
+        guard let fd = findTunnelFileDescriptor(), fd >= 0 else {
+            prismLastOpenTunError = "无法获取 utun 文件描述符（KVC 与 getsockopt 内核扫描均未命中）"
+            writeHeartbeat("tunFdFail")
+            return -1
+        }
+        NSLog("[PrismVPN] openTun succeeded, fd=\(fd)")
+        writeHeartbeat("tun-fd:\(fd)")
+        return fd
+    }
+
+    /// 同步应用虚拟网卡设置，10s 超时；返回 nil = 成功，非 nil = 错误描述
+    private func applyNetworkSettingsSync(_ settings: NEPacketTunnelNetworkSettings) -> String? {
         let semaphore = DispatchSemaphore(value: 0)
         var settingsError: Error?
         setTunnelNetworkSettings(settings) { error in
             settingsError = error
             semaphore.signal()
         }
+        if semaphore.wait(timeout: .now() + 10) == .timedOut {
+            return "10s超时"
+        }
+        return settingsError?.localizedDescription
+    }
 
-        let waitResult = semaphore.wait(timeout: .now() + 10)
-        if waitResult == .timedOut {
-            writeSharedError("openTun: setTunnelNetworkSettings 10s 超时")
-            writeHeartbeat("tunTimeout")
-            return -1
+    /// 获取 TUN 虚拟网卡文件描述符（build 146 方案核心）：
+    /// 1) KVC 路径在 iOS 16+ 重构后返回 nil；
+    /// 2) 回退扫描当前进程 FD 0...1024，用 getsockopt(fd, SYSPROTO_CONTROL,
+    ///    UTUN_OPT_IFNAME) 直接从 XNU 内核匹配 "utun*" 虚拟网卡——
+    ///    sing-box 官方 SFI 客户端的 LibboxGetTunnelFileDescriptor 同款兜底
+    private func findTunnelFileDescriptor() -> Int32? {
+        if let fd = (packetFlow.value(forKeyPath: "socket.fileDescriptor") as? Int32)
+            ?? (packetFlow.value(forKeyPath: "socket.socketDescriptor") as? Int32),
+           fd >= 0
+        {
+            return fd
         }
 
-        if let settingsError = settingsError {
-            writeSharedError("openTun: setTunnelNetworkSettings 失败: \(settingsError.localizedDescription)")
-            return -1
+        let sysprotoControl: Int32 = 2 // SYSPROTO_CONTROL
+        let utunOptIfname: Int32 = 2   // UTUN_OPT_IFNAME
+        var matchedFd: Int32?
+        for fd: Int32 in 0...1024 {
+            var buf = [CChar](repeating: 0, count: 64)
+            var len = socklen_t(buf.count)
+            let ret = getsockopt(fd, sysprotoControl, utunOptIfname, &buf, &len)
+            if ret == 0 && len > 0 {
+                let name = String(cString: buf)
+                if name.hasPrefix("utun") {
+                    matchedFd = fd
+                }
+            }
         }
-        writeHeartbeat("tun-ok")
-
-        let fd: Int32? = (
-            packetFlow.value(forKeyPath: "socket.fileDescriptor") as? Int32
-        ) ?? (
-            packetFlow.value(forKeyPath: "socket.socketDescriptor") as? Int32
-        )
-        guard let fd = fd, fd >= 0 else {
-            writeSharedError("openTun: 无法获取 packetFlow fileDescriptor")
-            writeHeartbeat("tunFdFail")
-            return -1
-        }
-        writeHeartbeat("tun-fd")
-        return fd
+        return matchedFd
     }
 
     private func copyGeoDatabases(to workDir: URL) throws {
@@ -459,14 +542,35 @@ private struct Prefix {
     let prefix: Int
 }
 
+/// 解析 "172.19.0.1/30" 形式的 CIDR 字符串
+private func parseCIDR(_ cidr: String) -> Prefix? {
+    let parts = cidr.split(separator: "/")
+    guard parts.count == 2, let prefix = Int(parts[1]) else { return nil }
+    return Prefix(address: String(parts[0]), prefix: prefix)
+}
+
+/// 地址前缀解析：支持 [{address, prefix}] 对象数组与 ["x.x.x.x/n"]
+/// 字符串数组（sing-box 不同版本 openTun options 格式存在差异，做双兼容）
 private func prefixes(_ raw: Any?) -> [Prefix] {
-    guard let array = raw as? [[String: Any]] else { return [] }
-    return array.compactMap { item in
-        guard let address = item["address"] as? String,
-              let prefix = item["prefix"] as? Int
-        else { return nil }
-        return Prefix(address: address, prefix: prefix)
+    if let array = raw as? [[String: Any]] {
+        return array.compactMap { item in
+            guard let address = item["address"] as? String else { return nil }
+            if let prefix = item["prefix"] as? Int {
+                return Prefix(address: address, prefix: prefix)
+            }
+            if let prefix = (item["prefix"] as? NSNumber)?.intValue {
+                return Prefix(address: address, prefix: prefix)
+            }
+            return parseCIDR(address)
+        }
     }
+    if let array = raw as? [String] {
+        return array.compactMap { parseCIDR($0) }
+    }
+    if let single = raw as? String {
+        return parseCIDR(single).map { [$0] } ?? []
+    }
+    return []
 }
 
 private func subnetMask(prefix: Int) -> String {
