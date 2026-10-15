@@ -500,12 +500,20 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - 配置清洗（保持 build=147/148 已验证连通的最小逻辑）
 
-    /// 配置清洗：TUN 入站适配 + 路径重定向 + DNS "local"/"system" 替换 +
-    /// 强制开启 box.log + 出站显式绑定物理网卡（build 154：bind_interface
-    /// 白名单 + default_interface，走拨号器第一分支不依赖平台回调；
-    /// auto_detect_interface 保持 true 作兜底——已核实无冲突校验）。
-    /// 不注入 dns detour（sing-box 新版对 "detour to an empty direct
-    /// outbound makes no sense" 直接报错）。JSON 解析失败时原样返回
+    /// 配置清洗（build 155 用户模板完整版）：
+    /// 1. tun 入站：开 sniff + sniff_override_destination（协议探测支撑
+    ///    DNS 劫持与 QUIC 屏蔽规则）
+    /// 2. 出站识别（dns/block/主代理组）+ bind_interface 白名单绑定
+    /// 3. DNS 整体重写：dns-remote = tcp://1.1.1.1 走主代理组（走 VLESS
+    ///    TCP，无 UDP 支持也能解析），dns-direct = 223.5.5.5 走 direct；
+    ///    出站自身域名解析（outbound any）固定走 dns-direct，杜绝
+    ///    「先连节点才能解析节点域名」死锁
+    /// 4. route：DNS 劫持（protocol dns / port 53）、QUIC 屏蔽（protocol
+    ///    quic / udp 443 → block）、私网直连规则置顶；auto_detect_interface
+    ///    关闭 + default_interface 显式绑定物理网卡
+    /// 5. experimental：cache_file.store_selected=false（禁用 cache.db
+    ///    恢复旧节点——实测系统重启后恢复了 months 前的 stale 节点）
+    /// 6. log 恒开 box.log
     private func sanitizeConfigForExtension(_ rawJSON: String, workDir: URL) -> String {
         guard let data = rawJSON.data(using: .utf8),
               var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -513,10 +521,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return rawJSON
         }
 
-        // 0. tun 入站适配 iOS NetworkExtension：移除桌面端固定网卡名
-        //    （iOS 由系统分配 utunN）；strict_route 在 NE 下不支持。
-        //    不强行修改 stack 字段（build 154 用户模板：防止未编译
-        //    gvisor 时报错）
+        let phyName = cachedPhysicalIfName
+
+        // 1. tun 入站适配 iOS NetworkExtension + 协议探测
         var inbounds = (root["inbounds"] as? [[String: Any]]) ?? []
         var hasTun = false
         for i in inbounds.indices {
@@ -526,6 +533,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 inbounds[i]["strict_route"] = false
                 inbounds[i]["auto_route"] = true
                 inbounds[i]["mtu"] = 1400
+                inbounds[i]["sniff"] = true
+                inbounds[i]["sniff_override_destination"] = true
                 if inbounds[i]["inet4_address"] == nil && inbounds[i]["address"] == nil {
                     inbounds[i]["inet4_address"] = "172.19.0.1/30"
                 }
@@ -539,71 +548,69 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 "mtu": 1400,
                 "auto_route": true,
                 "strict_route": false,
+                "sniff": true,
+                "sniff_override_destination": true,
             ], at: 0)
         }
         root["inbounds"] = inbounds
 
-        // 1. dns 死锁防护：任何 "local"/"system"/dhcp DNS 都依赖
-        //    mDNSResponder——openTun 把系统 DNS 指向 utun 后会形成
-        //    「必须先连上节点才能解析节点域名」的死锁，替换为直连
-        //    公共 DNS。注意：绝不注入 detour（build 149 教训）
-        if var dns = root["dns"] as? [String: Any],
-           var servers = dns["servers"] as? [[String: Any]]
-        {
-            for i in servers.indices {
-                if let addr = servers[i]["address"] as? String,
-                   (addr == "local" || addr == "system" || addr.hasPrefix("dhcp"))
-                {
-                    servers[i]["address"] = "223.5.5.5"
-                    servers[i].removeValue(forKey: "detour")
-                }
-                if (servers[i]["type"] as? String) == "local" {
-                    servers[i]["type"] = "udp"
-                    servers[i]["server"] = "223.5.5.5"
-                }
+        // 2. 出站识别 + 显式绑定物理网卡（白名单——策略组/伪出站不绑定）
+        var outbounds = (root["outbounds"] as? [[String: Any]]) ?? []
+        var dnsOutboundTag = "dns-out"
+        var blockOutboundTag = "block"
+        var mainProxyTag = ""
+        let realOutboundTypes: Set<String> = [
+            "direct", "vless", "vmess", "trojan", "shadowsocks",
+            "hysteria", "hysteria2", "tuic", "wireguard",
+            "http", "socks", "ssh", "anytls",
+        ]
+        for i in outbounds.indices {
+            let t = (outbounds[i]["type"] as? String) ?? ""
+            let tag = (outbounds[i]["tag"] as? String) ?? t
+            if t == "dns" && dnsOutboundTag == "dns-out" {
+                dnsOutboundTag = tag
+            } else if t == "block" && blockOutboundTag == "block" {
+                blockOutboundTag = tag
+            } else if t == "selector" && mainProxyTag.isEmpty {
+                mainProxyTag = tag
             }
-            dns["servers"] = servers
-            root["dns"] = dns
+            if realOutboundTypes.contains(t) {
+                outbounds[i]["bind_interface"] = phyName
+            }
         }
+        root["outbounds"] = outbounds
 
-        // 2. experimental.cache_file.path → workDir/cache.db；clash_api
-        //    移除 external_ui（扩展进程内无需下载/挂载 Web UI 静态目录）
-        if var experimental = root["experimental"] as? [String: Any] {
-            if var cacheFile = experimental["cache_file"] as? [String: Any] {
-                cacheFile["path"] = workDir.appendingPathComponent("cache.db").path
-                experimental["cache_file"] = cacheFile
-            }
-            if var clashAPI = experimental["clash_api"] as? [String: Any] {
-                clashAPI.removeValue(forKey: "external_ui")
-                clashAPI.removeValue(forKey: "external_ui_download_url")
-                experimental["clash_api"] = clashAPI
-            }
-            root["experimental"] = experimental
-        }
-
-        // 3. 强制开启 box.log 文件输出（即使原配置未设置 log.output 也要
-        //    写入，消除诊断 box=无；build 154 用户模板）
-        var logObj = (root["log"] as? [String: Any]) ?? [:]
-        logObj["disabled"] = false
-        logObj["level"] = "info"
-        logObj["output"] = workDir.appendingPathComponent("box.log").path
-        root["log"] = logObj
-
-        // 4. route + 出站显式绑定物理网卡（build 151 引入，build 154 保留）：
-        //    显式 bind_interface 走 sing-box 拨号器第一分支
-        //    （common/dialer/default.go: BindInterface != "" → control.
-        //    BindToInterface），不依赖 NetworkManager/平台回调——build 150
-        //    实测回调链路（auto_detect_interface → ProtectFunc）未生效，
-        //    出站全部掉回 utun 死循环（连 direct 都超时）。
-        //    已核实 sing-box 1.11.3 无 auto_detect_interface 与
-        //    default_interface/bind_interface 的冲突校验（仅与
-        //    network_strategy 冲突，未设置），可安全并存
-        let phyName = cachedPhysicalIfName
+        // 3. route：显式绑定 + DNS 劫持/QUIC 屏蔽/私网直连规则置顶
         var route = (root["route"] as? [String: Any]) ?? [:]
-        route["auto_detect_interface"] = true
+        // route.final 由 config_builder 指向主选择组，覆盖首 selector 识别
+        if let finalTag = route["final"] as? String, !finalTag.isEmpty {
+            mainProxyTag = finalTag
+        }
+        // 显式 bind_interface 走 sing-box 拨号器第一分支（已核实 1.11.3
+        // 无与 auto_detect_interface 的冲突校验）；这里按用户模板关闭
+        // auto_detect_interface，绑定完全由 bind_interface/default_interface
+        // 承担
+        route["auto_detect_interface"] = false
         if !phyName.isEmpty {
             route["default_interface"] = phyName
         }
+        var rules = (route["rules"] as? [[String: Any]]) ?? []
+        // 先移除生成器可能已写入的 DNS 劫持规则，避免重复
+        rules.removeAll { rule in
+            (rule["protocol"] as? [String])?.contains("dns") == true
+        }
+        let prependRules: [[String: Any]] = [
+            // DNS 劫持：协议探测命中的 DNS、任意端口 53 → dns-out 出站
+            ["protocol": ["dns"], "outbound": dnsOutboundTag],
+            ["port": 53, "outbound": dnsOutboundTag],
+            // QUIC 屏蔽：阻断 UDP 443 强制回落 TCP（VLESS 节点 UDP 支持不稳）
+            ["protocol": ["quic"], "outbound": blockOutboundTag],
+            ["port": 443, "network": "udp", "outbound": blockOutboundTag],
+            // 私网直连
+            ["ip_is_private": true, "outbound": "direct"],
+        ]
+        rules.insert(contentsOf: prependRules, at: 0)
+        route["rules"] = rules
         // geoip/geosite/rule_set 本地路径重定向
         if var geoip = route["geoip"] as? [String: Any], geoip["path"] != nil {
             geoip["path"] = workDir.appendingPathComponent("geoip.db").path
@@ -633,30 +640,68 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         root["route"] = route
 
-        // 5. 实际出站绑定物理网卡——白名单方式（build 154 用户模板）：
-        //    策略组/伪出站（selector/urltest/block/dns）不绑定，由其 final
-        //    链引用的真实出站自己绑定
-        if !phyName.isEmpty, var outbounds = root["outbounds"] as? [[String: Any]] {
-            let realOutboundTypes: Set<String> = [
-                "direct", "vless", "vmess", "trojan", "shadowsocks",
-                "hysteria", "hysteria2", "tuic", "wireguard",
-                "http", "socks", "ssh", "anytls",
+        // 4. DNS 整体重写（build 155 核心）：远端 DNS 走主代理组 TCP，
+        //    出站自身解析走直连 DNS，断网时不阻塞启动
+        if !mainProxyTag.isEmpty {
+            root["dns"] = [
+                "servers": [
+                    [
+                        "tag": "dns-remote",
+                        "address": "tcp://1.1.1.1",
+                        "detour": mainProxyTag,
+                        "strategy": "ipv4_only",
+                    ],
+                    [
+                        "tag": "dns-direct",
+                        "address": "223.5.5.5",
+                        "detour": "direct",
+                        "strategy": "ipv4_only",
+                    ],
+                ],
+                "rules": [
+                    // 出站自身的域名解析（节点服务器域名等）固定走直连 DNS
+                    ["outbound": "any", "server": "dns-direct"],
+                ],
+                "final": "dns-remote",
+                "strategy": "ipv4_only",
             ]
-            for i in outbounds.indices {
-                let t = (outbounds[i]["type"] as? String) ?? ""
-                if realOutboundTypes.contains(t) {
-                    outbounds[i]["bind_interface"] = phyName
-                }
-            }
-            root["outbounds"] = outbounds
+        } else {
+            // 无主代理组（纯直连场景）：DNS 全走直连
+            root["dns"] = [
+                "servers": [
+                    ["tag": "dns-direct", "address": "223.5.5.5", "detour": "direct"],
+                ],
+                "final": "dns-direct",
+                "strategy": "ipv4_only",
+            ]
         }
+
+        // 5. experimental：store_selected=false + 移除 external_ui
+        var experimental = (root["experimental"] as? [String: Any]) ?? [:]
+        var cacheFile = (experimental["cache_file"] as? [String: Any]) ?? [:]
+        cacheFile["path"] = workDir.appendingPathComponent("cache.db").path
+        cacheFile["store_selected"] = false
+        experimental["cache_file"] = cacheFile
+        if var clashAPI = experimental["clash_api"] as? [String: Any] {
+            clashAPI.removeValue(forKey: "external_ui")
+            clashAPI.removeValue(forKey: "external_ui_download_url")
+            experimental["clash_api"] = clashAPI
+        }
+        root["experimental"] = experimental
+
+        // 6. 强制开启 box.log 文件输出（消除诊断 box=无）
+        var logObj = (root["log"] as? [String: Any]) ?? [:]
+        logObj["disabled"] = false
+        logObj["level"] = "info"
+        logObj["output"] = workDir.appendingPathComponent("box.log").path
+        root["log"] = logObj
 
         guard let newData = try? JSONSerialization.data(withJSONObject: root),
               let newText = String(data: newData, encoding: .utf8)
         else {
             return rawJSON
         }
-        NSLog("[PrismVPN] 配置清洗完成（tun/dns/cache_file/log/route）")
+        NSLog("[PrismVPN] 配置清洗完成（tun+sniff/dns重写/route规则/绑定/store_selected=false/log）")
         return newText
     }
 

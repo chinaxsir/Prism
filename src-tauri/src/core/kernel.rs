@@ -854,6 +854,12 @@ async fn auto_select_best_proxy(api: &KernelApi) -> Result<()> {
 
     let (node, delay) = best.context("所有节点测速均超时，保持默认选择")?;
     api.select_proxy(&group, &node).await?;
+    // 切换后清理全部旧连接：否则已建立的连接继续走旧节点（cache.db
+    // store_selected=false 后无恢复问题，但运行中切换必须主动清，
+    // 与手动 select_proxy 命令行为一致——build 155）
+    if let Err(e) = api.close_all_connections().await {
+        tracing::warn!("自动选节点后清理旧连接失败: {e}");
+    }
     tracing::info!("自动选择节点: {node}（{delay}ms，组: {group}）");
     Ok(())
 }
