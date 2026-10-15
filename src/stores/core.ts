@@ -30,6 +30,8 @@ interface TrafficPoint {
 interface CoreState {
   status: CoreStatus;
   mode: RunMode;
+  /** 出站模式（规则/全局/直连），由 get_core_status / core://status 填充 */
+  outboundMode: OutboundMode;
   upSpeed: number;
   downSpeed: number;
   memoryUsage: number;
@@ -39,6 +41,7 @@ interface CoreState {
 
   setStatus: (s: CoreStatus) => void;
   setMode: (m: RunMode) => void;
+  setOutboundMode: (m: OutboundMode) => void;
   setTrafficRate: (up: number, down: number) => void;
   setMemoryUsage: (bytes: number) => void;
   setUptime: (secs: number) => void;
@@ -54,6 +57,7 @@ const MAX_POINTS = 60;
 export const useCoreStore = create<CoreState>((set, get) => ({
   status: "stopped",
   mode: "systemProxy",
+  outboundMode: "rule",
   upSpeed: 0,
   downSpeed: 0,
   memoryUsage: 0,
@@ -70,6 +74,7 @@ export const useCoreStore = create<CoreState>((set, get) => ({
 
   setStatus: (status) => set({ status }),
   setMode: (mode) => set({ mode }),
+  setOutboundMode: (outboundMode) => set({ outboundMode }),
   setTrafficRate: (upSpeed, downSpeed) => set({ upSpeed, downSpeed }),
   setMemoryUsage: (memoryUsage) => set({ memoryUsage }),
   setUptime: (uptimeSecs) => set({ uptimeSecs }),

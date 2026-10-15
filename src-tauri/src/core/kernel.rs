@@ -282,11 +282,49 @@ impl KernelHandle {
         }
 
         // 5. 订阅内核 WebSocket 数据流（traffic / connections / memory）
-        let stream_tasks = super::events::spawn_all(
+        let mut stream_tasks = super::events::spawn_all(
             &config.api_addr,
             &config.api_secret,
-            app_handle,
+            app_handle.clone(),
         );
+
+        // 6. iOS：VPN 唯一性实时监控（build 157 用户方案）。系统可在任意
+        // 时刻杀掉扩展进程/注销 VPN 会话（用户在系统设置关闭、其他 VPN
+        // 抢占、NESM 会话失效），Rust 状态必须实时跟随，否则前端一直显示
+        // "运行中"。轮询 Swift 导出的 C ABI prism_ios_vpn_is_connected
+        // （见 PrismTunnelController.swift @_cdecl），发现掉线：停掉本
+        // handle 的事件流任务 + 状态迁移（transition 内部自动广播
+        // core://status，前端对齐 UI）
+        #[cfg(target_os = "ios")]
+        {
+            let app = app_handle.clone();
+            stream_tasks.push(tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if crate::platform::ios::vpn_is_connected() {
+                        continue;
+                    }
+                    tracing::warn!("iOS VPN 连接已丢失，同步内核状态为 Stopped");
+                    let state = app.state::<crate::core::state::AppState>();
+                    // 仅 Running 时迁移；用户主动停止（Stopping/Stopped）
+                    // 期间检测到掉线属正常收尾，不重复处理
+                    if state
+                        .transition(crate::core::state::CoreStatus::Stopping)
+                        .is_ok()
+                    {
+                        // parking_lot 读守卫不能跨 await：clone 后立刻放锁
+                        let handle = state.kernel_handle.read().clone();
+                        if let Some(handle) = handle {
+                            let _ = handle.shutdown().await;
+                        }
+                        let _ =
+                            state.transition(crate::core::state::CoreStatus::Stopped);
+                        *state.started_at.write() = None;
+                    }
+                    break;
+                }
+            }));
+        }
 
         Ok(Self {
             config,
@@ -652,15 +690,36 @@ impl KernelApi {
         Ok(())
     }
 
-    /// 策略组整组测速：逐个节点调用 /proxies/{name}/delay 并汇总为 map。
+    /// 热切换出站模式：PATCH /configs {"mode": ...}（build 157 用户方案）。
+    /// sing-box 侧路由行为由 config 内 clash_mode 规则驱动，切换无需重启
+    pub async fn patch_mode(&self, mode: &str) -> Result<()> {
+        let resp = self
+            .client
+            .patch(format!("{}/configs", self.base))
+            .json(&serde_json::json!({ "mode": mode }))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("patch mode failed: HTTP {}", resp.status());
+        }
+        Ok(())
+    }
+
+    /// 策略组整组测速：并发（20 路）调用 /proxies/{name}/delay 并汇总为 map。
     /// 历史实现直接调用 /group/{name}/delay，但 sing-box 1.11.3 对该端点
     /// 只返回组本身的延迟（非成员 map），导致前端把全部节点标记为超时。
     /// 改为逐节点测速后，结果可靠且与 Clash API 响应格式一致。
+    ///
+    /// build 157 用户方案：串行 51 节点 × 5s 超时实测过慢（>2 分钟），
+    /// 改为 buffer_unordered(20) 并发 + 默认超时 2500ms；app 提供时逐结果
+    /// 推送 `url-test-update` 事件（delay=null 表示失败），前端实时刷新
+    /// 单节点延迟，无需等全部完成
     pub async fn group_url_test(
         &self,
         name: &str,
         url: Option<&str>,
         timeout_ms: Option<u32>,
+        app: Option<&AppHandle>,
     ) -> Result<serde_json::Value> {
         // 1. 先取组成员列表
         let group_info = self.get_proxy(name).await?;
@@ -679,36 +738,62 @@ impl KernelApi {
         }
 
         let test_url = url.unwrap_or("http://www.gstatic.com/generate_204");
-        let timeout = timeout_ms.unwrap_or(5000);
-        let mut results = serde_json::Map::new();
+        // 单节点超时强制 2500ms（build 157 用户方案）：并发 20 路下整体
+        // 耗时 ≈ ceil(节点数/20) × 2.5s；忽略调用方传入的更长超时
+        let timeout = timeout_ms.unwrap_or(2500).min(2500);
+        let group_tag = name.to_string();
 
-        for member in members {
-            let endpoint = format!("{}/proxies/{}/delay", self.base, member);
-            let req = self.client.get(&endpoint).query(&[
-                ("url", test_url.to_string()),
-                ("timeout", timeout.to_string()),
-            ]);
-            match req.send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    match resp.json::<serde_json::Value>().await {
-                        Ok(json) => {
-                            if let Some(delay) = json.get("delay").and_then(|d| d.as_u64()) {
-                                results.insert(member, serde_json::json!(delay));
-                            }
+        use futures_util::StreamExt;
+        let results: Vec<(String, Option<u64>)> = futures_util::stream::iter(members)
+            .map(|member| {
+                let endpoint = format!("{}/proxies/{}/delay", self.base, member);
+                let req = self.client.get(&endpoint).query(&[
+                    ("url", test_url.to_string()),
+                    ("timeout", timeout.to_string()),
+                ]);
+                let app = app.map(|a| a.clone());
+                let group_tag = group_tag.clone();
+                async move {
+                    let delay = match req.send().await {
+                        Ok(resp) if resp.status().is_success() => resp
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()
+                            .and_then(|j| j.get("delay").and_then(|d| d.as_u64())),
+                        Ok(resp) => {
+                            tracing::warn!("delay test {}: HTTP {}", member, resp.status());
+                            None
                         }
-                        Err(e) => tracing::warn!("parse delay for {}: {}", member, e),
+                        Err(e) => {
+                            tracing::warn!("delay test {}: {}", member, e);
+                            None
+                        }
+                    };
+                    if let Some(app) = app {
+                        use tauri::Emitter;
+                        let _ = app.emit(
+                            "url-test-update",
+                            serde_json::json!({
+                                "group": group_tag,
+                                "name": member,
+                                "delay": delay,
+                            }),
+                        );
                     }
+                    (member, delay)
                 }
-                Ok(resp) => {
-                    tracing::warn!("delay test {}: HTTP {}", member, resp.status());
-                }
-                Err(e) => {
-                    tracing::warn!("delay test {}: {}", member, e);
-                }
+            })
+            .buffer_unordered(20)
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut map = serde_json::Map::new();
+        for (member, delay) in results {
+            if let Some(d) = delay {
+                map.insert(member, serde_json::json!(d));
             }
         }
-
-        Ok(serde_json::Value::Object(results))
+        Ok(serde_json::Value::Object(map))
     }
 
     /// 获取当前规则列表

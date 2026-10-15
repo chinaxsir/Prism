@@ -13,6 +13,7 @@ import {
 import { useCoreStore } from "@/stores/core";
 import { toast } from "@/components/ui/Toast";
 import { delayClass, delayText, type Delay } from "@/utils/latency";
+import OutboundModeSwitch from "@/components/OutboundModeSwitch";
 import clsx from "clsx";
 
 interface DelaySample {
@@ -77,15 +78,31 @@ export default function Proxies() {
     getCoreStatus()
       .then((d) => {
         setMainSelectorName(d.mainSelector ?? "");
+        if (d.outboundMode) useCoreStore.getState().setOutboundMode(d.outboundMode);
         loadProxies(d.mainSelector ?? "");
       })
       .catch(() => loadProxies());
 
     const unStatus = listen("core://status", () => loadProxies());
     const unProxies = listen("proxies::changed", () => loadProxies());
+    // 测速增量事件：后端逐节点推送 { group, name, delay }（delay=null 为超时）。
+    // 仅应用与当前主选择组匹配的节点，测试中实时刷新延迟显示。
+    const unUrlTest = listen<{ group: string; name: string; delay: number | null }>(
+      "url-test-update",
+      (event) => {
+        const { group, name, delay } = event.payload;
+        if (group !== mainSelectorRef.current) return;
+        if (delay === null || delay <= 0) {
+          setFailed((f) => new Set(f).add(name));
+        } else {
+          setDelays((d) => ({ ...d, [name]: delay }));
+        }
+      }
+    );
     return () => {
       unStatus.then((fn) => fn());
       unProxies.then((fn) => fn());
+      unUrlTest.then((fn) => fn());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -207,6 +224,8 @@ export default function Proxies() {
       return;
     }
     setTesting(true);
+    // 清空上一轮失败标记：本轮结果由 url-test-update 增量事件与最终结果重建
+    setFailed(new Set());
     try {
       const result = (await urlTest(mainSelectorRef.current)) as Record<
         string,
@@ -279,6 +298,9 @@ export default function Proxies() {
 
   return (
     <div className="space-y-4">
+      {/* 出站模式快捷切换（位于页头之下、搜索/测速工具栏之上） */}
+      <OutboundModeSwitch />
+
       {/* 顶部工具栏：搜索 + 测速 */}
       <div className="flex items-center gap-2">
         <div className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg bg-surface-card border border-white/5">

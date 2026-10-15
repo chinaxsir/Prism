@@ -13,6 +13,9 @@ unsafe extern "C" {
     /// 返回 0 = 成功；负数 = 错误（具体错误在扩展/系统日志中）
     fn prism_ios_vpn_start(config_content: *const std::os::raw::c_char) -> i32;
     fn prism_ios_vpn_stop();
+    /// 返回 1 = 已连接/连接中；0 = 已断开/无效（Swift NEVPNStatus，
+    /// 见 PrismTunnelController.swift @_cdecl）
+    fn prism_ios_vpn_is_connected() -> i32;
 }
 
 pub fn start_tunnel(config_content: &str) -> Result<()> {
@@ -41,4 +44,11 @@ pub fn start_tunnel(config_content: &str) -> Result<()> {
 
 pub fn stop_tunnel() {
     unsafe { prism_ios_vpn_stop() }
+}
+
+/// VPN 会话是否仍存活（build 157 用户方案）：查询 Swift 侧缓存的
+/// NETunnelProviderManager connection.status。内核状态轮询据此把
+/// 系统侧已失效的会话同步为 Stopped
+pub fn vpn_is_connected() -> bool {
+    unsafe { prism_ios_vpn_is_connected() == 1 }
 }

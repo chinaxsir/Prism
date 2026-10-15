@@ -677,7 +677,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 "servers": [
                     [
                         "tag": "dns-remote",
-                        "address": "tcp://1.1.1.1",
+                        "address": "tcp://8.8.8.8",
                         "detour": mainProxyTag,
                         "strategy": "ipv4_only",
                     ],

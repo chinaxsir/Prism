@@ -512,28 +512,44 @@ pub fn build(
         .or(first_group_tag)
         .unwrap_or_else(|| "direct".into());
 
-    // 出站模式：规则=按订阅 MATCH 分流；全局=所有流量进 GLOBAL 选择组；直连=全部 direct
+    // 出站模式：规则=按订阅 MATCH 分流；全局=所有流量进 GLOBAL 选择组；直连=全部 direct。
+    // GLOBAL 组常驻生成（节点存在时）：sing-box 的 mode 不是内置路由开关，
+    // 热切换依赖 clash_mode 规则 + 运行中的 GLOBAL 组，见下方规则注入
+    if !node_tags.is_empty() {
+        let mut members = node_tags.clone();
+        members.push("direct".to_string());
+        let default = node_tags[0].clone();
+        outbounds.push(json!({
+            "type": "selector",
+            "tag": "GLOBAL",
+            "outbounds": members,
+            "default": default,
+        }));
+    } else if settings.outbound_mode == OutboundMode::Global {
+        warnings.push("全局模式需要至少一个节点，当前订阅无节点，回退为规则模式".into());
+    }
     let final_tag = match settings.outbound_mode {
         OutboundMode::Rule => rule_final,
         OutboundMode::Direct => "direct".to_string(),
         OutboundMode::Global => {
             if node_tags.is_empty() {
-                warnings.push("全局模式需要至少一个节点，当前订阅无节点，回退为规则模式".into());
+                // 无节点时 GLOBAL 组未生成，final 不能指向不存在的组
                 rule_final
             } else {
-                let mut members = node_tags.clone();
-                members.push("direct".to_string());
-                let default = node_tags[0].clone();
-                outbounds.push(json!({
-                    "type": "selector",
-                    "tag": "GLOBAL",
-                    "outbounds": members,
-                    "default": default,
-                }));
                 "GLOBAL".to_string()
             }
         }
     };
+
+    // clash_mode 热切换规则置顶（build 157 用户方案）：sing-box 的
+    // PATCH /configs {"mode": ...} 只改 clashServer.Mode() 字符串，路由
+    // 行为变化完全由 clash_mode 规则驱动（route/rule/rule_item_clash_mode.go:
+    // strings.EqualFold(clashServer.Mode(), r.mode)）。规则/直连模式回落
+    // 到原 final 链，无需重建配置即可热切换
+    if !node_tags.is_empty() {
+        route_rules.insert(0, json!({ "clash_mode": "global", "outbound": "GLOBAL" }));
+        route_rules.insert(1, json!({ "clash_mode": "direct", "outbound": "direct" }));
+    }
 
     // 阻止 QUIC：UDP/443 直接拦截，强制浏览器回退 TCP（规则链最前，优先级最高）
     if settings.block_quic {
@@ -1322,12 +1338,32 @@ fn group_to_outbound(
     let test_url = group.url.clone().unwrap_or_else(|| DEFAULT_TEST_URL.into());
 
     match group.kind.as_str() {
-        "select" | "Selector" => json!({
-            "type": "selector",
-            "tag": group.name,
-            "outbounds": refs,
-            "default": refs.first()
-        }),
+        "select" | "Selector" => {
+            // default 必须指向首个真实节点：部分订阅把 DIRECT 放在首位，
+            // 直接取 refs.first() 会让默认出站直连（实测 build 156 全局
+            // 模式下自动测速选中 direct）。direct/block 统一挪到队尾，
+            // default 取首个非 direct/block 成员（build 157 用户方案）
+            let mut ordered: Vec<Value> = Vec::with_capacity(refs.len());
+            let mut tail: Vec<Value> = Vec::new();
+            for r in refs {
+                if matches!(r.as_str(), Some("direct") | Some("block")) {
+                    tail.push(r);
+                } else {
+                    ordered.push(r);
+                }
+            }
+            ordered.extend(tail);
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".into(), json!("selector"));
+            obj.insert("tag".into(), json!(group.name));
+            obj.insert("outbounds".into(), Value::Array(ordered.clone()));
+            if let Some(default) = ordered.iter().find(|r| {
+                !matches!(r.as_str(), Some("direct") | Some("block"))
+            }) {
+                obj.insert("default".into(), default.clone());
+            }
+            Value::Object(obj)
+        }
         "url-test" | "URLTest" => json!({
             "type": "urltest",
             "tag": group.name,

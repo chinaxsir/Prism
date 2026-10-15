@@ -133,6 +133,7 @@ pub fn run() {
             ipc::commands::get_core_status,
             ipc::commands::set_mode,
             ipc::commands::url_test,
+            ipc::commands::set_outbound_mode,
             ipc::commands::select_proxy,
             ipc::commands::update_subscription,
             ipc::commands::list_subscriptions,

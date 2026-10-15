@@ -22,6 +22,7 @@ import {
 import { getCoreStatus, startCore, stopCore } from "@/api/ipc";
 import { useCoreStore, type RunMode } from "@/stores/core";
 import { formatBytes, formatSpeed, formatUptime } from "@/utils/format";
+import OutboundModeSwitch from "@/components/OutboundModeSwitch";
 
 const MODE_LABEL: Record<RunMode, string> = {
   systemProxy: "系统代理",
@@ -48,6 +49,7 @@ export default function Dashboard() {
   const sessionTraffic = useCoreStore((s) => s.sessionTraffic);
   const setStatus = useCoreStore((s) => s.setStatus);
   const setMode = useCoreStore((s) => s.setMode);
+  const setOutboundMode = useCoreStore((s) => s.setOutboundMode);
   const setTrafficRate = useCoreStore((s) => s.setTrafficRate);
   const setMemoryUsage = useCoreStore((s) => s.setMemoryUsage);
   const setUptime = useCoreStore((s) => s.setUptime);
@@ -98,6 +100,7 @@ export default function Dashboard() {
         setStatus(data.status);
         setMode(data.mode);
         setUptime(data.uptimeSecs);
+        if (data.outboundMode) setOutboundMode(data.outboundMode);
       })
       .catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -125,6 +128,9 @@ export default function Dashboard() {
   return (
     <div className="space-y-5">
       <h1 className="text-2xl font-bold">仪表盘</h1>
+
+      {/* 出站模式快捷切换（规则/全局/直连） */}
+      <OutboundModeSwitch />
 
       {/* Hero 状态卡（Shadowrocket 风格：满宽，左状态右按钮） */}
       <div

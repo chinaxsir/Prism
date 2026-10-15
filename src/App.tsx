@@ -9,7 +9,7 @@ import Dashboard from "@/pages/Dashboard";
 import Subscription from "@/pages/Subscription";
 import Analytics from "@/pages/Analytics";
 import Settings from "@/pages/Settings";
-import { useCoreStore, type CoreStatus, type RunMode } from "@/stores/core";
+import { useCoreStore, type CoreStatus, type OutboundMode, type RunMode } from "@/stores/core";
 import { useProStore } from "@/stores/pro";
 import { stopCore, type Entitlement } from "@/api/ipc";
 import ProxiesHub from "@/pages/ProxiesHub";
@@ -39,12 +39,14 @@ export default function App() {
       status: CoreStatus;
       mode: RunMode;
       uptimeSecs: number;
+      outboundMode?: OutboundMode;
     }>("core://status", (event) => {
-      const { status, mode, uptimeSecs } = event.payload;
+      const { status, mode, uptimeSecs, outboundMode } = event.payload;
       const store = useCoreStore.getState();
       store.setStatus(status);
       store.setMode(mode);
       store.setUptime(uptimeSecs);
+      if (outboundMode) store.setOutboundMode(outboundMode);
     });
     return () => {
       unlisten.then((fn) => fn());
@@ -74,7 +76,7 @@ export default function App() {
       <TitleBar />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        <main className="flex-1 overflow-y-auto p-6 pb-16 md:pb-6">
+        <main className="flex-1 overflow-y-auto px-6 pt-[calc(1.5rem+env(safe-area-inset-top))] pb-[calc(4rem+env(safe-area-inset-bottom))] md:pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
           <Routes>
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="/dashboard" element={<Dashboard />} />

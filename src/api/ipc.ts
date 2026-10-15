@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CoreStatus, RunMode, UserSettings } from "@/stores/core";
+import type { CoreStatus, OutboundMode, RunMode, UserSettings } from "@/stores/core";
 
 export const startCore = () => invoke<void>("start_core");
 export const stopCore = () => invoke<void>("stop_core");
@@ -12,10 +12,14 @@ export interface CoreStatusDto {
   uptimeSecs: number;
   /** 主选择组（route.final 链上最深的 selector；内核未运行时为 null） */
   mainSelector?: string | null;
+  /** 出站模式（规则/全局/直连） */
+  outboundMode?: OutboundMode;
 }
 
 export const getCoreStatus = () => invoke<CoreStatusDto>("get_core_status");
 export const setMode = (mode: RunMode) => invoke<void>("set_mode", { mode });
+export const setOutboundMode = (mode: OutboundMode) =>
+  invoke<void>("set_outbound_mode", { mode });
 
 export const urlTest = (group: string) =>
   invoke("url_test", { req: { group, url: null, timeoutMs: null } });

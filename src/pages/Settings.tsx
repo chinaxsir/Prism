@@ -23,10 +23,11 @@ import {
   getSettings,
   saveSettings,
   setMode,
+  setOutboundMode,
   type KernelInfo,
   type EntitlementState,
 } from "@/api/ipc";
-import type { RunMode, UserSettings } from "@/stores/core";
+import type { OutboundMode, RunMode, UserSettings } from "@/stores/core";
 import { useCoreStore } from "@/stores/core";
 import { OUTBOUND_MODES, RUN_MODES } from "@/constants/modes";
 import { ActivateProModal } from "@/components/ProGate";
@@ -75,6 +76,7 @@ const OUTBOUND_ICON: Record<string, typeof Globe> = {
 export default function Settings() {
   const [mode, setRunMode] = useState<RunMode>("systemProxy");
   const [modeBusy, setModeBusy] = useState(false);
+  const [outboundBusy, setOutboundBusy] = useState(false);
   const [form, setForm] = useState<UserSettings>({
     mixedPort: 2080,
     allowLan: false,
@@ -108,6 +110,11 @@ export default function Settings() {
       .then((data) => {
         setRunMode(data.mode);
         useCoreStore.getState().setMode(data.mode);
+        // 出站模式以内核当前状态为权威（热切换后与 settings.json 一致）
+        if (data.outboundMode) {
+          useCoreStore.getState().setOutboundMode(data.outboundMode);
+          setForm((f) => ({ ...f, outboundMode: data.outboundMode }));
+        }
       })
       .catch(() => undefined);
     getKernelInfo()
@@ -160,6 +167,27 @@ export default function Settings() {
       toast.error(String(e));
     } finally {
       setModeBusy(false);
+    }
+  };
+
+  /// 出站模式即时生效：乐观更新 → 调用 set_outbound_mode（保存并运行中热切换）
+  /// → 成功 toast；失败回滚表单与全局 store 并 toast 错误。
+  const chooseOutbound = async (m: OutboundMode) => {
+    if (outboundBusy || (form.outboundMode ?? "rule") === m) return;
+    const prev = form.outboundMode ?? "rule";
+    patch({ outboundMode: m });
+    useCoreStore.getState().setOutboundMode(m);
+    setOutboundBusy(true);
+    try {
+      await setOutboundMode(m);
+      toast.success("出站模式已切换");
+    } catch (e) {
+      console.error("set outbound mode failed:", e);
+      patch({ outboundMode: prev });
+      useCoreStore.getState().setOutboundMode(prev);
+      toast.error(`出站模式切换失败：${String(e)}`);
+    } finally {
+      setOutboundBusy(false);
     }
   };
 
@@ -379,9 +407,10 @@ export default function Settings() {
               return (
                 <button
                   key={m.key}
-                  onClick={() => patch({ outboundMode: m.key })}
+                  onClick={() => chooseOutbound(m.key)}
+                  disabled={outboundBusy}
                   className={clsx(
-                    "flex flex-col items-center gap-1 p-2.5 rounded-lg border transition-all",
+                    "flex flex-col items-center gap-1 p-2.5 rounded-lg border transition-all disabled:opacity-60",
                     active
                       ? "border-accent bg-accent/10"
                       : "border-white/5 hover:border-white/15"

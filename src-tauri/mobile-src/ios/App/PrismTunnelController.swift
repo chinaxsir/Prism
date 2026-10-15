@@ -150,6 +150,20 @@ func prismIosVpnStop() {
     semaphore.wait()
 }
 
+/// Rust 状态轮询用（platform/ios.rs vpn_is_connected，build 157 用户方案）：
+/// VPN 会话是否存活。系统可在任意时刻杀掉扩展/注销会话（系统设置关闭、
+/// 其他 VPN 抢占、NESM 会话失效），Rust 侧据此把状态同步为 Stopped，
+/// 避免 UI 永远显示"运行中"。连接中/已连接/重设中返回 1，其余 0
+@_cdecl("prism_ios_vpn_is_connected")
+func prismIosVpnIsConnected() -> Int32 {
+    switch PrismTunnelController.shared.currentConnectionStatus {
+    case .connected, .connecting, .reasserting:
+        return 1
+    default:
+        return 0
+    }
+}
+
 // MARK: - 控制器
 
 final class PrismTunnelController {
@@ -168,6 +182,12 @@ final class PrismTunnelController {
     /// 最近一次成功发起连接的 manager：看门狗判死后经它强制
     /// stopVPNTunnel 重置系统 VPN 状态（IPA.txt 主 App 端方案）
     private var activeManager: NETunnelProviderManager?
+
+    /// 当前 VPN 连接状态（Rust 经 C ABI prism_ios_vpn_is_connected 轮询，
+    /// build 157）：activeManager 未启动时视为 invalid
+    var currentConnectionStatus: NEVPNStatus {
+        activeManager?.connection.status ?? .invalid
+    }
 
     /// 巨魔看门狗定时器：连接成功后每 4s 轮询扩展心跳，
     /// 扩展被 Jetsam 静默强杀且系统丢弃断开通知时兜底判死
@@ -288,7 +308,9 @@ final class PrismTunnelController {
             }
         }
         guard let best = best else { return "无" }
-        let lines = best.text.split(separator: "\n").suffix(8)
+        // build 157 用户方案：拼入启动后的前 50 行（启动期错误都在开头，
+        // 后 8 行通常是 traffic 心跳刷屏）
+        let lines = best.text.split(separator: "\n").prefix(50)
         guard !lines.isEmpty else { return "空" }
         return lines.joined(separator: " | ")
     }

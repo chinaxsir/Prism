@@ -10,7 +10,7 @@ use crate::core::kernel::{
     KernelApi, KernelConfig, KernelHandle, check_config, generate_secret, probe_version,
 };
 use crate::core::license::EntitlementStatus;
-use crate::core::state::{AppState, CoreStatus, RunMode, UserSettings, is_port_free, pick_api_addr};
+use crate::core::state::{AppState, CoreStatus, OutboundMode, RunMode, UserSettings, is_port_free, pick_api_addr};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,6 +20,8 @@ pub struct CoreStatusDto {
     pub uptime_secs: u64,
     /// 主选择组（route.final 链上最深的 selector；内核未运行时为 None）
     pub main_selector: Option<String>,
+    /// 出站模式（规则/全局/直连；Dashboard/Proxies 快捷切换条数据源）
+    pub outbound_mode: OutboundMode,
 }
 
 /// 内核信息（设置页 / 下载向导用）
@@ -226,6 +228,21 @@ async fn apply_prepared(
     }
     *state.main_selector.write() = main;
 
+    // 出站模式同步（build 157）：内核启动后 Clash API 默认为 rule，用户
+    // 保存的全局/直连必须立即 PATCH 生效，否则显示与实际路由脱节
+    {
+        let mode_str = match state.settings.read().outbound_mode {
+            OutboundMode::Rule => "rule",
+            OutboundMode::Global => "global",
+            OutboundMode::Direct => "direct",
+        };
+        if mode_str != "rule" {
+            if let Err(e) = state.kernel_api().patch_mode(mode_str).await {
+                tracing::warn!("启动后同步出站模式失败: {e}");
+            }
+        }
+    }
+
     // TUN 模式下路由由内核 auto_route 接管；系统代理模式按用户设置写入系统代理
     if *state.mode.read() == RunMode::SystemProxy && settings.system_proxy {
         // 备份当前系统代理，确保停止时可恢复（代理独占：只有当前 APP 的设置生效）
@@ -418,7 +435,7 @@ async fn auto_select_fastest(api: &KernelApi, group: &str) -> anyhow::Result<Opt
     const GROUP_TYPES: [&str; 4] = ["Selector", "URLTest", "Fallback", "LoadBalance"];
     const BUILTIN_TAGS: [&str; 4] = ["direct", "block", "dns-out", "GLOBAL"];
 
-    let delays = api.group_url_test(group, None, Some(3000)).await?;
+    let delays = api.group_url_test(group, None, Some(2500), None).await?;
     let proxies = api.get_proxies().await?;
     let empty = serde_json::Map::new();
     let map = proxies
@@ -559,6 +576,7 @@ pub async fn get_core_status(state: State<'_, AppState>) -> Result<CoreStatusDto
         mode: *state.mode.read(),
         uptime_secs,
         main_selector: state.main_selector.read().clone(),
+        outbound_mode: state.settings.read().outbound_mode,
     })
 }
 
@@ -607,13 +625,47 @@ pub struct UrlTestRequest {
 #[tauri::command]
 pub async fn url_test(
     req: UrlTestRequest,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     state
         .kernel_api()
-        .group_url_test(&req.group, req.url.as_deref(), req.timeout_ms)
+        .group_url_test(&req.group, req.url.as_deref(), req.timeout_ms, Some(&app))
         .await
         .map_err(|e| e.to_string())
+}
+
+/// 出站模式热切换（build 157 用户方案）：立即保存设置；内核运行中经
+/// Clash API PATCH /configs {"mode": ...} 生效（config 内 clash_mode
+/// 规则驱动路由），无需重启内核。移除旧「先停 VPN 再保存」限制
+#[tauri::command]
+pub async fn set_outbound_mode(
+    mode: OutboundMode,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut snapshot = state.settings.read().clone();
+    snapshot.outbound_mode = mode;
+    state
+        .save_settings(snapshot)
+        .map_err(|e| format!("保存设置失败: {e}"))?;
+
+    if *state.status.read() == CoreStatus::Running {
+        let mode_str = match mode {
+            OutboundMode::Rule => "rule",
+            OutboundMode::Global => "global",
+            OutboundMode::Direct => "direct",
+        };
+        let api = state.kernel_api();
+        api.patch_mode(mode_str)
+            .await
+            .map_err(|e| format!("热切换出站模式失败: {e}"))?;
+        // 旧连接继续走旧出口直至自然结束，主动清理保证立即按新模式路由
+        let _ = api.close_all_connections().await;
+        use tauri::Emitter;
+        let _ = app.emit("outbound-mode://changed", mode_str);
+    }
+    Ok(())
 }
 
 #[tauri::command]
