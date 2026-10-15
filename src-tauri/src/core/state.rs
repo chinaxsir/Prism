@@ -103,6 +103,11 @@ impl Default for UserSettings {
             mixed_port: 2080,
             allow_lan: false,
             system_proxy: true,
+            // iOS 无桌面「系统代理」概念（build 149 方案第 2 步第 1 点）：
+            // 所有流量必须经 TUN 虚拟网卡接管，默认与恢复时统一归一 Tun
+            #[cfg(target_os = "ios")]
+            mode: RunMode::Tun,
+            #[cfg(not(target_os = "ios"))]
             mode: RunMode::SystemProxy,
             auto_start: false,
             outbound_mode: OutboundMode::Rule,
@@ -147,6 +152,11 @@ impl AppState {
     /// 创建状态并从 data_dir/settings.json 恢复用户设置（含运行模式）
     pub fn new(data_dir: PathBuf, app_handle: AppHandle) -> Self {
         let settings = super::store::load_settings(&data_dir);
+        // iOS 强制归一 TUN 模式：settings.json 里可能存有历史 systemProxy
+        //（build 149 方案第 2 步第 1 点）
+        #[cfg(target_os = "ios")]
+        let mode = RunMode::Tun;
+        #[cfg(not(target_os = "ios"))]
         let mode = settings.mode;
         Self {
             app_handle,

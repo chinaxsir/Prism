@@ -495,6 +495,18 @@ pub fn build(
         }
     }
 
+    // iOS 基础分流规则（build 149 方案第 2 步第 3 点）：内联规则虽已在
+    // 构建期丢弃，但「分析-规则统计/命中」与国内直连分流仍需要基础规则。
+    // 此处仅引用 geoip/geosite 数据库（数百字节，非内联展开，内存安全；
+    // Go 侧已启用 legacy GEOIP/GEOSITE 支持），置于自定义规则之后
+    #[cfg(target_os = "ios")]
+    {
+        route_rules.push(json!({ "geoip": "private", "outbound": "direct" }));
+        route_rules.push(json!({ "geosite": "cn", "outbound": "direct" }));
+        route_rules.push(json!({ "geoip": "cn", "outbound": "direct" }));
+        warnings.push("iOS 基础分流已启用：私有/国内网段与域名直连，其余走策略组".into());
+    }
+
     // 未显式 MATCH：优先全部订阅中的首个策略组，否则 direct
     let rule_final = final_tag
         .or(first_group_tag)
@@ -735,15 +747,7 @@ pub fn build(
         "route": {
             "rules": route_rules,
             "final": final_tag,
-            // iOS 扩展进程内必须关闭（build 148 方案）：auto_detect_interface
-            // 走 PF_ROUTE 读系统默认路由——扩展里默认路由就是自己的 utun，
-            // sing-box 会把全部出站（节点连接/DNS）绑定到 utun，形成出站
-            // 黑洞/回环：节点延迟测试全部超时、连接记录与流量全为 0、
-            // 无法代理上网（build 147 真机实证）。官方 SFI 靠注入
-            // PlatformInterface 自动排除 tun 接口，我们独立运行 libbox
-            // 没有该层；iOS 上扩展进程的出站流量由 NetworkExtension 系统
-            // 层自动路由到物理接口，无需（也不应）绑定任何接口
-            "auto_detect_interface": cfg!(not(target_os = "ios"))
+            "auto_detect_interface": true
         },
         "experimental": experimental
     });

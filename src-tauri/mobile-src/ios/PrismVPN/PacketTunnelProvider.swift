@@ -11,66 +11,77 @@
 //   completionHandler(nil)
 //   stopTunnel → 同一队列串行执行 PrismVPNStop（Go Close 同步回收）
 //   → stopped → completionHandler
+//
+// build 149 修复（VPN 已建立但无法上网/节点全超时/Clash API 无数据）：
+//   1. prism_protect_socket 真实现：出站 socket 绑定物理网卡
+//      （IP_BOUND_IF/IPV6_BOUND_IF），打破 utun 默认路由死循环
+//   2. sanitize：dns "local"/"system" → 223.5.5.5，防 mDNSResponder
+//      回环死锁（节点域名解析依赖已建立的隧道）
+//   3. openTun：excludedRoutes 排除 127.0.0.0/8 与局域网，保障主 App
+//      访问扩展内 Clash API（127.0.0.1）不被 utun 劫持
+//   4. sanitize：route.auto_detect_interface + default_interface 物理网卡
 
 import Foundation
 import NetworkExtension
+import Darwin
 
 private let prismAppGroupID = "group.com.prism.proxy"
 private var prismProviderRef: PacketTunnelProvider?
 
-/// 主 App 传入的 config_path 所在目录（build 145 方案）：主 App 把
-/// prism_config.json 写进这个目录，扩展能读到它就证明目录 100% 可读写，
-/// 是比 containerURL 更可靠的共享目录（containermanagerd 对扩展可能
-/// 返回 nil / 沙盒拦截 group 容器）。startTunnel 读到 config_path 时设置
-private var resolvedSharedDirURL: URL?
+// MARK: - 获取当前活跃的物理网卡 (en0 / pdp_ip0)，用于绑定出站 Socket 防止回环死锁
 
-/// openTun 内部最近一次失败原因（build 146 方案）：由 failStart 拼接
-/// 输出，防止被 Go 侧笼统的 "platform open_tun failed" 覆盖；
-/// 最近心跳阶段用于 failStart 时保留精确卡点
-private var prismLastOpenTunError: String?
-private var prismLastHeartbeatStage = "init"
-
-/// 共享目录候选列表（按可靠度排序）：config_path 父目录 → group 容器
-/// → 用户 Preferences（无沙盒权限时的最后兜底）。心跳/错误对所有候选
-/// 逐一写入，哪个成功算哪个，主 App 侧同样多目录读取
-private func sharedDirURLs() -> [URL] {
-    var urls: [URL] = []
-    if let resolved = resolvedSharedDirURL {
-        urls.append(resolved)
-    }
-    if let groupURL = FileManager.default.containerURL(
-        forSecurityApplicationGroupIdentifier: prismAppGroupID
-    ), !urls.contains(groupURL) {
-        urls.append(groupURL)
-    }
-    urls.append(URL(fileURLWithPath: "/private/var/mobile/Library/Preferences"))
-    return urls
+private struct PhysicalInterface {
+    let name: String
+    let index: UInt32
 }
 
-private func writeSharedError(_ message: String) {
-    for dir in sharedDirURLs() {
-        let url = dir.appendingPathComponent("prism_error.txt")
-        try? message.write(to: url, atomically: true, encoding: .utf8)
+private func findActivePhysicalInterface() -> PhysicalInterface? {
+    var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr else {
+        let fallbackIdx = if_nametoindex("en0")
+        return fallbackIdx > 0 ? PhysicalInterface(name: "en0", index: fallbackIdx) : nil
     }
-}
+    defer { freeifaddrs(ifaddrPtr) }
 
-private func clearSharedError() {
-    prismLastOpenTunError = nil
-    for dir in sharedDirURLs() {
-        try? FileManager.default.removeItem(
-            at: dir.appendingPathComponent("prism_error.txt")
-        )
-    }
-}
+    var wifiCandidate: PhysicalInterface?
+    var cellularCandidate: PhysicalInterface?
+    var otherCandidate: PhysicalInterface?
 
-private func writeHeartbeat(_ stage: String) {
-    prismLastHeartbeatStage = stage
-    let ts = Int(Date().timeIntervalSince1970)
-    let text = "\(ts) \(stage)"
-    for dir in sharedDirURLs() {
-        let url = dir.appendingPathComponent("prism_status.txt")
-        try? text.write(to: url, atomically: true, encoding: .utf8)
+    var ptr: UnsafeMutablePointer<ifaddrs>? = firstAddr
+    while let current = ptr {
+        let flags = Int32(current.pointee.ifa_flags)
+        let isUp = (flags & IFF_UP) != 0 && (flags & IFF_RUNNING) != 0
+        let isLoopback = (flags & IFF_LOOPBACK) != 0
+
+        if isUp && !isLoopback, let addr = current.pointee.ifa_addr {
+            let family = Int32(addr.pointee.sa_family)
+            if family == AF_INET || family == AF_INET6 {
+                let name = String(cString: current.pointee.ifa_name)
+                // 排除虚拟隧道网卡
+                if !name.hasPrefix("utun") && !name.hasPrefix("ipsec") && !name.hasPrefix("ppp")
+                    && !name.hasPrefix("llw") && !name.hasPrefix("awdl")
+                {
+                    let idx = if_nametoindex(name)
+                    if idx > 0 {
+                        if name == "en0" || name.hasPrefix("en") {
+                            if wifiCandidate == nil || name == "en0" {
+                                wifiCandidate = PhysicalInterface(name: name, index: idx)
+                            }
+                        } else if name.hasPrefix("pdp_ip") {
+                            if cellularCandidate == nil || name == "pdp_ip0" {
+                                cellularCandidate = PhysicalInterface(name: name, index: idx)
+                            }
+                        } else if otherCandidate == nil {
+                            otherCandidate = PhysicalInterface(name: name, index: idx)
+                        }
+                    }
+                }
+            }
+        }
+        ptr = current.pointee.ifa_next
     }
+
+    return wifiCandidate ?? cellularCandidate ?? otherCandidate
 }
 
 final class PacketTunnelProvider: NEPacketTunnelProvider {
@@ -90,14 +101,83 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private let stateLock = NSLock()
     private var heartbeatTimer: Timer?
 
+    /// 主 App 传入的 config_path 所在目录（build 145 方案）：主 App 把
+    /// prism_config.json 写进这个目录，扩展能读到它就证明目录 100% 可读写，
+    /// 是比 containerURL 更可靠的共享目录（containermanagerd 对扩展可能
+    /// 返回 nil / 沙盒拦截 group 容器）。startTunnel 读到 config_path 时设置
+    private var resolvedSharedDirURL: URL?
+
+    /// openTun 内部最近一次失败原因（build 146 方案）：由 failStart 拼接
+    /// 输出，防止被 Go 侧笼统的 "platform open_tun failed" 覆盖；
+    /// 最近心跳阶段用于 failStart 时保留精确卡点
+    private var lastOpenTunError: String?
+    private var lastHeartbeatStage = "init"
+
+    // MARK: - 共享目录与诊断写入
+
+    /// 共享目录候选列表（按可靠度排序）：config_path 父目录 → group 容器
+    /// → 用户 Preferences（无沙盒权限时的最后兜底）。心跳/错误对所有候选
+    /// 逐一写入，哪个成功算哪个，主 App 侧同样多目录读取
+    private func sharedDirURLs() -> [URL] {
+        var urls: [URL] = []
+        if let resolved = resolvedSharedDirURL {
+            urls.append(resolved)
+        }
+        if let groupURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: prismAppGroupID
+        ), !urls.contains(groupURL) {
+            urls.append(groupURL)
+        }
+        urls.append(URL(fileURLWithPath: "/private/var/mobile/Library/Preferences"))
+        return urls
+    }
+
+    private func writeSharedError(_ message: String) {
+        NSLog("[PrismVPN] ERROR: \(message)")
+        for dir in sharedDirURLs() {
+            let url = dir.appendingPathComponent("prism_error.txt")
+            try? message.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private func clearSharedError() {
+        lastOpenTunError = nil
+        for dir in sharedDirURLs() {
+            try? FileManager.default.removeItem(
+                at: dir.appendingPathComponent("prism_error.txt")
+            )
+        }
+    }
+
+    private func writeHeartbeat(_ stage: String) {
+        lastHeartbeatStage = stage
+        let ts = Int(Date().timeIntervalSince1970)
+        let text = "\(ts) \(stage)"
+        for dir in sharedDirURLs() {
+            let url = dir.appendingPathComponent("prism_status.txt")
+            try? text.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    // MARK: - 启动隧道
+
     override func startTunnel(
         options: [String: NSObject]?,
         completionHandler: @escaping (Error?) -> Void
     ) {
         prismProviderRef = self
-        NSLog("[PrismVPN] startTunnel begin")
         writeHeartbeat("start")
         clearSharedError()
+
+        // config_path 所在目录 = 主 App 写 prism_config.json 的目录，
+        // 能读到本文件就证明该目录可读写 → 作为共享目录首选
+        if let configPath = (protocolConfiguration as? NETunnelProviderProtocol)?
+            .providerConfiguration?["config_path"] as? String,
+           !configPath.isEmpty
+        {
+            resolvedSharedDirURL = URL(fileURLWithPath: configPath).deletingLastPathComponent()
+            writeHeartbeat("start-gotPath")
+        }
 
         stateLock.lock()
         if currentState != .stopped {
@@ -114,15 +194,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             .providerConfiguration?["config_path"] as? String,
            !configPath.isEmpty
         {
-            // config_path 所在目录 = 主 App 写 prism_config.json 的目录，
-            // 能读到本文件就证明该目录可读写 → 作为共享目录首选
-            resolvedSharedDirURL = URL(fileURLWithPath: configPath).deletingLastPathComponent()
-            writeHeartbeat("start-gotPath")
             do {
                 configText = try String(contentsOfFile: configPath, encoding: .utf8)
             } catch {
-                let msg = "无法读取共享配置文件: \(error.localizedDescription)"
-                failStart(code: 3, message: msg, completionHandler: completionHandler)
+                failStart(code: 3, message: "无法读取共享配置文件: \(error.localizedDescription)", completionHandler: completionHandler)
                 return
             }
         } else if let inlineConfig = (protocolConfiguration as? NETunnelProviderProtocol)?
@@ -135,13 +210,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         // 工作目录优先放 config_path 父目录（与主 App 读写路径 100% 一致，
-        // kernel.log/cache.db 主 App 侧诊断可见），group 容器兜底（build 138
-        // 实证扩展无沙盒 Documents，.documentDirectory 指向无权限目录）
-        let sharedDir = resolvedSharedDirURL
+        // kernel.log/cache.db 主 App 侧诊断可见），group 容器兜底
+        let baseDir = resolvedSharedDirURL
             ?? FileManager.default.containerURL(
-                forSecurityApplicationGroupIdentifier: prismAppGroupID
-            )
-        guard let workBase = sharedDir else {
+                forSecurityApplicationGroupIdentifier: prismAppGroupID)
+        guard let workBase = baseDir else {
             failStart(code: 3, message: "共享目录不可用（config_path 与 App Group 均不可用）", completionHandler: completionHandler)
             return
         }
@@ -153,7 +226,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
             do {
                 try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
-                try self.copyGeoDatabases(to: workDir)
+                try? self.copyGeoDatabases(to: workDir)
+
+                let sanitizedConfig = self.sanitizeConfigForExtension(configText, workDir: workDir)
 
                 let callbacks = prism_vpn_cbs(
                     open_tun: prismOpenTun,
@@ -161,14 +236,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     under_extension: prismUnderExtension
                 )
                 PrismVPNSetCallbacks(callbacks)
-                writeHeartbeat("calling-PrismVPNStart")
-
-                // build 146 方案第 1 步：清洗配置中指向主 App 私有容器的
-                // 路径（Rust 生成配置时用主 App app_data_dir 作 cache_file
-                // 等路径，build 145 实证扩展进程读它被 Seatbelt 拦截：
-                // initialize cache-file ... operation not permitted），
-                // 全部重定向到扩展可写的 workDir
-                let sanitizedConfig = self.sanitizeConfigForExtension(configText, workDir: workDir)
+                self.writeHeartbeat("calling-PrismVPNStart")
 
                 // PrismVPNStart 内部会同步回调 openTun，启动后台协程后立即返回
                 //（nil = 成功，非 nil = 错误字符串）
@@ -200,7 +268,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
 
                 NSLog("[PrismVPN] PrismVPNStart succeeded, tunnel ready")
-                writeHeartbeat("running")
+                self.writeHeartbeat("running")
                 DispatchQueue.main.async {
                     self.startHeartbeatTimer()
                     completionHandler(nil)
@@ -211,119 +279,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    /// 将配置中指向主 App 私有容器（/Containers/Data/Application/...）的
-    /// 路径统一重定向到扩展可写的 workDir，防止 sing-box 初始化
-    /// cache-file/log/external_ui/rule_set 时触发 operation not permitted
-    ///（build 145 实证 cache.db 是第一块沙盒铁板，此处一次性清完同类路径）。
-    /// JSON 解析失败时原样返回（内核会给出更明确的错误）
-    private func sanitizeConfigForExtension(_ rawJSON: String, workDir: URL) -> String {
-        guard let data = rawJSON.data(using: .utf8),
-              var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else {
-            return rawJSON
-        }
-
-        // 0. tun 入站参数清洗（build 146 方案）：适配 iOS NetworkExtension——
-        //    移除桌面端固定网卡名（iOS 由系统分配 utunN，指定名会导致
-        //    openTun 后内核侧建接口失败）；strict_route 在 NE 下不支持；
-        //    mtu 规范为 1400（与 openTun 侧兜底一致）
-        if var inbounds = root["inbounds"] as? [[String: Any]] {
-            var changed = false
-            for i in inbounds.indices where (inbounds[i]["type"] as? String) == "tun" {
-                inbounds[i].removeValue(forKey: "interface_name")
-                inbounds[i]["strict_route"] = false
-                inbounds[i]["auto_route"] = true
-                inbounds[i]["mtu"] = 1400
-                changed = true
-            }
-            if changed {
-                root["inbounds"] = inbounds
-            }
-        }
-
-        // 1. experimental.cache_file.path → workDir/cache.db；
-        //    clash_api 移除 external_ui（扩展进程内无需下载/挂载 Web UI
-        //    静态目录，避免 mkdir 权限报错）
-        if var experimental = root["experimental"] as? [String: Any] {
-            if var cacheFile = experimental["cache_file"] as? [String: Any] {
-                cacheFile["path"] = workDir.appendingPathComponent("cache.db").path
-                experimental["cache_file"] = cacheFile
-            }
-            if var clashAPI = experimental["clash_api"] as? [String: Any] {
-                clashAPI.removeValue(forKey: "external_ui")
-                clashAPI.removeValue(forKey: "external_ui_download_url")
-                experimental["clash_api"] = clashAPI
-            }
-            root["experimental"] = experimental
-        }
-
-        // 2. log.output → workDir/box.log（仅文件输出需要重定向）
-        if var logObj = root["log"] as? [String: Any],
-           let output = logObj["output"] as? String,
-           !output.isEmpty,
-           output != "stdout",
-           output != "stderr"
-        {
-            logObj["output"] = workDir.appendingPathComponent("box.log").path
-            root["log"] = logObj
-        }
-
-        // 3. route.geoip / route.geosite 本地路径 → workDir（geo 数据库
-        //    已由 copyGeoDatabases 拷入 workDir）
-        if var route = root["route"] as? [String: Any] {
-            if var geoip = route["geoip"] as? [String: Any], geoip["path"] != nil {
-                geoip["path"] = workDir.appendingPathComponent("geoip.db").path
-                route["geoip"] = geoip
-            }
-            if var geosite = route["geosite"] as? [String: Any], geosite["path"] != nil {
-                geosite["path"] = workDir.appendingPathComponent("geosite.db").path
-                route["geosite"] = geosite
-            }
-            // 4. local rule_set：主 App 私有容器内的 .srs 重定向到
-            //    workDir/rulesets/<文件名>（主 App 启动前已拷入共享目录）
-            if var ruleSets = route["rule_set"] as? [[String: Any]] {
-                var changed = false
-                for i in ruleSets.indices {
-                    if (ruleSets[i]["type"] as? String) == "local",
-                       let oldPath = ruleSets[i]["path"] as? String,
-                       oldPath.contains("/Containers/Data/Application/")
-                    {
-                        let fileName = (oldPath as NSString).lastPathComponent
-                        ruleSets[i]["path"] = workDir
-                            .appendingPathComponent("rulesets", isDirectory: true)
-                            .appendingPathComponent(fileName).path
-                        changed = true
-                    }
-                }
-                if changed {
-                    route["rule_set"] = ruleSets
-                }
-            }
-            root["route"] = route
-        }
-
-        guard let newData = try? JSONSerialization.data(withJSONObject: root),
-              let newText = String(data: newData, encoding: .utf8)
-        else {
-            return rawJSON
-        }
-        NSLog("[PrismVPN] 配置路径清洗完成（cache_file/log/geo/rule_set → workDir）")
-        return newText
-    }
-
     private func failStart(code: Int, message: String, completionHandler: @escaping (Error?) -> Void) {
-        NSLog("[PrismVPN] startTunnel failed: \(message)")
         stateLock.lock()
         currentState = .stopped
         stateLock.unlock()
         // build 146 方案：拼接 openTun 内部记录的具体原因（Go 的
         // "platform open_tun failed" 只有笼统一句），并保留最近心跳阶段
         var fullMessage = message
-        if let tunErr = prismLastOpenTunError, !tunErr.isEmpty {
+        if let tunErr = lastOpenTunError, !tunErr.isEmpty {
             fullMessage = "\(message) [openTun原因: \(tunErr)]"
         }
         writeSharedError(fullMessage)
-        writeHeartbeat("startFailed(\(prismLastHeartbeatStage))")
+        writeHeartbeat("startFailed(\(lastHeartbeatStage))")
         let err = NSError(domain: "PrismVPN", code: code, userInfo: [NSLocalizedDescriptionKey: fullMessage])
         DispatchQueue.main.async {
             completionHandler(err)
@@ -332,8 +299,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func startHeartbeatTimer() {
         heartbeatTimer?.invalidate()
-        let t = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { _ in
-            writeHeartbeat("alive")
+        let t = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            self?.writeHeartbeat("alive")
         }
         RunLoop.main.add(t, forMode: .common)
         heartbeatTimer = t
@@ -354,7 +321,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         vpnQueue.async { [weak self] in
             PrismVPNStop()
-            writeHeartbeat("stopped:\(reason.rawValue)")
+            self?.writeHeartbeat("stopped:\(reason.rawValue)")
             if let self = self {
                 self.stateLock.lock()
                 self.currentState = .stopped
@@ -366,13 +333,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    // MARK: - OpenTun（Go 回调进入）
+
     fileprivate func openTun(optionsJSON: String) -> Int32 {
         NSLog("[PrismVPN] openTun called with options: \(optionsJSON)")
         writeHeartbeat("openTun")
         guard let data = optionsJSON.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else {
-            prismLastOpenTunError = "optionsJSON 解析失败: \(optionsJSON.prefix(200))"
+            lastOpenTunError = "optionsJSON 解析失败: \(optionsJSON.prefix(200))"
             writeHeartbeat("tunJsonErr")
             return -1
         }
@@ -385,16 +354,25 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
         settings.mtu = NSNumber(value: mtu)
 
-        // DNS：matchDomains=[""] 才能全局接管系统 DNS；sing-box 传来的
-        // dns_server 为空时兜底公共 DNS，避免虚拟网卡无 DNS 栈
-        let dnsServer = json["dns_server"] as? String ?? ""
-        let cleanDNS = dnsServer.isEmpty ? "1.1.1.1" : dnsServer
+        // DNS：拦截全局 DNS 进入隧道由 sing-box 处理。matchDomains=[""]
+        // 才能全局接管系统 DNS；sing-box 传来的 dns_server 为空或 "local"
+        // 时兜底公共 DNS，避免虚拟网卡无 DNS 栈
+        let dnsServer = (json["dns_server"] as? String)
+            ?? ((json["dns_servers"] as? [String])?.first)
+            ?? "1.1.1.1"
+        let cleanDNS = (dnsServer.isEmpty || dnsServer == "local") ? "1.1.1.1" : dnsServer
         let dnsSettings = NEDNSSettings(servers: [cleanDNS, "8.8.8.8"])
         dnsSettings.matchDomains = [""]
         settings.dnsSettings = dnsSettings
 
-        // IPv4：地址为空时兜底 172.19.0.1/30，确保虚拟网卡必定激活 IPv4 栈
+        // IPv4 地址与路由（build 149 方案）：强制全局默认路由，并排除
+        // 127.0.0.0/8 本地回环与局域网网段——排除回环确保主 App 访问
+        // 127.0.0.1 Clash API 绝不被 utun 劫持；注意不排除 172.16.0.0/12，
+        // 因为 utun 自身地址通常为 172.19.0.1/30
         var v4Addresses = prefixes(json["inet4_address"])
+        if v4Addresses.isEmpty {
+            v4Addresses = prefixes(json["address"])
+        }
         if v4Addresses.isEmpty {
             v4Addresses = [Prefix(address: "172.19.0.1", prefix: 30)]
         }
@@ -402,20 +380,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             addresses: v4Addresses.map(\.address),
             subnetMasks: v4Addresses.map { subnetMask(prefix: $0.prefix) }
         )
-        let v4Routes = prefixes(json["inet4_route_address"])
-        if v4Routes.isEmpty {
-            ipv4.includedRoutes = [NEIPv4Route.default()]
-        } else {
-            ipv4.includedRoutes = v4Routes.map {
-                if $0.prefix <= 0 || $0.address == "0.0.0.0" {
-                    return NEIPv4Route.default()
-                }
-                return NEIPv4Route(destinationAddress: $0.address, subnetMask: subnetMask(prefix: $0.prefix))
-            }
-        }
+        ipv4.includedRoutes = [NEIPv4Route.default()]
+        ipv4.excludedRoutes = [
+            NEIPv4Route(destinationAddress: "127.0.0.0", subnetMask: "255.0.0.0"),
+            NEIPv4Route(destinationAddress: "10.0.0.0", subnetMask: "255.0.0.0"),
+            NEIPv4Route(destinationAddress: "192.168.0.0", subnetMask: "255.255.0.0"),
+            NEIPv4Route(destinationAddress: "169.254.0.0", subnetMask: "255.255.0.0"),
+            NEIPv4Route(destinationAddress: "224.0.0.0", subnetMask: "240.0.0.0"),
+            NEIPv4Route(destinationAddress: "255.255.255.255", subnetMask: "255.255.255.255"),
+        ]
         settings.ipv4Settings = ipv4
 
-        // IPv6：可选栈，仅有效前缀参与
+        // IPv6：可选栈，仅有效前缀参与（sing-box 传 inet6_address 时启用；
+        // 全局默认路由 + protect socket 绑定物理网卡保证出站不回环）
         let v6Addresses = prefixes(json["inet6_address"]).filter { !$0.address.isEmpty && $0.prefix > 0 }
         if !v6Addresses.isEmpty {
             let ipv6 = NEIPv6Settings(
@@ -436,22 +413,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             settings.ipv6Settings = ipv6
         }
 
-        // 应用网络设置：10s 超时；若因 IPv6 格式问题失败，清掉 IPv6 栈
-        // 仅用 IPv4 重试一次（build 146 方案）
+        // 应用网络配置到系统虚拟网卡：10s 超时；若因 IPv6 栈被系统拒绝，
+        // 清掉 IPv6 仅用 IPv4 重试一次（build 146 方案）
         if let settingsError = applyNetworkSettingsSync(settings) {
             settings.ipv6Settings = nil
             if let retryError = applyNetworkSettingsSync(settings) {
-                prismLastOpenTunError = "setTunnelNetworkSettings失败: \(retryError)（原始错误: \(settingsError)）"
+                lastOpenTunError = "setTunnelNetworkSettings失败: \(retryError)（原始错误: \(settingsError)）"
                 writeHeartbeat("tunSetErr")
                 return -1
             }
         }
         writeHeartbeat("tun-ok")
 
-        // 取 packetFlow 文件描述符：iOS 16+ 上 KVC 路径（socket.fileDescriptor）
+        // 取 utun 文件描述符：iOS 16+ 上 KVC 路径（socket.fileDescriptor）
         // 会返回 nil，需回退到 XNU 内核 utun 接口扫描（findTunnelFileDescriptor）
         guard let fd = findTunnelFileDescriptor(), fd >= 0 else {
-            prismLastOpenTunError = "无法获取 utun 文件描述符（KVC 与 getsockopt 内核扫描均未命中）"
+            lastOpenTunError = "无法获取 utun 文件描述符（KVC 与 getsockopt 内核扫描均未命中）"
             writeHeartbeat("tunFdFail")
             return -1
         }
@@ -487,8 +464,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return fd
         }
 
-        let sysprotoControl: Int32 = 2 // SYSPROTO_CONTROL
-        let utunOptIfname: Int32 = 2   // UTUN_OPT_IFNAME
+        let sysprotoControl: Int32 = 2  // SYSPROTO_CONTROL
+        let utunOptIfname: Int32 = 2    // UTUN_OPT_IFNAME
         var matchedFd: Int32?
         for fd: Int32 in 0...1024 {
             var buf = [CChar](repeating: 0, count: 64)
@@ -504,38 +481,173 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         return matchedFd
     }
 
+    // MARK: - 配置路径、TUN 入站、出站网卡绑定与 DNS 死锁清洗
+
+    /// 配置清洗（扩展进程视角）：路径重定向 + TUN 入站适配 + DNS 死锁
+    /// 防护 + 出站物理网卡绑定，JSON 解析失败时原样返回（内核会给出
+    /// 更明确的错误）
+    private func sanitizeConfigForExtension(_ rawJSON: String, workDir: URL) -> String {
+        guard let data = rawJSON.data(using: .utf8),
+              var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else {
+            return rawJSON
+        }
+
+        let physicalIf = findActivePhysicalInterface()
+
+        // 0. tun 入站适配 iOS NetworkExtension：移除桌面端固定网卡名
+        //    （iOS 由系统分配 utunN）；strict_route 在 NE 下不支持；
+        //    开启 sniff 供分流/分析页识别域名；无 tun 入站时补默认
+        var inbounds = (root["inbounds"] as? [[String: Any]]) ?? []
+        var hasTun = false
+        for i in inbounds.indices {
+            if (inbounds[i]["type"] as? String) == "tun" {
+                hasTun = true
+                inbounds[i].removeValue(forKey: "interface_name")
+                inbounds[i]["strict_route"] = false
+                inbounds[i]["auto_route"] = true
+                inbounds[i]["mtu"] = 1400
+                inbounds[i]["sniff"] = true
+                if inbounds[i]["inet4_address"] == nil && inbounds[i]["address"] == nil {
+                    inbounds[i]["inet4_address"] = "172.19.0.1/30"
+                }
+            }
+        }
+        if !hasTun {
+            inbounds.insert([
+                "type": "tun",
+                "tag": "tun-in",
+                "inet4_address": "172.19.0.1/30",
+                "mtu": 1400,
+                "auto_route": true,
+                "strict_route": false,
+                "sniff": true,
+            ], at: 0)
+        }
+        root["inbounds"] = inbounds
+
+        // 1. dns 死锁防护（build 149 方案）：任何 "local"/"system"/dhcp
+        //    DNS 都依赖 mDNSResponder——openTun 把系统 DNS 指向 utun 后
+        //    会形成「必须先连上节点才能解析节点域名」的死锁，替换为
+        //    直连公共 DNS
+        if var dns = root["dns"] as? [String: Any],
+           var servers = dns["servers"] as? [[String: Any]]
+        {
+            for i in servers.indices {
+                if let addr = servers[i]["address"] as? String,
+                   (addr == "local" || addr == "system" || addr.hasPrefix("dhcp"))
+                {
+                    servers[i]["address"] = "223.5.5.5"
+                    if servers[i]["detour"] == nil {
+                        servers[i]["detour"] = "direct"
+                    }
+                }
+                if (servers[i]["type"] as? String) == "local" {
+                    servers[i]["type"] = "udp"
+                    servers[i]["server"] = "223.5.5.5"
+                }
+            }
+            dns["servers"] = servers
+            root["dns"] = dns
+        }
+
+        // 2. experimental.cache_file.path → workDir/cache.db；clash_api
+        //    移除 external_ui（扩展进程内无需下载/挂载 Web UI 静态目录）
+        if var experimental = root["experimental"] as? [String: Any] {
+            if var cacheFile = experimental["cache_file"] as? [String: Any] {
+                cacheFile["path"] = workDir.appendingPathComponent("cache.db").path
+                experimental["cache_file"] = cacheFile
+            }
+            if var clashAPI = experimental["clash_api"] as? [String: Any] {
+                clashAPI.removeValue(forKey: "external_ui")
+                clashAPI.removeValue(forKey: "external_ui_download_url")
+                experimental["clash_api"] = clashAPI
+            }
+            root["experimental"] = experimental
+        }
+
+        // 3. log.output → workDir/box.log（仅文件输出需要重定向）
+        if var logObj = root["log"] as? [String: Any],
+           let output = logObj["output"] as? String,
+           !output.isEmpty,
+           output != "stdout",
+           output != "stderr"
+        {
+            logObj["output"] = workDir.appendingPathComponent("box.log").path
+            root["log"] = logObj
+        }
+
+        // 4. route：开启 auto_detect_interface 并设 default_interface 为
+        //    当前物理网卡（sing-box 出站绑定，与 protect_socket 双保险）；
+        //    geoip/geosite/rule_set 本地路径重定向到 workDir
+        var route = (root["route"] as? [String: Any]) ?? [:]
+        route["auto_detect_interface"] = true
+        if let physicalIf = physicalIf {
+            route["default_interface"] = physicalIf.name
+        }
+        if var geoip = route["geoip"] as? [String: Any], geoip["path"] != nil {
+            geoip["path"] = workDir.appendingPathComponent("geoip.db").path
+            route["geoip"] = geoip
+        }
+        if var geosite = route["geosite"] as? [String: Any], geosite["path"] != nil {
+            geosite["path"] = workDir.appendingPathComponent("geosite.db").path
+            route["geosite"] = geosite
+        }
+        if var ruleSets = route["rule_set"] as? [[String: Any]] {
+            var changed = false
+            for i in ruleSets.indices {
+                if (ruleSets[i]["type"] as? String) == "local",
+                   let oldPath = ruleSets[i]["path"] as? String,
+                   oldPath.contains("/Containers/Data/Application/")
+                {
+                    let fileName = (oldPath as NSString).lastPathComponent
+                    ruleSets[i]["path"] = workDir
+                        .appendingPathComponent("rulesets", isDirectory: true)
+                        .appendingPathComponent(fileName).path
+                    changed = true
+                }
+            }
+            if changed {
+                route["rule_set"] = ruleSets
+            }
+        }
+        root["route"] = route
+
+        guard let newData = try? JSONSerialization.data(withJSONObject: root),
+              let newText = String(data: newData, encoding: .utf8)
+        else {
+            return rawJSON
+        }
+        NSLog("[PrismVPN] 配置清洗完成（tun/dns/cache_file/log/route→物理网卡绑定）")
+        return newText
+    }
+
+    // MARK: - Geo 数据库
+
+    /// geo 数据库拷贝：扩展包 → 主 App 包兜底；可选资源缺失时仅跳过
+    /// 不阻断启动（内核真需要时 sing-box 会给出明确错误）
     private func copyGeoDatabases(to workDir: URL) throws {
-        // 主 App 包根目录兜底：appex 位于 <主App>/PlugIns/PrismVPN.appex，
-        // 上两级即主 App bundle（geo 数据库可能随主 App resources 分发）
-        let hostAppBundle = Bundle.main.bundleURL
+        let mainAppBundleURL = Bundle.main.bundleURL
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         for name in ["geoip.db", "geosite.db"] {
-            var src = Bundle.main.url(forResource: name, withExtension: nil)
-            if src == nil {
-                let hostPath = hostAppBundle.appendingPathComponent(name).path
-                if FileManager.default.fileExists(atPath: hostPath) {
-                    src = URL(fileURLWithPath: hostPath)
-                }
-            }
-            guard let src = src else {
-                // 【build 144 方案】缺 geo 数据库时跳过而非抛异常：
-                // 只有用户规则用到 geoip/geosite 时内核才需要它们；
-                // 因可选资源缺失直接 failStart 会把「配置根本不用 geo
-                // 规则」的正常场景也打死（启动成功率优先）。
-                // 若内核真需要而缺失，sing-box 会给出更明确的错误并
-                // 写入 prism_error.txt
-                NSLog("[PrismVPN] 扩展包与主 App 包均缺少 \(name)，跳过拷贝（未使用 geo 规则时无影响）")
-                continue
-            }
             let dst = workDir.appendingPathComponent(name)
             if FileManager.default.fileExists(atPath: dst.path) {
                 continue
             }
-            try FileManager.default.copyItem(at: src, to: dst)
+            if let src = Bundle.main.url(forResource: name, withExtension: nil) {
+                try? FileManager.default.copyItem(at: src, to: dst)
+            } else {
+                let fallbackSrc = mainAppBundleURL.appendingPathComponent(name)
+                if FileManager.default.fileExists(atPath: fallbackSrc.path) {
+                    try? FileManager.default.copyItem(at: fallbackSrc, to: dst)
+                }
+            }
         }
     }
 }
+
+// MARK: - 地址前缀解析
 
 private struct Prefix {
     let address: String
@@ -555,9 +667,6 @@ private func prefixes(_ raw: Any?) -> [Prefix] {
     if let array = raw as? [[String: Any]] {
         return array.compactMap { item in
             guard let address = item["address"] as? String else { return nil }
-            if let prefix = item["prefix"] as? Int {
-                return Prefix(address: address, prefix: prefix)
-            }
             if let prefix = (item["prefix"] as? NSNumber)?.intValue {
                 return Prefix(address: address, prefix: prefix)
             }
@@ -582,14 +691,47 @@ private func subnetMask(prefix: Int) -> String {
     return mask.map { String($0) }.joined(separator: ".")
 }
 
+// MARK: - Go C 回调（@_cdecl）
+
 @_cdecl("prism_open_tun")
 private func prismOpenTun(_ json: UnsafePointer<CChar>?) -> Int32 {
     guard let json = json, let provider = prismProviderRef else { return -1 }
     return provider.openTun(optionsJSON: String(cString: json))
 }
 
+/// 关键修复（build 149 方案第 1 步）：将 sing-box 的所有出站 Socket 强制
+/// 绑定到物理网卡 (en0/pdp_ip0)，防止 openTun 设置 0.0.0.0/0 默认路由后
+/// 出站流量再次掉进 utun 造成死循环与全部节点超时
 @_cdecl("prism_protect_socket")
 private func prismProtectSocket(_ fd: Int32) -> Int32 {
+    guard fd >= 0, let phy = findActivePhysicalInterface() else {
+        return 0
+    }
+    var idx = phy.index
+    let ipBoundIf: Int32 = 25     // IP_BOUND_IF
+    let ipv6BoundIf: Int32 = 125  // IPV6_BOUND_IF
+
+    // 按 socket 实际地址族选择绑定选项（未决 socket 回退双栈都绑）
+    var addr = sockaddr_storage()
+    var addrLen = socklen_t(MemoryLayout<sockaddr_storage>.size)
+    let detected: Int32 = withUnsafeMutablePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { ptr in
+            if getsockname(fd, ptr, &addrLen) == 0 {
+                return Int32(ptr.pointee.sa_family)
+            }
+            return AF_UNSPEC
+        }
+    }
+
+    if detected == AF_INET6 {
+        _ = setsockopt(fd, IPPROTO_IPV6, ipv6BoundIf, &idx, socklen_t(MemoryLayout<UInt32>.size))
+    } else if detected == AF_INET {
+        _ = setsockopt(fd, IPPROTO_IP, ipBoundIf, &idx, socklen_t(MemoryLayout<UInt32>.size))
+    } else {
+        if setsockopt(fd, IPPROTO_IP, ipBoundIf, &idx, socklen_t(MemoryLayout<UInt32>.size)) != 0 {
+            _ = setsockopt(fd, IPPROTO_IPV6, ipv6BoundIf, &idx, socklen_t(MemoryLayout<UInt32>.size))
+        }
+    }
     return 0
 }
 

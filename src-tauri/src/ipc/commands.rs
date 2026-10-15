@@ -556,14 +556,7 @@ pub async fn get_core_status(state: State<'_, AppState>) -> Result<CoreStatusDto
 
     Ok(CoreStatusDto {
         status: *state.status.read(),
-        // iOS 配置生成强制 TUN 入站（config_builder），settings 里存的
-        // systemProxy 仅为桌面语义；上报 Tun 避免仪表盘误导显示
-        // 「运行模式 · 系统代理」（build 148）
-        mode: if cfg!(target_os = "ios") {
-            RunMode::Tun
-        } else {
-            *state.mode.read()
-        },
+        mode: *state.mode.read(),
         uptime_secs,
         main_selector: state.main_selector.read().clone(),
     })
@@ -575,6 +568,12 @@ pub async fn set_mode(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    // iOS 强制 TUN 模式（build 149 方案）：不存在桌面端系统代理，
+    // 前端若仍传 SystemProxy 一律归一为 Tun
+    #[cfg(target_os = "ios")]
+    let mode = RunMode::Tun;
+    #[cfg(not(target_os = "ios"))]
+    let mode = mode;
     let prev = *state.mode.read();
     if prev == mode {
         return Ok(());
