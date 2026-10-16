@@ -390,25 +390,16 @@ async fn resolve_main_selector(api: &KernelApi, final_group: &str) -> Option<Str
     let proxies = api.get_proxies().await.ok()?;
     let map = proxies.get("proxies")?.as_object()?;
 
-    let mut current = final_group.to_string();
-    let mut visited = std::collections::HashSet::new();
-    loop {
-        // 防环（组互相引用）
-        if !visited.insert(current.clone()) {
-            return None;
-        }
-        let entry = map.get(&current)?;
-        if entry.get("type")?.as_str()? != "Selector" {
-            // final 直接指向 urltest/叶子：无可手选的 selector
-            return None;
-        }
-        let now = entry.get("now")?.as_str()?.to_string();
-        let now_entry = map.get(&now)?;
-        if now_entry.get("type")?.as_str()? == "Selector" {
-            current = now;
-            continue;
-        }
-        return Some(current);
+    // 顶层 selector 即主选择组（build 159 用户方案）：不再沿 now 下钻——
+    // 订阅顶层组默认选中地区子分组时，旧逻辑会把 main_selector 落到
+    // 只含少量节点的子分组，启动后节点列表从 49 个缩成 10 个。
+    // config_builder 已把全部真实节点合并进顶层组，这里直接返回 final
+    let entry = map.get(final_group)?;
+    if entry.get("type")?.as_str()? == "Selector" {
+        Some(final_group.to_string())
+    } else {
+        // final 直指 urltest/叶子：无可手选的 selector
+        None
     }
 }
 

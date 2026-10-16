@@ -3,12 +3,14 @@
 /** 0 = 超时；undefined = 未测速 */
 export type Delay = number | undefined;
 
-/** 延迟对应的状态色 class */
+/**
+ * 延迟对应的状态色 class（全站统一语义）：
+ * 未测速/超时 → 灰；<100ms → 绿；100–299ms → 黄；≥300ms → 红（橙红）。
+ */
 export function delayClass(delay: Delay): string {
-  if (delay === undefined) return "text-gray-500";
-  if (delay === 0) return "text-latency-bad";
-  if (delay < 200) return "text-latency-good";
-  if (delay < 500) return "text-latency-medium";
+  if (delay === undefined || delay === 0) return "text-gray-500";
+  if (delay < 100) return "text-latency-good";
+  if (delay < 300) return "text-latency-medium";
   return "text-latency-bad";
 }
 

@@ -30,7 +30,8 @@ interface ProState {
 
   init: () => Promise<void>;
   setEntitlement: (e: Entitlement) => void;
-  activate: (code: string, email: string) => Promise<boolean>;
+  /** email 可选：部分 License Key 激活时需邮箱校验 */
+  activate: (licenseKey: string, email?: string) => Promise<boolean>;
   refresh: () => Promise<void>;
   deactivate: () => Promise<void>;
 }
@@ -55,15 +56,23 @@ export const useProStore = create<ProState>((set) => ({
   setEntitlement: (e) =>
     set({ entitlement: e, unlocked: unlockedOf(e), error: null }),
 
-  activate: async (code, email) => {
+  activate: async (licenseKey, email) => {
     set({ busy: true, error: null });
     try {
-      const e = await activatePro(code, email);
+      // ipc.ts 的 activatePro 正在并行改造为 (licenseKey, email?)；
+      // 此处 email 兜底为空串，与旧签名 (code, email) 及新签名均兼容。
+      const e = await activatePro(licenseKey, email ?? "");
       set({ entitlement: e, unlocked: unlockedOf(e), busy: false });
       return unlockedOf(e);
     } catch (err) {
-      const message = typeof err === "string" ? err : "激活失败";
-      set({ busy: false, error: message });
+      // 保留完整错误文本（429 限流时含 retry_after，UI 需解析）
+      const message =
+        typeof err === "string"
+          ? err
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      set({ busy: false, error: message || "激活失败" });
       return false;
     }
   },

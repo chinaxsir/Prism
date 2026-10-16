@@ -22,20 +22,12 @@ import {
 import { getCoreStatus, startCore, stopCore } from "@/api/ipc";
 import { useCoreStore, type RunMode } from "@/stores/core";
 import { formatBytes, formatSpeed, formatUptime } from "@/utils/format";
+import { isMobile } from "@/pro/gating";
 import OutboundModeSwitch from "@/components/OutboundModeSwitch";
 
 const MODE_LABEL: Record<RunMode, string> = {
   systemProxy: "系统代理",
   tun: "TUN 全局",
-};
-
-// 平台检测：Tauri 内部 API 或 fallback
-const isMobile = () => {
-  try {
-    return navigator.userAgent.includes("Android") || navigator.userAgent.includes("iPhone") || navigator.userAgent.includes("iPad");
-  } catch {
-    return false;
-  }
 };
 
 export default function Dashboard() {
@@ -165,7 +157,7 @@ export default function Dashboard() {
                     ? "启动失败"
                     : "未连接"}
             </div>
-            <div className="text-2xl font-bold text-gray-100">
+            <div className="text-2xl font-bold tabular-nums text-gray-100">
               {running ? formatUptime(uptimeSecs) : "Prism"}
             </div>
             <div className="text-xs text-gray-500 mt-1">
@@ -234,7 +226,7 @@ export default function Dashboard() {
               <Activity size={13} className="text-latency-good" />
               下载
             </div>
-            <div className="text-xl font-bold text-latency-good mt-1.5 font-mono">
+            <div className="text-xl font-bold tabular-nums text-latency-good mt-1.5 font-mono">
               {running ? formatSpeed(downSpeed) : "—"}
             </div>
           </div>
@@ -243,7 +235,7 @@ export default function Dashboard() {
               <Activity size={13} className="text-accent" />
               上传
             </div>
-            <div className="text-xl font-bold text-accent mt-1.5 font-mono">
+            <div className="text-xl font-bold tabular-nums text-accent mt-1.5 font-mono">
               {running ? formatSpeed(upSpeed) : "—"}
             </div>
           </div>
@@ -327,7 +319,7 @@ function StatChip({
         {icon}
         <span>{label}</span>
       </div>
-      <div className="text-sm font-semibold text-gray-100 mt-1 truncate">
+      <div className="text-sm font-semibold tabular-nums text-gray-100 mt-1 truncate">
         {value}
       </div>
     </div>

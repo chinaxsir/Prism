@@ -577,26 +577,16 @@ pub fn build(
         }
     }
 
-    // 策略组之外的「游离节点」补入路由链末端的主选择组。
-    // 部分订阅 proxies 含大量节点，但 proxy-groups 只引用其中一小部分；
-    // 按组展示的客户端会让其余节点彻底「消失」（用户实例：51 节点只见 10 个）。
-    // 把未被任何组引用的节点追加到主选择组，保证每个节点可见/可选/可测速。
+    // 真实节点统一并入主选择组（build 159 用户方案）。
+    // 部分订阅把节点全部挂在地区子分组下：旧「仅补游离节点」规则会让
+    // 顶层组不含任何真实节点，启动后从 Clash API 拉到的主选择组只剩
+    // 子分组（用户实例：启动前 49 个节点，启动后只剩 10 个 CB 节点）。
+    // 顶层主选择组必须包含全部真实节点 tag，保证每个节点可见/可选/可测速。
     //
-    // 1) 统计被任意组引用的成员 tag
-    let mut referenced: HashSet<String> = HashSet::new();
-    for outbound in &outbounds {
-        if let Some(list) = outbound.get("outbounds").and_then(Value::as_array) {
-            for item in list {
-                if let Some(t) = item.as_str() {
-                    referenced.insert(t.to_string());
-                }
-            }
-        }
-    }
-
-    // 2) 定位主选择组：从 route.final 沿 selector 的 default（首个成员）链向下，
-    //    直到 default 不再是 selector（与 ipc::resolve_main_selector 逻辑一致，
-    //    但不依赖内核运行，基于构建期的确定性 default）。
+    // 1) 定位主选择组：route.final 直指的 selector（顶层组）。旧实现沿
+    //    首成员链下钻到最深 selector——顶层组默认选中地区子分组后，
+    //    main_selector 会落到只含少量节点的子分组，同样造成节点骤减。
+    //    final 非 selector（urltest/叶子）时沿成员链找第一个 selector 兜底。
     let mut main_group_tag: Option<String> = None;
     {
         let lookup =
@@ -608,42 +598,56 @@ pub fn build(
                 break;
             }
             let Some(group) = lookup(&current) else { break };
-            if group["type"].as_str() != Some("selector") {
+            if group["type"].as_str() == Some("selector") {
+                main_group_tag = Some(current);
                 break;
             }
-            let Some(first) = group
+            let Some(next) = group
                 .get("outbounds")
                 .and_then(|l| l.as_array())
                 .and_then(|l| l.first())
                 .and_then(|v| v.as_str())
+                .map(String::from)
             else {
                 break;
             };
-            let Some(first_ob) = lookup(first) else { break };
-            if first_ob["type"].as_str() == Some("selector") {
-                current = first.to_string();
-                continue;
-            }
-            main_group_tag = Some(current);
-            break;
+            current = next;
         }
     }
 
     match main_group_tag {
         Some(main_tag) => {
-            let uncovered: Vec<String> = node_tags
-                .iter()
-                .filter(|t| !referenced.contains(*t))
-                .cloned()
-                .collect();
-            if !uncovered.is_empty() {
-                if let Some(group) =
-                    outbounds.iter_mut().find(|o| o["tag"].as_str() == Some(main_tag.as_str()))
-                {
-                    if let Some(list) = group.get_mut("outbounds").and_then(Value::as_array_mut) {
-                        for t in uncovered {
-                            list.push(json!(t));
-                        }
+            if let Some(group) =
+                outbounds.iter_mut().find(|o| o["tag"].as_str() == Some(main_tag.as_str()))
+            {
+                let existing: Vec<String> = group
+                    .get("outbounds")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut merged = existing.clone();
+                for t in &node_tags {
+                    if !existing.contains(t) {
+                        merged.push(t.clone());
+                    }
+                }
+                group["outbounds"] = json!(merged);
+                // default 失效（指向 direct/block 或不在成员列表中）时
+                // 修正为首个真实节点
+                let default_valid = group
+                    .get("default")
+                    .and_then(Value::as_str)
+                    .map(|d| {
+                        d != "direct" && d != "block" && merged.iter().any(|m| m == d)
+                    })
+                    .unwrap_or(false);
+                if !default_valid {
+                    if let Some(first) = node_tags.first() {
+                        group["default"] = json!(first);
                     }
                 }
             }

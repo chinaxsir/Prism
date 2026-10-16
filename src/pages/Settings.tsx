@@ -33,6 +33,8 @@ import { OUTBOUND_MODES, RUN_MODES } from "@/constants/modes";
 import { ActivateProModal } from "@/components/ProGate";
 import { useProStore } from "@/stores/pro";
 import { toast } from "@/components/ui/Toast";
+import { isMobile } from "@/pro/gating";
+import Switch from "@/components/ui/Switch";
 import clsx from "clsx";
 
 const STATUS_META: Record<
@@ -50,15 +52,6 @@ function fmtDate(secs: number | null): string {
   if (!secs) return "—";
   return new Date(secs * 1000).toLocaleDateString();
 }
-
-const isMobile = () => {
-  try {
-    const ua = navigator.userAgent;
-    return ua.includes("Android") || ua.includes("iPhone") || ua.includes("iPad");
-  } catch {
-    return false;
-  }
-};
 
 /// 接入模式图标
 const RUN_MODE_ICON: Record<RunMode, typeof Wifi> = {
@@ -294,54 +287,57 @@ export default function Settings() {
         </div>
       </SettingsGroup>
 
-      {/* 接入模式 */}
-      <SettingsGroup
-        title="接入模式"
-        desc="决定流量如何进入 Prism（与下方出站模式互不影响）"
-      >
-        {runModes.map((m) => {
-          const Icon = RUN_MODE_ICON[m.key] ?? Wifi;
-          const active = mode === m.key;
-          return (
-            <button
-              key={m.key}
-              onClick={() => chooseMode(m.key)}
-              disabled={modeBusy}
-              className="w-full text-left disabled:opacity-60"
-            >
-              <Row
-                icon={
-                  <Icon size={16} className={active ? "text-accent" : "text-gray-400"} />
-                }
-                iconBg={active ? "bg-accent/10" : "bg-white/5"}
-                title={
-                  <span className="flex items-center gap-1.5">
-                    {m.title}
-                    {m.key === "tun" && tunGated && (
-                      <Lock size={12} className="text-accent" />
-                    )}
-                  </span>
-                }
-                value={active ? "已选" : ""}
-                chevron={!active}
-                valueClass={active ? "text-accent" : ""}
-              />
-            </button>
-          );
-        })}
-        {modeBusy && (
-          <div className="px-3 py-2 text-xs text-gray-400 border-t border-white/5">
-            正在切换模式（内核运行中将自动重启生效）…
-          </div>
-        )}
-        {!mobile && mode === "tun" && (
-          <div className="px-3 py-2.5 flex items-start gap-2 bg-yellow-500/5 text-yellow-400 text-xs border-t border-white/5">
-            <ShieldAlert size={14} className="mt-0.5 shrink-0" />
-            TUN 模式启动时若提示权限不足，请完全退出 Prism 后，右键选择
-            “以管理员身份运行”（macOS/Linux 使用 sudo 启动）。
-          </div>
-        )}
-      </SettingsGroup>
+      {/* 接入模式：iOS/Android 系统强制 TUN 接管，无切换意义，移动端不渲染 */}
+      {!mobile && (
+        <SettingsGroup
+          title="接入模式"
+          icon={<Wifi size={14} />}
+          desc="决定流量如何进入 Prism（与下方出站模式互不影响）"
+        >
+          {runModes.map((m) => {
+            const Icon = RUN_MODE_ICON[m.key] ?? Wifi;
+            const active = mode === m.key;
+            return (
+              <button
+                key={m.key}
+                onClick={() => chooseMode(m.key)}
+                disabled={modeBusy}
+                className="w-full text-left disabled:opacity-60"
+              >
+                <Row
+                  icon={
+                    <Icon size={16} className={active ? "text-accent" : "text-gray-400"} />
+                  }
+                  iconBg={active ? "bg-accent/10" : "bg-white/5"}
+                  title={
+                    <span className="flex items-center gap-1.5">
+                      {m.title}
+                      {m.key === "tun" && tunGated && (
+                        <Lock size={12} className="text-accent" />
+                      )}
+                    </span>
+                  }
+                  value={active ? "已选" : ""}
+                  chevron={!active}
+                  valueClass={active ? "text-accent" : ""}
+                />
+              </button>
+            );
+          })}
+          {modeBusy && (
+            <div className="px-3 py-2 text-xs text-gray-400 border-t border-white/5">
+              正在切换模式（内核运行中将自动重启生效）…
+            </div>
+          )}
+          {mode === "tun" && (
+            <div className="px-3 py-2.5 flex items-start gap-2 bg-yellow-500/5 text-yellow-400 text-xs border-t border-white/5">
+              <ShieldAlert size={14} className="mt-0.5 shrink-0" />
+              TUN 模式启动时若提示权限不足，请完全退出 Prism 后，右键选择
+              “以管理员身份运行”（macOS/Linux 使用 sudo 启动）。
+            </div>
+          )}
+        </SettingsGroup>
+      )}
 
       {/* 本地入站 */}
       <SettingsGroup title="本地入站" icon={<Network size={14} />}>
@@ -393,7 +389,11 @@ export default function Settings() {
       <SettingsGroup
         title="高级"
         icon={<Sliders size={14} />}
-        desc="出站模式决定流量最终走向，与接入模式互不影响"
+        desc={
+          mobile
+            ? "出站模式决定流量最终走向"
+            : "出站模式决定流量最终走向，与上方接入模式互不影响"
+        }
       >
         <div className="px-3 py-3 border-b border-white/5">
           <div className="flex items-center gap-3 mb-3">
@@ -603,20 +603,7 @@ function ToggleRow({
           <div className="text-[11px] text-gray-500 truncate">{desc}</div>
         </div>
       </div>
-      <button
-        onClick={() => onChange(!checked)}
-        className={clsx(
-          "relative w-11 h-6 rounded-full transition-colors shrink-0",
-          checked ? "bg-accent" : "bg-white/10"
-        )}
-      >
-        <span
-          className={clsx(
-            "absolute top-0.5 w-5 h-5 rounded-full bg-white transition-transform",
-            checked ? "translate-x-[22px]" : "translate-x-0.5"
-          )}
-        />
-      </button>
+      <Switch checked={checked} onChange={onChange} />
     </div>
   );
 }

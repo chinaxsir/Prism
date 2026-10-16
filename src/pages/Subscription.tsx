@@ -11,6 +11,7 @@ import {
 import { ActivateProModal } from "@/components/ProGate";
 import EmptyState from "@/components/ui/EmptyState";
 import Spinner from "@/components/ui/Spinner";
+import Switch from "@/components/ui/Switch";
 import { toast } from "@/components/ui/Toast";
 import { useProStore } from "@/stores/pro";
 import { formatRelativeTime } from "@/utils/time";
@@ -186,19 +187,11 @@ export default function Subscription() {
 
                 <div className="flex shrink-0 items-center gap-2">
                   {/* 启停开关：停用后该订阅不参与配置合并 */}
-                  <button
-                    onClick={() => handleToggle(record)}
-                    className={`relative h-5 w-9 rounded-full transition-colors ${
-                      record.enabled ? "bg-accent" : "bg-white/10"
-                    }`}
+                  <Switch
+                    checked={record.enabled}
+                    onChange={() => handleToggle(record)}
                     title={record.enabled ? "点击停用" : "点击启用"}
-                  >
-                    <span
-                      className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
-                        record.enabled ? "translate-x-[18px]" : "translate-x-0.5"
-                      }`}
-                    />
-                  </button>
+                  />
                   <button
                     onClick={() => handleUpdate(record)}
                     disabled={updatingUrl === record.url}

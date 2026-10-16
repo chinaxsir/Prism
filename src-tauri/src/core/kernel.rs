@@ -274,8 +274,18 @@ impl KernelHandle {
         #[cfg(target_os = "ios")]
         {
             let auto_api = api.clone();
+            // 主选择组 = route.final 直指 selector（与 resolve_main_selector
+            // 顶层语义一致，build 159）：不再取字母序第一个 selector——
+            // 那可能是只含少量节点的地区子分组
+            let final_group = config
+                .runtime_config
+                .get("route")
+                .and_then(|r| r.get("final"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = auto_select_best_proxy(&auto_api).await {
+                if let Err(e) = auto_select_best_proxy(&auto_api, &final_group).await {
                     tracing::warn!("自动选择节点失败: {e:#}");
                 }
             });
@@ -865,11 +875,12 @@ impl KernelApi {
 
 /// 自动测速并选择延迟最低的节点（build 150 新需求：APP 运行后自动选优，
 /// 用户可随后在 UI 手动指定节点覆盖）。
-/// 流程：取 /proxies → 找第一个 Selector 主选择组 → 并发对其真实节点测延迟
+/// 流程：取 /proxies → 定位主选择组（final 直指 selector，build 159；
+/// 找不到时回退第一个 Selector）→ 并发对其真实节点测延迟
 /// （排除内置出站与嵌套策略组，3 秒超时）→ 选最低者 select_proxy。
 /// 全部超时则放弃并保持默认选择，不影响启动流程。
 #[cfg(target_os = "ios")]
-async fn auto_select_best_proxy(api: &KernelApi) -> Result<()> {
+async fn auto_select_best_proxy(api: &KernelApi, final_group: &str) -> Result<()> {
     const TEST_URL: &str = "http://www.gstatic.com/generate_204";
     const TEST_TIMEOUT_MS: u32 = 3000;
     /// 内置出站与不可选择项（不做真实测速）
@@ -883,27 +894,42 @@ async fn auto_select_best_proxy(api: &KernelApi) -> Result<()> {
         .and_then(|p| p.as_object())
         .context("clash api 返回缺少 proxies 字段")?;
 
-    // 主选择组：第一个 Selector 类型的策略组
-    let (group, members) = map
-        .iter()
-        .find(|(_, v)| {
-            v.get("type")
+    // 主选择组：final 直指的 selector（build 159，与 resolve_main_selector
+    // 一致）；缺失/类型不符时回退第一个 Selector
+    let (group, members) = {
+        let is_selector = |name: &str| {
+            map.get(name)
+                .and_then(|v| v.get("type"))
                 .and_then(|t| t.as_str())
                 .is_some_and(|t| t.eq_ignore_ascii_case("selector"))
-        })
-        .map(|(name, v)| {
-            let all: Vec<String> = v
-                .get("all")
-                .and_then(|a| a.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|m| m.as_str().map(String::from))
-                        .collect()
+        };
+        let preferred = if !final_group.is_empty() && is_selector(final_group) {
+            Some(final_group.to_string())
+        } else {
+            None
+        };
+        let name = preferred.or_else(|| {
+            map.iter()
+                .find(|(_, v)| {
+                    v.get("type")
+                        .and_then(|t| t.as_str())
+                        .is_some_and(|t| t.eq_ignore_ascii_case("selector"))
                 })
-                .unwrap_or_default();
-            (name.clone(), all)
-        })
-        .context("未找到 Selector 策略组")?;
+                .map(|(name, _)| name.clone())
+        });
+        let name = name.context("未找到 Selector 策略组")?;
+        let all: Vec<String> = map
+            .get(&name)
+            .and_then(|v| v.get("all"))
+            .and_then(|a| a.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (name, all)
+    };
 
     // 只对真实节点测速：排除内置出站 + 嵌套策略组（含 all 成员列表的项）
     let nodes: Vec<String> = members
