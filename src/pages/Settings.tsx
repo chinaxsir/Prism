@@ -279,7 +279,7 @@ export default function Settings() {
         {/* 设备 ID：激活时与服务端绑定，点击复制 */}
         <button
           onClick={copyDeviceId}
-          className="w-full flex items-center justify-between gap-3 px-3 py-3 border-b border-white/5 text-left transition-colors hover:bg-surface-hover/40"
+          className="w-full flex items-center justify-between gap-3 overflow-hidden px-3 py-3 border-b border-white/5 text-left transition-colors hover:bg-surface-hover/40"
         >
           <span className="flex items-center gap-3 min-w-0">
             <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white/5">
@@ -293,7 +293,7 @@ export default function Settings() {
             </span>
           </span>
           <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-mono text-gray-400">
-            <span className="truncate">{deviceId ?? "生成中…"}</span>
+            <span className="max-w-[150px] truncate">{deviceId ?? "生成中…"}</span>
             <Copy size={12} className="shrink-0 text-gray-500" />
           </span>
         </button>
@@ -434,7 +434,7 @@ export default function Settings() {
 
       {/* 本地入站 */}
       <SettingsGroup title="本地入站" icon={<Network size={14} />}>
-        <div className="flex items-center justify-between px-3 py-3 border-b border-white/5">
+        <div className="flex items-center justify-between overflow-hidden px-3 py-3 border-b border-white/5">
           <div className="flex items-center gap-3">
             <RowIcon><Network size={16} className="text-gray-400" /></RowIcon>
             <div>
@@ -650,11 +650,11 @@ function Row({
   chevron?: boolean;
 }) {
   return (
-    <div className="flex items-center justify-between px-3 py-3 border-b border-white/5 last:border-0">
+    <div className="flex items-center justify-between gap-3 overflow-hidden px-3 py-3 border-b border-white/5 last:border-0">
       <div className="flex items-center gap-3 flex-1 min-w-0">
         <span
           className={clsx(
-            "flex h-7 w-7 items-center justify-center rounded-md",
+            "flex h-7 w-7 shrink-0 items-center justify-center rounded-md",
             iconBg ?? "bg-white/5"
           )}
         >
@@ -663,9 +663,9 @@ function Row({
         <div className="text-sm truncate">{title}</div>
       </div>
       {value !== undefined && value !== "" && (
-        <span className={clsx("text-xs text-gray-400", valueClass)}>{value}</span>
+        <span className={clsx("shrink-0 text-xs text-gray-400", valueClass)}>{value}</span>
       )}
-      {chevron && <ChevronRight size={14} className="text-gray-600 ml-2" />}
+      {chevron && <ChevronRight size={14} className="shrink-0 text-gray-600 ml-2" />}
     </div>
   );
 }
@@ -684,10 +684,10 @@ function ToggleRow({
   onChange: (v: boolean) => void;
 }) {
   return (
-    <div className="flex items-center justify-between px-3 py-3 border-b border-white/5 last:border-0">
+    <div className="flex items-center justify-between gap-3 overflow-hidden px-3 py-3 border-b border-white/5 last:border-0">
       <div className="flex items-center gap-3 flex-1 min-w-0">
         {icon && (
-          <span className="flex h-7 w-7 items-center justify-center rounded-md bg-white/5">
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white/5">
             {icon}
           </span>
         )}
