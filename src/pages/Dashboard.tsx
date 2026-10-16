@@ -1,13 +1,16 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Activity,
   Cpu,
   Gauge,
   Power,
-  Timer,
+  Globe,
   BarChart3,
+  X,
+  ChevronRight,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import clsx from "clsx";
 import {
   CartesianGrid,
   Legend,
@@ -19,16 +22,35 @@ import {
   YAxis,
 } from "recharts";
 
-import { getCoreStatus, startCore, stopCore } from "@/api/ipc";
+import {
+  getCoreStatus,
+  getProxyGroups,
+  selectProxy,
+  startCore,
+  stopCore,
+} from "@/api/ipc";
 import { useCoreStore, type RunMode } from "@/stores/core";
 import { formatBytes, formatSpeed, formatUptime } from "@/utils/format";
+import { delayClass, delayText } from "@/utils/latency";
 import { isMobile } from "@/pro/gating";
+import { toast } from "@/components/ui/Toast";
 import OutboundModeSwitch from "@/components/OutboundModeSwitch";
 
 const MODE_LABEL: Record<RunMode, string> = {
   systemProxy: "系统代理",
   tun: "TUN 全局",
 };
+
+/// 与节点页一致的组类型过滤：只保留真实节点
+const GROUP_TYPES = ["Selector", "URLTest", "Fallback", "LoadBalance"];
+
+interface ProxyEntry {
+  name: string;
+  type: string;
+  now?: string;
+  all?: Array<ProxyEntry | string>;
+  history?: Array<{ delay: number }>;
+}
 
 export default function Dashboard() {
   const status = useCoreStore((s) => s.status);
@@ -49,6 +71,13 @@ export default function Dashboard() {
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const mobile = isMobile();
+
+  // 当前节点状态：主选择组、当前选中节点名、可选节点列表、选择器弹窗
+  const [mainSelector, setMainSelector] = useState("");
+  const [currentNode, setCurrentNode] = useState("");
+  const [nodes, setNodes] = useState<ProxyEntry[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [selecting, setSelecting] = useState(false);
 
   const running = status === "running";
 
@@ -75,6 +104,47 @@ export default function Dashboard() {
       unlistenMemory.then((fn) => fn());
     };
   }, [setTrafficRate, setMemoryUsage, pushTraffic]);
+
+  // 拉取主选择组与当前节点（内核运行时才有实时数据）
+  const loadCurrentNode = async () => {
+    try {
+      const st = await getCoreStatus();
+      const group = st.mainSelector ?? "";
+      setMainSelector(group);
+      if (st.status !== "running" || !group) {
+        setCurrentNode("");
+        setNodes([]);
+        return;
+      }
+      const resp = (await getProxyGroups()) as {
+        proxies?: Record<string, ProxyEntry>;
+      };
+      const map = resp.proxies ?? {};
+      const g = map[group];
+      if (!g) return;
+      setCurrentNode(g.now ?? "");
+      setNodes(
+        (g.all ?? [])
+          .map((item) => (typeof item === "string" ? map[item] : item))
+          .filter((item): item is ProxyEntry => Boolean(item))
+          .filter((item) => !GROUP_TYPES.includes(item.type))
+      );
+    } catch {
+      /* 内核未运行 / API 未就绪：保持空态 */
+    }
+  };
+
+  // 当前节点随内核状态与节点变化刷新（启动自动选点、节点页手动切换）
+  useEffect(() => {
+    loadCurrentNode();
+    const unStatus = listen("core://status", () => loadCurrentNode());
+    const unProxies = listen("proxies://changed", () => loadCurrentNode());
+    return () => {
+      unStatus.then((fn) => fn());
+      unProxies.then((fn) => fn());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 本地运行时长计时
   useEffect(() => {
@@ -114,6 +184,40 @@ export default function Dashboard() {
       console.error("toggle core failed:", e);
       setStatus("error");
       setErrorMsg(String(e));
+    }
+  };
+
+  /// 节点最近一次延迟（无测速记录为 undefined）
+  const nodeDelay = (n: ProxyEntry): number | undefined =>
+    n.history && n.history.length > 0
+      ? n.history[n.history.length - 1].delay
+      : undefined;
+
+  /// 选择器列表：有延迟数据的按延迟从低到高，无数据保持原顺序靠后
+  const sortedNodes = useMemo(() => {
+    const delayOf = (n: ProxyEntry) => nodeDelay(n) ?? -1;
+    const measured = nodes
+      .filter((n) => (nodeDelay(n) ?? 0) > 0)
+      .sort((a, b) => delayOf(a) - delayOf(b));
+    const rest = nodes.filter((n) => !((nodeDelay(n) ?? 0) > 0));
+    return [...measured, ...rest];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes]);
+
+  /// 从仪表盘直接指定使用节点
+  const pickNode = async (name: string) => {
+    if (!mainSelector || selecting) return;
+    setSelecting(true);
+    try {
+      await selectProxy(mainSelector, name);
+      setCurrentNode(name);
+      setPickerOpen(false);
+      toast.success(`已切换节点：${name}`);
+    } catch (e) {
+      console.error("pick node failed:", e);
+      toast.error(`切换节点失败：${String(e)}`);
+    } finally {
+      setSelecting(false);
     }
   };
 
@@ -194,9 +298,10 @@ export default function Dashboard() {
       {/* 状态指标行（3 列） */}
       <div className="grid grid-cols-3 gap-3">
         <StatChip
-          icon={<Timer size={14} className="text-gray-400" />}
-          label="运行时长"
-          value={running ? formatUptime(uptimeSecs) : "—"}
+          icon={<Globe size={14} className="text-gray-400" />}
+          label="当前节点"
+          value={running ? currentNode || "未选择" : "—"}
+          onClick={running && nodes.length > 0 ? () => setPickerOpen(true) : undefined}
         />
         {mobile ? (
           <StatChip
@@ -300,6 +405,73 @@ export default function Dashboard() {
           </LineChart>
         </ResponsiveContainer>
       </div>
+
+      {/* 节点选择器弹窗：点击「当前节点」指标卡打开，按延迟从低到高排列 */}
+      {pickerOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          onClick={() => setPickerOpen(false)}
+        >
+          <div className="absolute inset-0 bg-black/60" />
+          <div
+            className="relative w-full max-w-md flex flex-col max-h-[70vh] rounded-2xl bg-surface-card border border-white/10 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-4 border-b border-white/5">
+              <div className="flex items-center gap-2 text-sm font-semibold text-gray-100">
+                <Globe size={15} className="text-accent" />
+                选择节点
+              </div>
+              <button
+                onClick={() => setPickerOpen(false)}
+                className="p-1 text-gray-500 hover:text-gray-200"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2">
+              {sortedNodes.map((n) => {
+                const d = nodeDelay(n);
+                const selected = currentNode === n.name;
+                return (
+                  <button
+                    key={n.name}
+                    onClick={() => pickNode(n.name)}
+                    disabled={selecting}
+                    className={clsx(
+                      "w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-left transition-colors",
+                      selected ? "bg-accent/10" : "hover:bg-white/[0.04]"
+                    )}
+                  >
+                    <span
+                      className={clsx(
+                        "shrink-0 w-1.5 h-1.5 rounded-full",
+                        selected ? "bg-accent" : "bg-transparent"
+                      )}
+                    />
+                    <span
+                      className={clsx(
+                        "flex-1 truncate text-sm",
+                        selected ? "text-gray-100 font-medium" : "text-gray-300"
+                      )}
+                    >
+                      {n.name}
+                    </span>
+                    <span
+                      className={clsx(
+                        "shrink-0 text-xs font-mono",
+                        delayClass(d)
+                      )}
+                    >
+                      {delayText(d)}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -308,16 +480,26 @@ function StatChip({
   icon,
   label,
   value,
+  onClick,
 }: {
   icon: ReactNode;
   label: string;
   value: string;
+  onClick?: () => void;
 }) {
   return (
-    <div className="bg-surface-card rounded-xl p-3 border border-white/5">
+    <div
+      onClick={onClick}
+      role={onClick ? "button" : undefined}
+      className={clsx(
+        "bg-surface-card rounded-xl p-3 border border-white/5",
+        onClick && "cursor-pointer hover:border-accent/40 transition-colors"
+      )}
+    >
       <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
         {icon}
         <span>{label}</span>
+        {onClick && <ChevronRight size={11} className="ml-auto text-gray-600" />}
       </div>
       <div className="text-sm font-semibold tabular-nums text-gray-100 mt-1 truncate">
         {value}

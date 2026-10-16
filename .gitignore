@@ -12,5 +12,9 @@ src-tauri/gen/android/app/.cxx
 src-tauri/gen/android/app/build
 src-tauri/gen/android/build
 src-tauri/binaries/
+# iOS c-archive 内核与 Android NDK 本地包装器均为构建产物，严禁入库
+src-tauri/ios-kernel/libprismkernel.a
+src-tauri/ios-kernel/libprismkernel.h
+fake-bin/
 *.log
 .DS_Store

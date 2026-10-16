@@ -7,10 +7,10 @@
 //! - 状态：GET /api/license/status?license_key=...
 //!   200 → {valid, plan, status, expires_at(ISO8601|null), max_seats, used_seats}
 //!
-//! 授权有效性策略：仅服务端确认 active 时解锁 Pro。每天首次启动 APP 时自动
-//! 与服务器同步一次并更新本地加密缓存；当天内授权信息只从该文件读取，不再
-//! 联网。当天首次同步失败（断网/服务不可达）立即锁定（status=offline），
-//! 恢复联网后自动重试。
+//! 授权有效性策略：每天首次启动 APP 时自动与服务器同步一次并更新本地加密
+//! 缓存；当天内授权信息只从该文件读取，不再联网。断网/服务不可达时不锁定：
+//! 授权信息从本地加密文件读取（active 且未过期则继续可用，缓存有效期已过
+//! 才降级为 expired），恢复联网后自动重试并以服务端结果修正。
 //!
 //! 本地缓存整体 AES-256-GCM 加密落盘（license.dat），密钥由设备 ID 派生：
 //! 拷走文件读不出 Key/邮箱/有效期，篡改密文解密即失败，防逆向与破解。
@@ -252,16 +252,21 @@ fn clear_cache(data_dir: &Path) {
 }
 
 /// 启动期从缓存恢复（不联网；当天有效性以后台每日同步为准）。
-/// 旧版缓存可能存有 grace（离线宽限）状态：该策略已移除，统一迁移为 offline 锁定。
+/// 旧版缓存可能存有 grace（离线宽限）/offline 状态：统一按当前策略映射——
+/// 未过期视为 active（离线可用），已过期则锁定为 expired。
 pub fn cached_entitlement(data_dir: &Path) -> EntitlementStatus {
-    load_cache(data_dir)
-        .map(|mut c| {
-            if c.entitlement.status == "grace" {
-                c.entitlement.status = "offline".into();
-            }
-            c.entitlement
-        })
-        .unwrap_or_else(EntitlementStatus::inactive)
+    cached_entitlement_opt(data_dir).unwrap_or_else(EntitlementStatus::inactive)
+}
+
+/// 同 cached_entitlement，但本地无缓存（未激活）时返回 None，
+/// 供后台周期任务区分「无缓存」与「缓存状态」，避免无意义的状态广播。
+pub fn cached_entitlement_opt(data_dir: &Path) -> Option<EntitlementStatus> {
+    load_cache(data_dir).map(|mut c| {
+        if matches!(c.entitlement.status.as_str(), "grace" | "offline") {
+            c.entitlement = offline_status(&c.entitlement);
+        }
+        c.entitlement
+    })
 }
 
 // ---------------- 服务端通信 ----------------
@@ -686,14 +691,21 @@ pub async fn daily_sync(
     }
 }
 
-/// 断网/服务不可达时的授权状态：立即锁定 Pro（status=offline），
-/// 保留方案信息（plan/kind/expires_at）供 UI 展示；恢复联网后每日同步自动重试。
+/// 断网/服务不可达时的授权状态：按用户策略从本地加密文件读取——
+/// 缓存授权仍有效（active/grace 且未过期）则继续可用（status=active）；
+/// 缓存有效期已过则锁定为 expired。恢复联网后每日同步自动以服务端结果修正。
 fn offline_status(prev: &EntitlementStatus) -> EntitlementStatus {
-    EntitlementStatus {
-        status: "offline".into(),
-        last_verified_at: prev.last_verified_at,
-        ..prev.clone()
+    let expired = prev
+        .expires_at
+        .map(|exp| exp <= now_secs())
+        .unwrap_or(false);
+    let mut next = prev.clone();
+    if expired {
+        next.status = "expired".into();
+    } else if matches!(next.status.as_str(), "grace" | "offline") {
+        next.status = "active".into();
     }
+    next
 }
 
 /// 移动端商店收据上报（购买/恢复购买后调用）。

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Zap, Gauge, RefreshCw, ChevronRight, Search } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { Link } from "react-router-dom";
@@ -66,7 +66,7 @@ export default function Proxies() {
   const [keyword, setKeyword] = useState("");
 
   // 用 ref 保存最新值，避免 useEffect([]) 闭包捕获到初始值（stale closure）。
-  // loadProxies 由 core://status / proxies::changed 事件触发，必须读到最新状态。
+  // loadProxies 由 core://status / proxies://changed 事件触发，必须读到最新状态。
   const coreStatusRef = useRef(coreStatus);
   const mainSelectorRef = useRef(mainSelectorName);
   const userTouchedRef = useRef(userTouched);
@@ -83,8 +83,10 @@ export default function Proxies() {
       })
       .catch(() => loadProxies());
 
+    // 事件名与后端一致（commands.rs emit "proxies://changed"）：
+    // 启动自动选点/手动切换后刷新当前选中项与延迟
     const unStatus = listen("core://status", () => loadProxies());
-    const unProxies = listen("proxies::changed", () => loadProxies());
+    const unProxies = listen("proxies://changed", () => loadProxies());
     // 测速增量事件：后端逐节点推送 { group, name, delay }（delay=null 为超时）。
     // 仅应用与当前主选择组匹配的节点，测试中实时刷新延迟显示。
     const unUrlTest = listen<{ group: string; name: string; delay: number | null }>(
@@ -262,6 +264,33 @@ export default function Proxies() {
       )
     : nodes;
 
+  /// 测速完成后按延迟从低到高排列：有延迟的升序在前，未测速保持原序居中，
+  /// 超时的最后。测速进行中不排序（增量结果会导致列表跳动），
+  /// 没有任何测速数据时保持订阅原始顺序。
+  const sorted = useMemo(() => {
+    if (testing) return filtered;
+    const hasData = filtered.some((n) => {
+      const d = lastDelay(n);
+      return typeof d === "number" && d > 0;
+    });
+    if (!hasData) return filtered;
+    const measured = filtered
+      .filter((n) => {
+        const d = lastDelay(n);
+        return typeof d === "number" && d > 0;
+      })
+      .sort(
+        (a, b) => (lastDelay(a) as number) - (lastDelay(b) as number)
+      );
+    const unknown = filtered.filter((n) => lastDelay(n) === undefined);
+    const timedOut = filtered.filter((n) => {
+      const d = lastDelay(n);
+      return typeof d === "number" && d <= 0;
+    });
+    return [...measured, ...unknown, ...timedOut];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered, delays, failed, testing]);
+
   if (nodes.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-white/10 bg-surface-card/50 py-16 px-6 text-center">
@@ -335,9 +364,9 @@ export default function Proxies() {
         <span>{filtered.length} 节点</span>
       </div>
 
-      {/* 节点列表流（Shadowrocket 风格） */}
+      {/* 节点列表流（Shadowrocket 风格；测速完成后按延迟升序） */}
       <div className="rounded-2xl bg-surface-card overflow-hidden border border-white/5">
-        {filtered.map((node, idx) => {
+        {sorted.map((node, idx) => {
           const delay = lastDelay(node);
           const selected = current === node.name;
           return (
@@ -349,7 +378,7 @@ export default function Proxies() {
                 "w-full flex items-center gap-3 px-4 py-3 text-left transition-colors",
                 selected ? "bg-accent/10" : "hover:bg-white/[0.03]",
                 coreStatus !== "running" && "cursor-default opacity-80",
-                idx !== filtered.length - 1 && "border-b border-white/5"
+                idx !== sorted.length - 1 && "border-b border-white/5"
               )}
             >
               {/* 选中指示器 */}

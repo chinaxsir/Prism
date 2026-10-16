@@ -232,7 +232,7 @@ export default function Rules() {
         <div className="bg-surface-card rounded-xl p-5">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-base font-semibold">
-              生效规则（{rules.length} 条，含自定义与订阅）
+              生效规则（{rules.length} 条，含内置 / 自定义与订阅）
             </h2>
             <button
               onClick={loadRules}

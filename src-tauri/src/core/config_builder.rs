@@ -401,6 +401,21 @@ pub fn build(
         }
     }
 
+    // ---- 内置常见分流规则（全平台）----
+    // 位于自定义规则之后、订阅规则之前：用户自定义始终最高优先，订阅规则
+    // 在其后（不覆盖内置行为）。仅引用随包分发的 geoip/geosite 数据库
+    // （数百字节引用，非内联展开，移动端内存安全）：
+    // 1. 局域网/私有网段直连——本机、内网管理页等不走代理
+    // 2. 广告域名拦截——category-ads-all 命中即 block，浏览器直接失败回退
+    // 3. 国内域名/网段直连——geosite cn（含 .com 国内站）+ geoip cn 兜底
+    route_rules.push(json!({ "geoip": "private", "outbound": "direct" }));
+    route_rules.push(json!({ "geosite": "category-ads-all", "outbound": "block" }));
+    route_rules.push(json!({ "geosite": "cn", "outbound": "direct" }));
+    route_rules.push(json!({ "geoip": "cn", "outbound": "direct" }));
+    warnings.push(
+        "已内置常见分流规则：局域网直连、广告域名拦截、国内域名与网段直连".into(),
+    );
+
     // ---- 逐订阅产出出站/组/规则 ----
     let mut node_tags: Vec<String> = Vec::new();
     for parsed in &parsed_list {
@@ -495,17 +510,9 @@ pub fn build(
         }
     }
 
-    // iOS 基础分流规则（build 149 方案第 2 步第 3 点）：内联规则虽已在
-    // 构建期丢弃，但「分析-规则统计/命中」与国内直连分流仍需要基础规则。
-    // 此处仅引用 geoip/geosite 数据库（数百字节，非内联展开，内存安全；
-    // Go 侧已启用 legacy GEOIP/GEOSITE 支持），置于自定义规则之后
-    #[cfg(target_os = "ios")]
-    {
-        route_rules.push(json!({ "geoip": "private", "outbound": "direct" }));
-        route_rules.push(json!({ "geosite": "cn", "outbound": "direct" }));
-        route_rules.push(json!({ "geoip": "cn", "outbound": "direct" }));
-        warnings.push("iOS 基础分流已启用：私有/国内网段与域名直连，其余走策略组".into());
-    }
+    // iOS 基础分流（build 149 方案 → 全平台内置规则取代）：订阅内联规则在
+    // 构建期丢弃后，「分析-规则统计/命中」与国内直连分流由上方内置规则
+    // （geoip private/cn + geosite cn）继续提供，其余走策略组（默认出站）
 
     // 未显式 MATCH：优先全部订阅中的首个策略组，否则 direct
     let rule_final = final_tag
@@ -1469,6 +1476,65 @@ fn strip_nulls(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回归（内置分流规则）：内置常见规则必须存在，且相对顺序为
+    /// 自定义规则 < 内置规则 < 订阅规则（优先级递减），
+    /// clash_mode 热切换规则保持置顶。
+    #[test]
+    fn builtin_rules_placed_between_custom_and_subscription() {
+        let clash = r#"
+proxies:
+  - {name: HK-01, type: ss, server: 1.2.3.4, port: 8388, cipher: aes-256-gcm, password: pw}
+proxy-groups:
+  - {name: 节点选择, type: select, proxies: [HK-01]}
+rules:
+  - DOMAIN-SUFFIX,sub.example.cc,节点选择
+  - MATCH,节点选择
+"#;
+        let built = build(
+            &[("https://sub.example".into(), "订阅1".into(), clash.into())],
+            &["DOMAIN-SUFFIX,example.org,block".into()],
+            RunMode::SystemProxy,
+            &UserSettings::default(),
+            &std::env::temp_dir().join("prism-cb-test-builtin"),
+            &std::env::temp_dir().join("prism-cb-test-builtin/kernel"),
+            "127.0.0.1:9090",
+            "secret",
+        )
+        .expect("build must succeed");
+
+        let rules = built.config["route"]["rules"].as_array().unwrap();
+        let sig = |r: &Value| -> Option<String> {
+            if r.get("clash_mode").is_some() {
+                return Some("clash_mode".into());
+            }
+            if r
+                .get("domain_suffix")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| a.iter().any(|x| x.as_str() == Some("example.org")))
+            {
+                return Some("custom".into());
+            }
+            match r.get("geosite").and_then(|v| v.as_str()) {
+                Some("category-ads-all") => return Some("builtin-ads".into()),
+                Some("cn") => return Some("builtin-cn".into()),
+                _ => {}
+            }
+            if r.get("geoip").and_then(|v| v.as_str()) == Some("cn") {
+                return Some("builtin-geoip-cn".into());
+            }
+            None
+        };
+        let sigs: Vec<String> = rules.iter().filter_map(sig).collect();
+        let find = |k: &str| sigs.iter().position(|s| s == k).unwrap_or_else(|| panic!("{k} missing: {sigs:?}"));
+        let (custom, ads, cn, geoip_cn) = (find("custom"), find("builtin-ads"), find("builtin-cn"), find("builtin-geoip-cn"));
+        assert!(custom < ads, "自定义规则必须先于内置规则: {sigs:?}");
+        assert!(ads < cn && cn < geoip_cn, "内置规则顺序稳定: {sigs:?}");
+        // clash_mode 热切换规则置顶（出现在最前两条）
+        assert_eq!(&sigs[..2], &["clash_mode", "clash_mode"], "{sigs:?}");
+        // route.final 仍取订阅 MATCH 目标
+        assert_eq!(built.config["route"]["final"].as_str(), Some("节点选择"));
+    }
 
     /// 回归：预解析曾把全部标签写入 known_tags（发射判重集），
     /// 导致 emit_node 判定所有节点/组「标签重复」而全部跳过 → 0 节点。

@@ -71,7 +71,8 @@ pub fn run() {
 
             // 每日授权同步：每天首次启动 APP 时与服务器同步一次授权信息并
             // 更新本地加密缓存；当天内授权只从缓存文件读取，不再联网。
-            // offline（当天首次同步失败）状态每小时重试一次，恢复联网即解锁。
+            // 断网/服务不可达时授权从本地加密文件读取（未过期继续可用），
+            // 每小时重试一次，恢复联网即以服务端结果修正。
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<core::state::AppState>();
@@ -82,6 +83,10 @@ pub fn run() {
                     {
                         tracing::info!("license synced: {}", next.status);
                         state.apply_entitlement(next);
+                    } else if let Some(cache) = core::license::cached_entitlement_opt(&data_dir) {
+                        // 同步未产生变更（当天已同步或失败）：失败场景下缓存
+                        // 状态可能随时间跨过有效期，按文件内容刷新内存态
+                        state.apply_entitlement(cache);
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 }
