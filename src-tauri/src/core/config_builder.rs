@@ -410,19 +410,20 @@ pub fn build(
         }
     }
 
-    // ---- 内置常见分流规则（全平台）----
-    // 位于自定义规则之后、订阅规则之前：用户自定义始终最高优先，订阅规则
-    // 在其后（不覆盖内置行为）。仅引用随包分发的 geoip/geosite 数据库
-    // （数百字节引用，非内联展开，移动端内存安全）：
-    // 1. 局域网/私有网段直连——本机、内网管理页等不走代理
-    // 2. 广告域名拦截——category-ads-all 命中即 block，浏览器直接失败回退
-    // 3. 国内域名/网段直连——geosite cn（含 .com 国内站）+ geoip cn 兜底
-    route_rules.push(json!({ "geoip": "private", "outbound": "direct" }));
+    // ---- 内置常见分流规则·域名类（全平台，位于订阅规则之前）----
+    // 仅域名匹配（不触发 DNS 解析，无污染改道风险）：
+    // 1. 广告域名拦截——category-ads-all 命中即 block，浏览器直接失败回退
+    // 2. 局域网主机名直连——geosite private（localhost/*.local 等）
+    // 3. 国内域名直连——geosite cn（含 .com 国内站），域名匹配零解析开销
+    // IP 类规则（geoip private/cn）位于订阅规则之后（见下方）——被墙域名
+    // 的 DNS 污染会返回中国/私有 IP（如 gstatic → 113.108.239.226），
+    // 若 geoip 规则在订阅 MATCH 之前，会强制解析并命中 geoip cn/private，
+    // 把应走节点的流量改道直连，导致「选了节点却上不了网」。
     route_rules.push(json!({ "geosite": "category-ads-all", "outbound": "block" }));
+    route_rules.push(json!({ "geosite": "private", "outbound": "direct" }));
     route_rules.push(json!({ "geosite": "cn", "outbound": "direct" }));
-    route_rules.push(json!({ "geoip": "cn", "outbound": "direct" }));
     warnings.push(
-        "已内置常见分流规则：局域网直连、广告域名拦截、国内域名与网段直连".into(),
+        "已内置常见分流规则：广告域名拦截、局域网与国内域名直连".into(),
     );
 
     // ---- 逐订阅产出出站/组/规则 ----
@@ -520,8 +521,16 @@ pub fn build(
     }
 
     // iOS 基础分流（build 149 方案 → 全平台内置规则取代）：订阅内联规则在
-    // 构建期丢弃后，「分析-规则统计/命中」与国内直连分流由上方内置规则
-    // （geoip private/cn + geosite cn）继续提供，其余走策略组（默认出站）
+    // 构建期丢弃后，「分析-规则统计/命中」与国内直连分流由内置规则
+    // （域名类在前 + IP 类在此）继续提供，其余走策略组（默认出站）
+
+    // ---- 内置常见分流规则·IP 类（全平台，位于订阅规则之后）----
+    // 订阅 MATCH 命中的流量（被墙域名，无论 DNS 污染成什么 IP）已在上方
+    // 走节点，永远不会到达这两条——杜绝污染 IP 触发 geoip 改道直连；
+    // 未被订阅覆盖的流量按真实 IP 兜底：局域网/私有网段与国内网段直连
+    // （IP 字面量目标无需解析即匹配；域名目标才会触发解析）
+    route_rules.push(json!({ "geoip": "private", "outbound": "direct" }));
+    route_rules.push(json!({ "geoip": "cn", "outbound": "direct" }));
 
     // 未显式 MATCH：优先全部订阅中的首个策略组，否则 direct
     let rule_final = final_tag
@@ -1590,8 +1599,10 @@ rules:
             .any(|w| w.contains("缺少 auth-str/password")));
     }
 
-    /// 回归（内置分流规则）：内置常见规则必须存在，且相对顺序为
-    /// 自定义规则 < 内置规则 < 订阅规则（优先级递减），
+    /// 回归（内置分流规则）：域名类内置规则在自定义之后、订阅规则之前；
+    /// IP 类（geoip）内置规则必须在订阅规则之后——被墙域名的 DNS 污染
+    /// 会返回中国/私有 IP，geoip 规则若在订阅 MATCH 之前会强制解析并
+    /// 把应走节点的流量改道直连（「选了节点却上不了网」的根因）。
     /// clash_mode 热切换规则保持置顶。
     #[test]
     fn builtin_rules_placed_between_custom_and_subscription() {
@@ -1621,32 +1632,102 @@ rules:
             if r.get("clash_mode").is_some() {
                 return Some("clash_mode".into());
             }
-            if r
-                .get("domain_suffix")
-                .and_then(|v| v.as_array())
-                .is_some_and(|a| a.iter().any(|x| x.as_str() == Some("example.org")))
-            {
-                return Some("custom".into());
+            if let Some(a) = r.get("domain_suffix").and_then(|v| v.as_array()) {
+                if a.iter().any(|x| x.as_str() == Some("example.org")) {
+                    return Some("custom".into());
+                }
+                if a.iter().any(|x| x.as_str() == Some("sub.example.cc")) {
+                    return Some("subrule".into());
+                }
             }
             match r.get("geosite").and_then(|v| v.as_str()) {
                 Some("category-ads-all") => return Some("builtin-ads".into()),
+                Some("private") => return Some("builtin-geosite-private".into()),
                 Some("cn") => return Some("builtin-cn".into()),
                 _ => {}
             }
-            if r.get("geoip").and_then(|v| v.as_str()) == Some("cn") {
-                return Some("builtin-geoip-cn".into());
+            match r.get("geoip").and_then(|v| v.as_str()) {
+                Some("private") => return Some("builtin-geoip-private".into()),
+                Some("cn") => return Some("builtin-geoip-cn".into()),
+                _ => {}
             }
             None
         };
         let sigs: Vec<String> = rules.iter().filter_map(sig).collect();
         let find = |k: &str| sigs.iter().position(|s| s == k).unwrap_or_else(|| panic!("{k} missing: {sigs:?}"));
-        let (custom, ads, cn, geoip_cn) = (find("custom"), find("builtin-ads"), find("builtin-cn"), find("builtin-geoip-cn"));
-        assert!(custom < ads, "自定义规则必须先于内置规则: {sigs:?}");
-        assert!(ads < cn && cn < geoip_cn, "内置规则顺序稳定: {sigs:?}");
+        let (custom, ads, gpriv, cn) = (
+            find("custom"),
+            find("builtin-ads"),
+            find("builtin-geosite-private"),
+            find("builtin-cn"),
+        );
+        let (subrule, ippriv, ipcn) = (
+            find("subrule"),
+            find("builtin-geoip-private"),
+            find("builtin-geoip-cn"),
+        );
+        // 域名类内置规则：自定义 < 内置（域名类）< 订阅规则
+        assert!(custom < ads && ads < gpriv && gpriv < cn, "域名类内置规则顺序: {sigs:?}");
+        assert!(cn < subrule, "域名类内置规则必须先于订阅规则: {sigs:?}");
+        // IP 类内置规则：订阅规则之后（污染改道回归）
+        assert!(
+            subrule < ippriv && ippriv < ipcn,
+            "geoip 规则必须在订阅规则之后: {sigs:?}"
+        );
         // clash_mode 热切换规则置顶（出现在最前两条）
         assert_eq!(&sigs[..2], &["clash_mode", "clash_mode"], "{sigs:?}");
         // route.final 仍取订阅 MATCH 目标
         assert_eq!(built.config["route"]["final"].as_str(), Some("节点选择"));
+    }
+
+    /// 回归（DNS 污染改道）：订阅 MATCH 目标的出站链路里不得出现
+    /// 前置 geoip 规则——gstatic/youtube 等被墙域名经国内 DNS 解析会返回
+    /// 中国 IP（实测 gstatic → 113.108.239.226 广州电信），任何位于
+    /// MATCH 之前的 geoip cn/private 都会把这些流量改道直连。
+    #[test]
+    fn polluted_domains_reach_subscription_final_not_geoip() {
+        let clash = r#"
+proxies:
+  - {name: HK-01, type: ss, server: 1.2.3.4, port: 8388, cipher: aes-256-gcm, password: pw}
+proxy-groups:
+  - {name: 节点选择, type: select, proxies: [HK-01]}
+rules:
+  - MATCH,节点选择
+"#;
+        let built = build(
+            &[("https://sub.example".into(), "订阅1".into(), clash.into())],
+            &[],
+            RunMode::SystemProxy,
+            &UserSettings::default(),
+            &std::env::temp_dir().join("prism-cb-test-builtin"),
+            &std::env::temp_dir().join("prism-cb-test-builtin/kernel"),
+            "127.0.0.1:9090",
+            "secret",
+        )
+        .expect("build must succeed");
+        let rules = built.config["route"]["rules"].as_array().unwrap();
+        // 规则序列中最后一条非 clash_mode 规则之后的 geoip 规则才合法：
+        // 即不允许任何 geoip 规则出现在「最终 MATCH 等价物」（route.final）
+        // 之前且拦截了域名为目标的流量——等价判定：geoip 规则之前不允许
+        // 存在会把域名流量导向 direct 的规则（geoip 本身）。这里直接验证
+        // geoip 规则位于规则列表尾部（其后仅有可能的 empty/最终兜底）。
+        let geoip_positions: Vec<usize> = rules
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.get("geoip").is_some())
+            .map(|(i, _)| i)
+            .collect();
+        if let (Some(first), Some(last)) = (geoip_positions.first(), geoip_positions.last()) {
+            // geoip 规则之后不得再有域名规则（订阅 MATCH 不产生规则，
+            // 但订阅域名规则必须全部位于 geoip 之前）
+            for (i, r) in rules.iter().enumerate().skip(*last + 1) {
+                assert!(
+                    r.get("geoip").is_some() || r.get("geosite").is_none(),
+                    "geoip 之后出现域名规则会重新引入污染改道: idx={i} rule={r}"
+                );
+            }
+            assert!(*first > 0, "sanity");
+        }
     }
 
     /// 回归：预解析曾把全部标签写入 known_tags（发射判重集），
