@@ -1,10 +1,13 @@
-//! Pro 授权客户端：设备标识、HTTP 激活与状态查询、本地缓存、离线宽限。
+//! Pro 授权客户端：设备标识、HTTP 激活与状态查询、本地缓存。
 //!
 //! 协议（无 token 鉴权；服务端部署于 Cloudflare 后，所有请求带 `X-Request-Source: prism-app` 头）：
 //! - 激活：POST /api/license/activate，body {license_key, email, device_id, device_name}
 //!   200 → {ok, device_id, plan: "free"|"pro"|"team", max_seats?}；401 无效/停用；409 设备已绑定等冲突；429 → {retry_after: 秒}
 //! - 状态：GET /api/license/status?license_key=...
 //!   200 → {valid, plan, status, expires_at(ISO8601|null), max_seats?, used_seats?}
+//!
+//! 授权有效性策略：仅服务端确认 active 时解锁 Pro；断网/服务不可达立即
+//! 锁定（status=offline），联网后由后台周期校验自动恢复。不做离线宽限。
 //!
 //! 本地仅缓存 license_key 与最近一次授权快照（信任 HTTPS 传输，不再做本地签名验证）。
 
@@ -15,11 +18,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::state::UserSettings;
-
-/// 买断离线宽限（距上次成功校验）
-const LIFETIME_GRACE_DAYS: i64 = 30;
-/// 订阅离线宽限（距上次成功校验）
-const SUBSCRIPTION_GRACE_DAYS: i64 = 7;
 
 /// 编译期固定授权服务地址（构建时可用 PRISM_LICENSE_URL 覆盖；App 内置，用户无需输入）
 const DEFAULT_SERVER: &str = match option_env!("PRISM_LICENSE_URL") {
@@ -36,7 +34,7 @@ const REQUEST_SOURCE: &str = "prism-app";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntitlementStatus {
-    /// inactive | active | grace | expired | revoked
+    /// inactive | active | offline | expired | revoked
     pub status: String,
     /// lifetime | subscription
     pub kind: Option<String>,
@@ -44,6 +42,12 @@ pub struct EntitlementStatus {
     /// code | apple | google
     pub source: Option<String>,
     pub last_verified_at: i64,
+    /// 服务端方案：free | pro | team（与 /api/license/status 响应一致）
+    pub plan: Option<String>,
+    /// 授权席位上限（服务端返回时透传）
+    pub max_seats: Option<u32>,
+    /// 已用席位数（服务端返回时透传）
+    pub used_seats: Option<u32>,
 }
 
 impl EntitlementStatus {
@@ -54,12 +58,16 @@ impl EntitlementStatus {
             expires_at: None,
             source: None,
             last_verified_at: 0,
+            plan: None,
+            max_seats: None,
+            used_seats: None,
         }
     }
 
-    /// 是否可使用 Pro：active（联网校验有效）或 grace（离线宽限期）
+    /// 是否可使用 Pro：仅服务端联网校验有效时解锁。
+    /// offline（断网）/ expired / revoked / inactive 一律锁定。
     pub fn is_unlocked(&self) -> bool {
-        matches!(self.status.as_str(), "active" | "grace")
+        self.status == "active"
     }
 }
 
@@ -72,8 +80,9 @@ fn now_secs() -> i64 {
 
 // ---------------- 设备标识 ----------------
 
-/// 读取/首次生成设备 ID（每安装实例唯一，落盘 device.json）
-fn load_device_id(data_dir: &Path) -> Result<String> {
+/// 读取/首次生成设备 ID（每安装实例唯一，落盘 device.json）。
+/// 激活绑定时提交服务端；设置页展示供用户核对/复制。
+pub fn device_id(data_dir: &Path) -> Result<String> {
     let path = data_dir.join("device.json");
     if let Ok(raw) = std::fs::read_to_string(&path)
         && let Ok(v) = serde_json::from_str::<Value>(&raw)
@@ -122,10 +131,16 @@ fn clear_cache(data_dir: &Path) {
     std::fs::remove_file(cache_path(data_dir)).ok();
 }
 
-/// 启动期从缓存恢复（不联网；离线宽限在后台校验任务中评估）
+/// 启动期从缓存恢复（不联网；联网有效性由后台周期校验任务刷新）。
+/// 旧版缓存可能存有 grace（离线宽限）状态：该策略已移除，统一迁移为 offline 锁定。
 pub fn cached_entitlement(data_dir: &Path) -> EntitlementStatus {
     load_cache(data_dir)
-        .map(|c| c.entitlement)
+        .map(|mut c| {
+            if c.entitlement.status == "grace" {
+                c.entitlement.status = "offline".into();
+            }
+            c.entitlement
+        })
         .unwrap_or_else(EntitlementStatus::inactive)
 }
 
@@ -190,15 +205,17 @@ async fn get_with_fallback(url: &str, license_key: &str) -> Result<reqwest::Resp
 
 // ---------------- 协议响应体 ----------------
 
-/// POST /api/license/activate 成功响应（device_id/max_seats 客户端暂不消费，忽略）
+/// POST /api/license/activate 成功响应（device_id 客户端不消费，忽略）
 #[derive(Deserialize)]
 struct ActivateResponse {
     ok: bool,
     #[serde(default)]
     plan: String,
+    #[serde(default)]
+    max_seats: Option<u32>,
 }
 
-/// GET /api/license/status 响应（max_seats/used_seats 客户端暂不消费，忽略）
+/// GET /api/license/status 响应
 #[derive(Deserialize)]
 struct StatusResponse {
     valid: bool,
@@ -207,9 +224,13 @@ struct StatusResponse {
     #[serde(default)]
     status: String,
     expires_at: Option<String>,
+    #[serde(default)]
+    max_seats: Option<u32>,
+    #[serde(default)]
+    used_seats: Option<u32>,
 }
 
-/// 状态查询失败分类：决定走「清除缓存」还是「离线宽限」
+/// 状态查询失败分类：决定走「清除缓存」还是「离线锁定」
 #[derive(Debug)]
 enum StatusError {
     /// 429：携带服务端要求的重试等待秒数（透传给前端）
@@ -276,7 +297,13 @@ async fn fetch_status(base: &str, license_key: &str) -> std::result::Result<Stat
 /// - plan 为其他值（free 等）→ inactive（无 Pro 权益，保留缓存供后续状态轮询）
 /// - 服务端 status=expired 或 expires_at 已过 → expired
 /// - expires_at 存在 → subscription，否则 lifetime
-fn map_entitlement(plan: &str, server_status: &str, expires_at: Option<i64>) -> EntitlementStatus {
+fn map_entitlement(
+    plan: &str,
+    server_status: &str,
+    expires_at: Option<i64>,
+    max_seats: Option<u32>,
+    used_seats: Option<u32>,
+) -> EntitlementStatus {
     let unlocked = plan == "pro" || plan == "team";
     let expired = expires_at.map(|exp| exp <= now_secs()).unwrap_or(false) || server_status == "expired";
     let status = if !unlocked {
@@ -294,6 +321,9 @@ fn map_entitlement(plan: &str, server_status: &str, expires_at: Option<i64>) -> 
         expires_at,
         source: Some("code".into()),
         last_verified_at: now_secs(),
+        plan: (!plan.is_empty()).then(|| plan.to_string()),
+        max_seats,
+        used_seats,
     }
 }
 
@@ -369,7 +399,7 @@ pub async fn activate(
         bail!("请输入有效的邮箱地址");
     }
     let base = server_base(settings);
-    let device_id = load_device_id(data_dir)?;
+    let device_id_str = device_id(data_dir)?;
     let license_key = code.trim();
 
     let resp = post_with_fallback(
@@ -377,7 +407,7 @@ pub async fn activate(
         &serde_json::json!({
             "license_key": license_key,
             "email": email,
-            "device_id": device_id,
+            "device_id": device_id_str,
             "device_name": device_name(),
         }),
     )
@@ -401,13 +431,15 @@ pub async fn activate(
 
     // 激活响应不含到期时间：best-effort 拉一次状态补全 expires_at/kind；
     // 查询失败不影响激活结果（下次 verify_remote 会修正）
-    let mut ent = map_entitlement(&data.plan, "", None);
+    let mut ent = map_entitlement(&data.plan, "", None, data.max_seats, None);
     match fetch_status(&base, license_key).await {
         Ok(s) if s.valid => {
             ent = map_entitlement(
                 &s.plan,
                 &s.status,
                 s.expires_at.as_deref().and_then(parse_expires_at),
+                s.max_seats,
+                s.used_seats,
             );
         }
         Ok(_) => {}
@@ -449,6 +481,8 @@ pub async fn verify_remote(
                 &s.plan,
                 &s.status,
                 s.expires_at.as_deref().and_then(parse_expires_at),
+                s.max_seats,
+                s.used_seats,
             );
             // 吊销/过期/降级同样落盘，保证重启后状态一致
             save_cache(
@@ -472,33 +506,17 @@ pub async fn verify_remote(
             Ok(EntitlementStatus::inactive())
         }
         Err(StatusError::Transient(e)) => {
-            tracing::warn!("license status unreachable: {e}");
-            Ok(offline_eval(&cache.entitlement))
+            tracing::warn!("license status unreachable, locking Pro: {e}");
+            Ok(offline_status(&cache.entitlement))
         }
     }
 }
 
-/// 离线宽限评估：
-/// - 买断：距上次校验 30 天内 → grace，否则锁定
-/// - 订阅：到期时间未来且距上次校验 7 天内 → grace；到期 → expired；否则锁定
-fn offline_eval(prev: &EntitlementStatus) -> EntitlementStatus {
-    let now = now_secs();
-    let age_days = (now - prev.last_verified_at) / 86400;
-
-    let status = if prev.kind.as_deref() == Some("subscription") {
-        match prev.expires_at {
-            Some(exp) if exp <= now => "expired",
-            Some(_) if age_days <= SUBSCRIPTION_GRACE_DAYS => "grace",
-            _ => "inactive",
-        }
-    } else if age_days <= LIFETIME_GRACE_DAYS {
-        "grace"
-    } else {
-        "inactive"
-    };
-
+/// 断网/服务不可达时的授权状态：立即锁定 Pro（status=offline），
+/// 保留方案信息（plan/kind/expires_at）供 UI 展示；联网后周期校验自动恢复。
+fn offline_status(prev: &EntitlementStatus) -> EntitlementStatus {
     EntitlementStatus {
-        status: status.into(),
+        status: "offline".into(),
         last_verified_at: prev.last_verified_at,
         ..prev.clone()
     }

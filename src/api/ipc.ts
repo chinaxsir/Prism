@@ -61,23 +61,31 @@ export type EntitlementSource = "code" | "apple" | "google";
 export type EntitlementState =
   | "inactive"
   | "active"
-  | "grace"
+  | "offline"
   | "expired"
   | "revoked";
 
-/** 授权状态快照 */
+/** 授权状态快照（与后端 EntitlementStatus 对齐） */
 export interface Entitlement {
   status: EntitlementState;
   kind: EntitlementKind | null;
   expiresAt: number | null;
   source: EntitlementSource | null;
   lastVerifiedAt: number;
+  /** 服务端方案：free | pro | team */
+  plan: string | null;
+  /** 授权席位上限 */
+  maxSeats: number | null;
+  /** 已用席位 */
+  usedSeats: number | null;
 }
 
 export const activatePro = (code: string, email: string) =>
   invoke<Entitlement>("activate_pro", { code, email });
 export const getEntitlement = () =>
   invoke<Entitlement>("get_entitlement");
+/** 读取本机设备 ID（激活绑定与设置页展示用） */
+export const getDeviceId = () => invoke<string>("get_device_id");
 export const refreshEntitlement = () =>
   invoke<Entitlement>("refresh_entitlement");
 export const deactivatePro = () =>

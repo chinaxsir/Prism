@@ -181,6 +181,13 @@ impl AppState {
         super::kernel::KernelApi::new(&self.api_addr.read(), &self.api_secret.read())
     }
 
+    /// 更新内存授权状态并广播 pro://status 事件。
+    /// IPC 命令与后台周期校验任务共用，保证前端 gating 实时一致。
+    pub fn apply_entitlement(&self, next: super::license::EntitlementStatus) {
+        *self.entitlement.write() = next.clone();
+        let _ = self.app_handle.emit("pro://status", &next);
+    }
+
     /// 保存设置到内存 + settings.json
     pub fn save_settings(&self, next: UserSettings) -> anyhow::Result<()> {
         super::store::save_settings(&self.data_dir, &next)?;

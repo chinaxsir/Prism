@@ -14,11 +14,13 @@ const INACTIVE: Entitlement = {
   expiresAt: null,
   source: null,
   lastVerifiedAt: 0,
+  plan: null,
+  maxSeats: null,
+  usedSeats: null,
 };
 
-/** 可使用 Pro：active（联网有效）或 grace（离线宽限） */
-const unlockedOf = (e: Entitlement) =>
-  e.status === "active" || e.status === "grace";
+/** 可使用 Pro：仅服务端联网校验有效（active）；offline/expired/revoked/inactive 一律锁定 */
+const unlockedOf = (e: Entitlement) => e.status === "active";
 
 interface ProState {
   entitlement: Entitlement;

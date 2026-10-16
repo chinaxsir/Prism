@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD}, Engine as _};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 use crate::core::kernel::{
     KernelApi, KernelConfig, KernelHandle, check_config, generate_secret, probe_version,
@@ -1190,12 +1190,6 @@ pub async fn delete_subscription(
     Ok(removed)
 }
 
-/// 将授权状态写入内存并广播 pro://status（前端 store 据此刷新）
-fn apply_entitlement(state: &State<'_, AppState>, next: EntitlementStatus) {
-    *state.entitlement.write() = next.clone();
-    let _ = state.app_handle.emit("pro://status", &next);
-}
-
 /// 激活码激活（邮箱+授权码；联网校验；服务端签名后本地缓存授权）
 #[tauri::command]
 pub async fn activate_pro(
@@ -1208,7 +1202,7 @@ pub async fn activate_pro(
     let next = crate::core::license::activate(&data_dir, &settings, &code, &email)
         .await
         .map_err(|e| e.to_string())?;
-    apply_entitlement(&state, next.clone());
+    state.apply_entitlement(next.clone());
     Ok(next)
 }
 
@@ -1220,7 +1214,13 @@ pub async fn get_entitlement(
     Ok(state.entitlement.read().clone())
 }
 
-/// 主动联网刷新授权（设置页「立即校验」按钮）
+/// 读取本机设备 ID（激活绑定与设置页展示用；首次调用时生成并落盘）
+#[tauri::command]
+pub async fn get_device_id(state: State<'_, AppState>) -> Result<String, String> {
+    crate::core::license::device_id(&state.data_dir).map_err(|e| e.to_string())
+}
+
+/// 主动联网刷新授权（设置页「立即校验」按钮；断网时返回 offline 锁定态）
 #[tauri::command]
 pub async fn refresh_entitlement(
     state: State<'_, AppState>,
@@ -1230,7 +1230,7 @@ pub async fn refresh_entitlement(
     let next = crate::core::license::verify_remote(&data_dir, &settings)
         .await
         .map_err(|e| e.to_string())?;
-    apply_entitlement(&state, next.clone());
+    state.apply_entitlement(next.clone());
     Ok(next)
 }
 
@@ -1240,7 +1240,7 @@ pub async fn deactivate_pro(
     state: State<'_, AppState>,
 ) -> Result<EntitlementStatus, String> {
     let next = crate::core::license::deactivate(&state.data_dir);
-    apply_entitlement(&state, next.clone());
+    state.apply_entitlement(next.clone());
     Ok(next)
 }
 
@@ -1256,7 +1256,7 @@ pub async fn submit_receipt(
     let next = crate::core::license::submit_store_receipt(&data_dir, &settings, &store, receipt)
         .await
         .map_err(|e| e.to_string())?;
-    apply_entitlement(&state, next.clone());
+    state.apply_entitlement(next.clone());
     Ok(next)
 }
 

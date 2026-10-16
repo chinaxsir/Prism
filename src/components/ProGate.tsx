@@ -31,8 +31,7 @@ const PLAN_LABEL: Record<string, string> = {
 
 /** 展示当前方案：优先服务端 plan 字段（free/pro/team），回落到授权类型 */
 function planLabel(e: Entitlement): string {
-  const plan = (e as Entitlement & { plan?: string | null }).plan;
-  if (plan && PLAN_LABEL[plan]) return PLAN_LABEL[plan];
+  if (e.plan && PLAN_LABEL[e.plan]) return PLAN_LABEL[e.plan];
   if (e.kind === "lifetime") return "终身买断";
   if (e.kind === "subscription") return "订阅";
   return "—";
@@ -289,7 +288,7 @@ export function ActivateProModal({
 
 /**
  * Pro 门控：未授权时给 children 盖毛玻璃遮罩 + 激活入口；
- * 已授权（active/grace）时完全透明穿透。
+ * 已授权（active，服务端联网校验有效）时完全透明穿透。
  */
 export default function ProGate({
   feature,

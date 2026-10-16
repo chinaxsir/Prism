@@ -7,7 +7,7 @@ pub mod plugins;
 use tauri::menu::{Menu, MenuItem};
 #[cfg(desktop)]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, RunEvent};
+use tauri::{AppHandle, Manager, RunEvent};
 #[cfg(desktop)]
 use tauri::WindowEvent;
 use tracing_subscriber::EnvFilter;
@@ -69,18 +69,23 @@ pub fn run() {
                 tracing::error!("mobile platform init failed: {e:#}");
             }
 
-            // 启动后台联网校验授权：结果写回内存并广播；失败（离线）不阻塞启动
+            // 后台授权校验循环：启动时立即校验一次，此后每 5 分钟轮询。
+            // APP 常驻后台/长期不关闭也持续保证授权有效；断网或服务不可达
+            // 时 verify_remote 返回 offline 锁定态，Pro 功能随之关闭，
+            // 联网恢复后自动解锁。429 限流保持现状态不变。
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<core::state::AppState>();
-                let settings = state.settings.read().clone();
-                match core::license::verify_remote(&data_dir, &settings).await {
-                    Ok(next) => {
-                        tracing::info!("license verified: {}", next.status);
-                        *state.entitlement.write() = next.clone();
-                        let _ = handle.emit("pro://status", &next);
+                loop {
+                    let settings = state.settings.read().clone();
+                    match core::license::verify_remote(&data_dir, &settings).await {
+                        Ok(next) => {
+                            tracing::info!("license verified: {}", next.status);
+                            state.apply_entitlement(next);
+                        }
+                        Err(e) => tracing::warn!("license verify failed: {e}"),
                     }
-                    Err(e) => tracing::warn!("license verify failed: {e}"),
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 }
             });
 
@@ -144,6 +149,7 @@ pub fn run() {
             ipc::commands::save_custom_rules,
             ipc::commands::activate_pro,
             ipc::commands::get_entitlement,
+            ipc::commands::get_device_id,
             ipc::commands::refresh_entitlement,
             ipc::commands::deactivate_pro,
             ipc::commands::submit_receipt,

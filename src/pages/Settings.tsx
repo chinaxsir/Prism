@@ -14,11 +14,15 @@ import {
   Globe,
   Blocks,
   RefreshCw,
+  Fingerprint,
+  Copy,
+  Smartphone,
 } from "lucide-react";
 
 import {
   ensureKernel,
   getCoreStatus,
+  getDeviceId,
   getKernelInfo,
   getSettings,
   saveSettings,
@@ -42,11 +46,25 @@ const STATUS_META: Record<
   { label: string; dot: string }
 > = {
   active: { label: "已激活", dot: "bg-latency-good" },
-  grace: { label: "离线宽限中", dot: "bg-yellow-400" },
+  offline: { label: "离线待校验", dot: "bg-yellow-400" },
   expired: { label: "已过期", dot: "bg-latency-bad" },
   revoked: { label: "已吊销", dot: "bg-latency-bad" },
   inactive: { label: "未授权", dot: "bg-gray-500" },
 };
+
+/** 服务端方案名展示（与 /api/license/status 的 plan 字段一致） */
+const PLAN_LABEL: Record<string, string> = {
+  free: "Free",
+  pro: "Pro",
+  team: "Team",
+};
+
+function planText(plan: string | null, kind: string | null): string {
+  if (plan && PLAN_LABEL[plan]) return PLAN_LABEL[plan];
+  if (kind === "lifetime") return "终身买断";
+  if (kind === "subscription") return "订阅";
+  return "—";
+}
 
 function fmtDate(secs: number | null): string {
   if (!secs) return "—";
@@ -94,6 +112,23 @@ export default function Settings() {
   const [kernelInfo, setKernelInfo] = useState<KernelInfo | null>(null);
   const [kernelBusy, setKernelBusy] = useState(false);
   const [kernelMsg, setKernelMsg] = useState<string | null>(null);
+  const [deviceId, setDeviceId] = useState<string | null>(null);
+
+  useEffect(() => {
+    getDeviceId()
+      .then(setDeviceId)
+      .catch((e) => console.error("get device id failed:", e));
+  }, []);
+
+  const copyDeviceId = async () => {
+    if (!deviceId) return;
+    try {
+      await navigator.clipboard.writeText(deviceId);
+      toast.success("设备 ID 已复制");
+    } catch {
+      toast.error("复制失败，请长按手动选择");
+    }
+  };
 
   useEffect(() => {
     getSettings()
@@ -219,7 +254,7 @@ export default function Settings() {
         </button>
       </div>
 
-      {/* Prism Pro 授权卡片 */}
+      {/* Prism Pro 授权卡片：未授权展示设备 ID + 激活入口；已授权展示协议授权信息 */}
       <SettingsGroup
         title="Prism Pro"
         icon={<Sparkles size={14} className="text-accent" />}
@@ -232,59 +267,117 @@ export default function Settings() {
           </span>
         }
       >
-        <Row
-          icon={<Sparkles size={16} className="text-accent" />}
-          iconBg="bg-accent/10"
-          title="授权类型"
-          value={
-            entitlement.kind === "lifetime"
-              ? "终身买断"
-              : entitlement.kind === "subscription"
-                ? "订阅"
-                : "—"
-          }
-        />
-        <Row
-          icon={<Check size={16} className="text-gray-400" />}
-          iconBg="bg-white/5"
-          title="到期时间"
-          value={fmtDate(entitlement.expiresAt)}
-        />
-        <Row
-          icon={<RefreshCw size={16} className="text-gray-400" />}
-          iconBg="bg-white/5"
-          title="上次校验"
-          value={fmtDate(entitlement.lastVerifiedAt)}
-        />
-        <div className="flex flex-wrap gap-2 px-3 py-3 border-t border-white/5">
-          <button
-            onClick={() => setShowActivate(true)}
-            className="flex-1 min-w-[100px] px-3 py-2 rounded-lg bg-accent hover:bg-accent-hover text-white text-xs font-medium transition-colors"
-          >
-            {proUnlocked ? "管理授权" : "激活 Pro"}
-          </button>
-          <button
-            onClick={refreshPro}
-            disabled={proBusy}
-            className="px-3 py-2 rounded-lg bg-surface-hover hover:bg-white/10 text-xs transition-colors disabled:opacity-50"
-          >
-            立即校验
-          </button>
-          {proUnlocked && (
-            <button
-              onClick={() => {
-                if (window.confirm("确定移除本机授权？移除后 Pro 功能将锁定。")) {
-                  deactivatePro()
-                    .then(() => toast.info("授权已移除"))
-                    .catch((e) => toast.error(String(e)));
-                }
-              }}
-              className="px-3 py-2 rounded-lg bg-surface-hover hover:bg-latency-bad/20 text-xs text-gray-400 hover:text-latency-bad transition-colors"
-            >
-              移除
-            </button>
-          )}
-        </div>
+        {entitlement.status === "offline" && (
+          <div className="flex items-start gap-2 px-3 py-2.5 bg-yellow-500/5 text-yellow-400 text-xs border-b border-white/5">
+            <ShieldAlert size={14} className="mt-0.5 shrink-0" />
+            <span>
+              网络不可用，授权校验失败，Pro 功能已暂停；联网恢复后自动重新校验。
+            </span>
+          </div>
+        )}
+
+        {/* 设备 ID：激活时与服务端绑定，点击复制 */}
+        <button
+          onClick={copyDeviceId}
+          className="w-full flex items-center justify-between gap-3 px-3 py-3 border-b border-white/5 text-left transition-colors hover:bg-surface-hover/40"
+        >
+          <span className="flex items-center gap-3 min-w-0">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white/5">
+              <Fingerprint size={16} className="text-gray-400" />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-sm">设备 ID</span>
+              <span className="block text-[11px] text-gray-500">
+                点击复制 · 激活时绑定本机
+              </span>
+            </span>
+          </span>
+          <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-mono text-gray-400">
+            <span className="truncate">{deviceId ?? "生成中…"}</span>
+            <Copy size={12} className="shrink-0 text-gray-500" />
+          </span>
+        </button>
+
+        {proUnlocked ? (
+          <>
+            <Row
+              icon={<Sparkles size={16} className="text-accent" />}
+              iconBg="bg-accent/10"
+              title="当前方案"
+              value={planText(entitlement.plan, entitlement.kind)}
+            />
+            <Row
+              icon={<Check size={16} className="text-gray-400" />}
+              iconBg="bg-white/5"
+              title="到期时间"
+              value={
+                entitlement.kind === "lifetime" && !entitlement.expiresAt
+                  ? "永久有效"
+                  : fmtDate(entitlement.expiresAt)
+              }
+            />
+            {entitlement.maxSeats != null && (
+              <Row
+                icon={<Smartphone size={16} className="text-gray-400" />}
+                iconBg="bg-white/5"
+                title="设备名额"
+                value={`${entitlement.usedSeats ?? "?"} / ${entitlement.maxSeats}`}
+              />
+            )}
+            <Row
+              icon={<RefreshCw size={16} className="text-gray-400" />}
+              iconBg="bg-white/5"
+              title="上次校验"
+              value={fmtDate(entitlement.lastVerifiedAt)}
+            />
+            <div className="flex flex-wrap gap-2 px-3 py-3 border-t border-white/5">
+              <button
+                onClick={refreshPro}
+                disabled={proBusy}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-surface-hover hover:bg-white/10 text-xs transition-colors disabled:opacity-50"
+              >
+                <RefreshCw size={12} className={proBusy ? "animate-spin" : ""} />
+                立即校验
+              </button>
+              <button
+                onClick={() => {
+                  if (window.confirm("确定移除本机授权？移除后 Pro 功能将锁定。")) {
+                    deactivatePro()
+                      .then(() => toast.info("授权已移除"))
+                      .catch((e) => toast.error(String(e)));
+                  }
+                }}
+                className="px-3 py-2 rounded-lg bg-surface-hover hover:bg-latency-bad/20 text-xs text-gray-400 hover:text-latency-bad transition-colors"
+              >
+                移除授权
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="px-3 py-3 text-xs leading-relaxed text-gray-500 border-b border-white/5">
+              输入 License Key 激活后，解锁多订阅、连接管理、规则自定义等 Pro
+              功能。授权联网校验，激活即绑定本机设备。
+            </div>
+            <div className="flex flex-wrap gap-2 px-3 py-3">
+              <button
+                onClick={() => setShowActivate(true)}
+                className="flex-1 min-w-[120px] flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-accent hover:bg-accent-hover text-white text-xs font-medium transition-colors"
+              >
+                <Sparkles size={12} />
+                激活授权
+              </button>
+              <button
+                onClick={refreshPro}
+                disabled={proBusy}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-surface-hover hover:bg-white/10 text-xs transition-colors disabled:opacity-50"
+              >
+                <RefreshCw size={12} className={proBusy ? "animate-spin" : ""} />
+                立即校验
+              </button>
+            </div>
+          </>
+        )}
       </SettingsGroup>
 
       {/* 接入模式：iOS/Android 系统强制 TUN 接管，无切换意义，移动端不渲染 */}

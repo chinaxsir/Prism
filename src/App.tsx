@@ -32,6 +32,23 @@ export default function App() {
     };
   }, []);
 
+  // 授权实时检测兜底：回前台（APP 常驻后台后重新使用）与每 5 分钟定时
+  // 触发一次联网校验，与 Rust 侧周期任务互为冗余，保证断网/失效立即锁功能
+  useEffect(() => {
+    const refresh = () => {
+      useProStore.getState().refresh().catch(() => undefined);
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    const timer = setInterval(refresh, 5 * 60 * 1000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(timer);
+    };
+  }, []);
+
   // 监听内核状态广播：订阅增删改/设置变更触发的 restart_core
   // 对前端透明，重启成功或失败转 Error 都能即时对齐，无需轮询
   useEffect(() => {
