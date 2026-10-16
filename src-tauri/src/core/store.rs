@@ -238,6 +238,11 @@ fn write_subscriptions(data_dir: &Path, records: &[SubscriptionRecord]) -> anyho
     Ok(())
 }
 
+/// 写入完整订阅列表（云端同步对账时更新备注名等场景）
+pub fn save_subscriptions(data_dir: &Path, records: &[SubscriptionRecord]) -> anyhow::Result<()> {
+    write_subscriptions(data_dir, records)
+}
+
 /// 记录一次订阅更新（同 URL 覆盖时间戳；多订阅模型，保留全部记录）
 pub fn upsert_subscription(data_dir: &Path, url: &str) -> anyhow::Result<()> {
     let mut records = load_subscriptions(data_dir);

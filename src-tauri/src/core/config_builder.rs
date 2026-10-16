@@ -152,6 +152,15 @@ struct ClashNode {
     /// hysteria2 混淆密码（字段 obfs-password）
     #[serde(default, rename = "obfs-password")]
     obfs_password: Option<String>,
+
+    // ---- Hysteria v1 鉴权（mihomo 字段拼写不一：auth-str / auth_str / auth_str2）----
+    #[serde(default, rename = "auth-str", alias = "auth_str", alias = "auth_str2")]
+    auth_str: Option<String>,
+    /// hysteria v1 上行/下行带宽提示（"50 Mbps"）；sing-box 侧可选，仅接受纯数字
+    #[serde(default)]
+    up: Option<String>,
+    #[serde(default)]
+    down: Option<String>,
     #[serde(default, rename = "http-opts")]
     http_opts: Option<HttpOpts>,
     #[serde(default, rename = "h2-opts")]
@@ -853,6 +862,13 @@ fn emit_node(
     }
     match node_to_outbound(node) {
         Some((mut outbound, note)) => {
+            if outbound.is_null() {
+                // 转换器返回 Null：字段缺失等带原因的跳过（区别于未知类型）
+                if let Some(note) = note {
+                    warnings.push(format!("节点 '{}': {}", node.name, note));
+                }
+                return None;
+            }
             outbound["tag"] = json!(tag);
             if let Some(note) = note {
                 warnings.push(format!("节点 '{}': {}", node.name, note));
@@ -989,6 +1005,14 @@ fn parse_rule_line(
 
 // ---------------- 节点转换 ----------------
 
+/// mihomo 带宽字段（"50" / "50 Mbps"）→ Mbps 数值；取首段数字，
+/// 非纯数字头部（如 "5MB/s"）返回 None（sing-box 侧该字段可选）
+fn parse_bandwidth(raw: &Option<String>) -> Option<u32> {
+    raw.as_deref()
+        .and_then(|s| s.trim().split_whitespace().next())
+        .and_then(|head| head.parse::<u32>().ok())
+}
+
 /// 节点转换；返回 (出站, 可选警告)，未知类型返回 None
 fn node_to_outbound(node: &ClashNode) -> Option<(Value, Option<String>)> {
     let base = json!({
@@ -1109,10 +1133,33 @@ fn node_to_outbound(node: &ClashNode) -> Option<(Value, Option<String>)> {
         }
 
         "hysteria" => {
+            // Hysteria v1（QUIC）：mihomo 认证字段拼写不一
+            // （auth-str / auth_str / auth_str2 / password），依次回退
+            let auth_str = node
+                .auth_str
+                .clone()
+                .or_else(|| node.password.clone())
+                .unwrap_or_default();
+            if auth_str.is_empty() {
+                return Some((
+                    Value::Null,
+                    Some(format!(
+                        "节点「{}」hysteria 缺少 auth-str/password 鉴权字段，已跳过",
+                        node.name
+                    )),
+                ));
+            }
             let mut o = json!({
                 "type": "hysteria",
-                "auth_str": node.password.clone().unwrap_or_default(),
+                "auth_str": auth_str,
             });
+            // 带宽提示仅接受纯数字 Mbps（"50 Mbps" 取头部数字，单位串忽略）
+            if let Some(bw) = parse_bandwidth(&node.up) {
+                o["up_mbps"] = json!(bw);
+            }
+            if let Some(bw) = parse_bandwidth(&node.down) {
+                o["down_mbps"] = json!(bw);
+            }
             merge(&mut o, &base);
             o["tls"] = tls_block(node);
             (o, None)
@@ -1476,6 +1523,72 @@ fn strip_nulls(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回归（协议补全）：hysteria v1 认证字段 auth-str / auth_str / auth_str2
+    /// 与 password 依次回退；全部缺失时节点被跳过并给出原因
+    #[test]
+    fn hysteria_v1_auth_str_fallbacks() {
+        let yaml = |extra: &str| {
+            format!(
+                r#"
+proxies:
+  - {{name: HY1, type: hysteria, server: 1.2.3.4, port: 443, {extra}}}
+  - {{name: HK1, type: ss, server: 1.2.3.4, port: 8388, cipher: aes-256-gcm, password: pw}}
+proxy-groups:
+  - {{name: 节点选择, type: select, proxies: [HY1, HK1]}}
+rules:
+  - MATCH,节点选择
+"#
+            )
+        };
+        for extra in [
+            "auth-str: myauth",
+            "auth_str: myauth",
+            "auth_str2: myauth",
+            "password: myauth",
+        ] {
+            let built = build(
+                &[("https://sub.example".into(), "订阅1".into(), yaml(extra))],
+                &[],
+                RunMode::SystemProxy,
+                &UserSettings::default(),
+                &std::env::temp_dir().join("prism-cb-test-hy1"),
+                &std::env::temp_dir().join("prism-cb-test-hy1/kernel"),
+                "127.0.0.1:9090",
+                "secret",
+            )
+            .unwrap_or_else(|e| panic!("{extra}: {e}"));
+            let hy = built.config["outbounds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["type"] == "hysteria")
+                .unwrap_or_else(|| panic!("{extra}: hysteria outbound missing"));
+            assert_eq!(hy["auth_str"].as_str(), Some("myauth"), "{extra}");
+        }
+
+        // 全缺鉴权字段：节点被跳过（不出站）且原因写入 warnings
+        let built = build(
+            &[("https://sub.example".into(), "订阅1".into(), yaml(""))],
+            &[],
+            RunMode::SystemProxy,
+            &UserSettings::default(),
+            &std::env::temp_dir().join("prism-cb-test-hy1"),
+            &std::env::temp_dir().join("prism-cb-test-hy1/kernel"),
+            "127.0.0.1:9090",
+            "secret",
+        )
+        .expect("build must succeed");
+        assert!(built.config["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|o| o["type"] != "hysteria"));
+        assert!(built
+            .warnings
+            .iter()
+            .any(|w| w.contains("缺少 auth-str/password")));
+    }
 
     /// 回归（内置分流规则）：内置常见规则必须存在，且相对顺序为
     /// 自定义规则 < 内置规则 < 订阅规则（优先级递减），

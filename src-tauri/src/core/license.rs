@@ -55,6 +55,10 @@ pub struct EntitlementStatus {
     pub max_seats: Option<u32>,
     /// 已用席位数（服务端返回时透传）
     pub used_seats: Option<u32>,
+    /// 服务端允许订阅云端同步（Pro/买断且未被管控）；
+    /// 旧版缓存缺失该字段时默认 false（每日同步后自动修正）
+    #[serde(default)]
+    pub sync_available: bool,
 }
 
 impl EntitlementStatus {
@@ -68,6 +72,7 @@ impl EntitlementStatus {
             plan: None,
             max_seats: None,
             used_seats: None,
+            sync_available: false,
         }
     }
 
@@ -275,7 +280,12 @@ fn server_base(_settings: &UserSettings) -> String {
     DEFAULT_SERVER.trim_end_matches('/').to_string()
 }
 
-fn http_builder() -> Result<reqwest::ClientBuilder> {
+/// 授权/同步 API 共用基地址（订阅云端同步与授权同域）
+pub(crate) fn api_base(_settings: &UserSettings) -> String {
+    DEFAULT_SERVER.trim_end_matches('/').to_string()
+}
+
+pub(crate) fn http_builder() -> Result<reqwest::ClientBuilder> {
     Ok(reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         // 连接阶段短超时：黑洞地址快速失败，尽快进入 IPv4 重试
@@ -288,7 +298,7 @@ fn http_builder() -> Result<reqwest::ClientBuilder> {
 /// 直连失败后强制 IPv4 源重试：部分网络 IPv6 出口为黑洞（AAAA 优先 +
 /// SYN 无响应），hyper 顺序尝试地址会耗尽超时。用 0.0.0.0 绑定源地址时
 /// v6 目标因地址族不匹配立即跳过，连接器秒级回退到 v4 目标。
-async fn send_with_v4_fallback(
+pub(crate) async fn send_with_v4_fallback(
     make: impl Fn(&reqwest::Client) -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response> {
     let mut last: Option<String> = None;
@@ -341,6 +351,9 @@ struct ActivateResponse {
     /// 到期时间（ISO8601）：试用 = 到期时间；Pro = 当前计费周期结束；买断 = null
     #[serde(default)]
     expires_at: Option<String>,
+    /// Pro/买断且未被管控 → 允许订阅云端同步
+    #[serde(default)]
+    sync_available: bool,
 }
 
 /// GET /api/license/status 响应
@@ -356,6 +369,8 @@ struct StatusResponse {
     max_seats: Option<u32>,
     #[serde(default)]
     used_seats: Option<u32>,
+    #[serde(default)]
+    sync_available: bool,
 }
 
 /// 状态查询失败分类：决定走「清除缓存」还是「离线锁定」
@@ -441,6 +456,7 @@ fn map_entitlement(
     expires_at: Option<i64>,
     max_seats: Option<u32>,
     used_seats: Option<u32>,
+    sync_available: bool,
 ) -> EntitlementStatus {
     let unlocked = plan == "pro" || plan == "team";
     let expired = expires_at.map(|exp| exp <= now_secs()).unwrap_or(false) || server_status == "expired";
@@ -462,6 +478,7 @@ fn map_entitlement(
         plan: (!plan.is_empty()).then(|| plan.to_string()),
         max_seats,
         used_seats,
+        sync_available: unlocked && sync_available,
     }
 }
 
@@ -575,6 +592,7 @@ pub async fn activate(
         data.expires_at.as_deref().and_then(parse_expires_at),
         data.max_seats,
         None,
+        data.sync_available,
     );
     match fetch_status(&base, license_key).await {
         Ok(s) if s.valid => {
@@ -584,6 +602,7 @@ pub async fn activate(
                 s.expires_at.as_deref().and_then(parse_expires_at),
                 s.max_seats,
                 s.used_seats,
+                s.sync_available,
             );
         }
         Ok(_) => {}
@@ -630,6 +649,7 @@ pub async fn verify_remote(
                 s.expires_at.as_deref().and_then(parse_expires_at),
                 s.max_seats,
                 s.used_seats,
+                s.sync_available,
             );
             // 同步成功：授权信息（含有效期）重新加密落盘，并记为当天已同步
             save_cache(
@@ -725,4 +745,14 @@ pub async fn submit_store_receipt(
 pub fn deactivate(data_dir: &Path) -> EntitlementStatus {
     clear_cache(data_dir);
     EntitlementStatus::inactive()
+}
+
+/// 从加密缓存读取同步凭据对 (license_key, email)；
+/// 未激活或邮箱缺失（旧版迁移缓存）时返回 None —— 云端同步不可用。
+pub fn cached_credentials(data_dir: &Path) -> Option<(String, String)> {
+    load_cache(data_dir).and_then(|c| {
+        let email = c.email.trim().to_lowercase();
+        (!c.license.is_empty() && !email.is_empty())
+            .then(|| (c.license, email))
+    })
 }

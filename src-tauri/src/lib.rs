@@ -73,6 +73,8 @@ pub fn run() {
             // 更新本地加密缓存；当天内授权只从缓存文件读取，不再联网。
             // 断网/服务不可达时授权从本地加密文件读取（未过期继续可用），
             // 每小时重试一次，恢复联网即以服务端结果修正。
+            // Pro/买断（sync_available）：每轮循环顺带做一次订阅云端对账，
+            // 换设备登录后自动双向合并（静默）。
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<core::state::AppState>();
@@ -88,6 +90,7 @@ pub fn run() {
                         // 状态可能随时间跨过有效期，按文件内容刷新内存态
                         state.apply_entitlement(cache);
                     }
+                    core::sync_links::reconcile(&handle).await;
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 }
             });

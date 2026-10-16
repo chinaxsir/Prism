@@ -83,9 +83,7 @@ struct PreparedStart {
 
 /// 启动前的全部准备与校验（不提权变更、不写内核状态）：
 /// 提权预检 → 工作目录 → 订阅 profile → 内核二进制 → 端口预检 → 构建配置
-async fn prepare_start(
-    state: &State<'_, AppState>,
-) -> Result<PreparedStart, String> {
+async fn prepare_start(state: &AppState) -> Result<PreparedStart, String> {
     let mode = *state.mode.read();
     let settings = state.settings.read().clone();
 
@@ -179,7 +177,7 @@ async fn prepare_start(
 async fn apply_prepared(
     prepared: PreparedStart,
     app: &AppHandle,
-    state: &State<'_, AppState>,
+    state: &AppState,
 ) -> Result<(), String> {
     let PreparedStart {
         settings,
@@ -330,7 +328,7 @@ fn load_enabled_profiles(state: &AppState) -> Vec<(String, String, String)> {
 
 /// 重建配置并重启内核（调用方保证当前为 Running）。
 /// 先构建并静态校验新配置，通过后才停旧内核；校验失败则网络不中断。
-async fn restart_core(app: &AppHandle, state: &State<'_, AppState>) -> Result<(), String> {
+pub(crate) async fn restart_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
     // 1. 准备新配置（不改变任何状态）
     let prepared = prepare_start(state).await?;
 
@@ -686,6 +684,24 @@ pub async fn update_subscription(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    refresh_subscription(&app, &state, &url).await?;
+    // Pro/买断：静默上报云端（其他设备下次对账时拉取）
+    let app2 = app.clone();
+    let url2 = url.clone();
+    tauri::async_runtime::spawn(async move {
+        super::super::core::sync_links::push_link(&app2, &url2, None).await;
+    });
+    Ok(())
+}
+
+/// 订阅刷新核心逻辑（IPC 命令与云端同步对账共用）。
+/// 下载 → 解析校验 → 落盘 → 记录 → 拉取 providers → 内核运行中则重启生效。
+pub(crate) async fn refresh_subscription(
+    app: &AppHandle,
+    state: &AppState,
+    url: &str,
+) -> Result<(), String> {
+    let url = url.to_string();
     // 内核运行中时，直连失败的最终兜底是经本地 mixed 入站转发。
     // 移动端 mixed 入站已移除，流量全走 TUN，无需本地代理兜底。
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -782,12 +798,12 @@ pub async fn update_subscription(
         .map_err(|e| format!("保存订阅记录失败: {e}"))?;
 
     // 拉取订阅内声明的 http proxy-providers（失败只告警，不阻断订阅更新）
-    refresh_providers(&state, &url, &text).await;
+    refresh_providers(state, &url, &text).await;
 
     // 内核运行中：重建配置重启，新订阅即刻生效
     if *state.status.read() == CoreStatus::Running {
         tracing::info!("subscription updated, restarting core");
-        restart_core(&app, &state).await?;
+        restart_core(app, state).await?;
     }
 
     Ok(())
@@ -1183,6 +1199,12 @@ pub async fn delete_subscription(
         .map_err(|e| format!("删除订阅失败: {e}"))?;
     if removed {
         std::fs::remove_file(crate::core::store::profile_path(&state.data_dir, &url)).ok();
+        // Pro/买断：静默上报云端删除（其他设备下次对账时同步删除）
+        let app2 = app.clone();
+        let url2 = url.clone();
+        tauri::async_runtime::spawn(async move {
+            super::super::core::sync_links::push_delete(&app2, &url2).await;
+        });
         if *state.status.read() == CoreStatus::Running {
             restart_core(&app, &state).await?;
         }
@@ -1195,6 +1217,7 @@ pub async fn delete_subscription(
 pub async fn activate_pro(
     code: String,
     email: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<EntitlementStatus, String> {
     let data_dir = state.data_dir.clone();
@@ -1203,6 +1226,12 @@ pub async fn activate_pro(
         .await
         .map_err(|e| e.to_string())?;
     state.apply_entitlement(next.clone());
+    // Pro/买断：激活成功后立即做一次云端订阅对账（静默）
+    if next.is_unlocked() && next.sync_available {
+        tauri::async_runtime::spawn(async move {
+            super::super::core::sync_links::reconcile(&app).await;
+        });
+    }
     Ok(next)
 }
 

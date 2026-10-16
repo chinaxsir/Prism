@@ -1,4 +1,5 @@
-//! 分享链接（URI）解析器：ss/ssr/vmess/vless/trojan/hysteria2/tuic → Clash 节点
+//! 分享链接（URI）解析器：ss/vmess/vless/trojan/hysteria(2)/tuic/socks → Clash 节点
+//! （ssr:// 明确报错：内核 sing-box 1.6.0+ 已移除该协议）
 //!
 //! 机场默认订阅多为 base64 包裹的 URI 列表，本模块负责把每行链接还原成
 //! `ClashNode`（config_builder 的 Clash 结构），再合并进统一 pipeline。
@@ -36,7 +37,8 @@ pub fn parse_line(line: &str) -> Result<Option<Value>> {
     let (scheme, rest) = line.split_once("://").context("缺少 ://")?;
     let node = match scheme {
         "ss" => parse_ss(rest)?,
-        "ssr" => parse_ssr(rest)?,
+        // SSR 已被内核（sing-box 1.6.0+）移除：明确报错而非解析后静默丢弃
+        "ssr" => bail!("SSR 协议已被内核（sing-box 1.6.0+）移除，无法支持"),
         "vmess" => parse_vmess(rest)?,
         "vless" => parse_vless(rest)?,
         "trojan" => parse_trojan(rest)?,
@@ -210,44 +212,6 @@ fn parse_ss(rest: &str) -> Result<Value> {
 /// 分离载荷与 #name（fragment 可能含 %XX 编码）
 fn payload_and_name(rest: &str) -> (&str, &str) {
     rest.split_once('#').unwrap_or((rest, ""))
-}
-
-/// ssr://host:port:protocol:method:obfs:base64(password)/?obfsparam=base64&protoparam=base64&remarks=base64
-fn parse_ssr(rest: &str) -> Result<Value> {
-    let decoded = b64_decode_str(rest)?;
-    let (main, query) = decoded.split_once("/?").unwrap_or((decoded.as_str(), ""));
-    let parts: Vec<&str> = main.split(':').collect();
-    if parts.len() < 6 {
-        bail!("SSR 格式不完整");
-    }
-    let (server, port, protocol, method, obfs) = (
-        parts[0],
-        parts[1].parse::<u16>().context("端口无效")?,
-        parts[2],
-        parts[3],
-        parts[4],
-    );
-    // parts[5] = base64(password)
-    let password = b64_decode_str(parts[5])?;
-
-    let params: std::collections::HashMap<_, _> = parse_query(query).into_iter().collect();
-    let remarks = params
-        .get("remarks")
-        .and_then(|r| b64_decode_str(r).ok())
-        .unwrap_or_default();
-
-    Ok(json!({
-        "name": remarks,
-        "type": "ssr",
-        "server": server,
-        "port": port,
-        "cipher": method,
-        "password": password,
-        "protocol": protocol,
-        "obfs": obfs,
-        "protocol-param": params.get("protoparam").and_then(|p| b64_decode_str(p).ok()).unwrap_or_default(),
-        "obfs-param": params.get("obfsparam").and_then(|p| b64_decode_str(p).ok()).unwrap_or_default(),
-    }))
 }
 
 /// vmess://base64(JSON)（名称取 JSON 的 ps 字段，#fragment 忽略）
