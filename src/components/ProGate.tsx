@@ -169,6 +169,9 @@ export function ActivateProModal({
               <p className="text-xs text-gray-500">
                 邮箱为可选，用于授权校验；若该 License Key 需邮箱验证，请填写购买时预留的邮箱。激活成功后本页将自动显示订阅信息。
               </p>
+              <p className="text-[11px] text-gray-600">
+                激活失败时请记下提示中的错误码，可在官网帮助中心按错误码查询具体原因。
+              </p>
               <div className="flex justify-end gap-2">
                 <button
                   onClick={dismiss}

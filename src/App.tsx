@@ -22,30 +22,13 @@ export default function App() {
     initPro();
   }, [initPro]);
 
-  // 授权状态广播（启动后台校验 / 激活 / 解绑后，Rust 侧推送）
+  // 授权状态广播（每日同步 / 激活 / 解绑后，Rust 侧推送；当天内只读本地缓存不联网）
   useEffect(() => {
     const unlisten = listen<Entitlement>("pro://status", (event) => {
       useProStore.getState().setEntitlement(event.payload);
     });
     return () => {
       unlisten.then((fn) => fn());
-    };
-  }, []);
-
-  // 授权实时检测兜底：回前台（APP 常驻后台后重新使用）与每 5 分钟定时
-  // 触发一次联网校验，与 Rust 侧周期任务互为冗余，保证断网/失效立即锁功能
-  useEffect(() => {
-    const refresh = () => {
-      useProStore.getState().refresh().catch(() => undefined);
-    };
-    const onVisible = () => {
-      if (document.visibilityState === "visible") refresh();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    const timer = setInterval(refresh, 5 * 60 * 1000);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisible);
-      clearInterval(timer);
     };
   }, []);
 

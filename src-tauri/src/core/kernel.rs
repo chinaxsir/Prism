@@ -721,7 +721,7 @@ impl KernelApi {
     /// 改为逐节点测速后，结果可靠且与 Clash API 响应格式一致。
     ///
     /// build 157 用户方案：串行 51 节点 × 5s 超时实测过慢（>2 分钟），
-    /// 改为 buffer_unordered(20) 并发 + 默认超时 2500ms；app 提供时逐结果
+    /// 改为 buffer_unordered(32) 并发 + 默认超时 2000ms；app 提供时逐结果
     /// 推送 `url-test-update` 事件（delay=null 表示失败），前端实时刷新
     /// 单节点延迟，无需等全部完成
     pub async fn group_url_test(
@@ -748,12 +748,14 @@ impl KernelApi {
         }
 
         let test_url = url.unwrap_or("http://www.gstatic.com/generate_204");
-        // 单节点超时强制 2500ms（build 157 用户方案）：并发 20 路下整体
-        // 耗时 ≈ ceil(节点数/20) × 2.5s；忽略调用方传入的更长超时
-        let timeout = timeout_ms.unwrap_or(2500).min(2500);
+        // 单节点超时强制 2000ms：真实反映可用性——2s 内无响应的节点视为不可用，
+        // 拉满超时只会拖慢整体测速。并发 32 路下整体耗时 ≈ ceil(节点数/32) × 2s；
+        // 每个结果完成后立即推送 url-test-update，前端逐节点实时刷新
+        let timeout = timeout_ms.unwrap_or(2000).min(2000);
         let group_tag = name.to_string();
 
         use futures_util::StreamExt;
+        const TEST_CONCURRENCY: usize = 32;
         let results: Vec<(String, Option<u64>)> = futures_util::stream::iter(members)
             .map(|member| {
                 let endpoint = format!("{}/proxies/{}/delay", self.base, member);
@@ -793,7 +795,7 @@ impl KernelApi {
                     (member, delay)
                 }
             })
-            .buffer_unordered(20)
+            .buffer_unordered(TEST_CONCURRENCY)
             .collect::<Vec<_>>()
             .await;
 

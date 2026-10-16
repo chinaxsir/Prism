@@ -55,6 +55,9 @@ base64 = "0.22"
 thiserror = "1.0"
 jsonwebtoken = "9"
 uuid = { version = "1", features = ["v4"] }
+# 授权缓存加密（AES-256-GCM + SHA-256 密钥派生）：防逆向读取与篡改
+aes-gcm = "0.10"
+sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dashmap = "5.5"

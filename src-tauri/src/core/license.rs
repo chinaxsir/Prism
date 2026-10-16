@@ -1,21 +1,28 @@
-//! Pro 授权客户端：设备标识、HTTP 激活与状态查询、本地缓存。
+//! Pro 授权客户端：设备标识、HTTP 激活与状态查询、加密本地缓存、每日同步。
 //!
 //! 协议（无 token 鉴权；服务端部署于 Cloudflare 后，所有请求带 `X-Request-Source: prism-app` 头）：
 //! - 激活：POST /api/license/activate，body {license_key, email, device_id, device_name}
-//!   200 → {ok, device_id, plan: "free"|"pro"|"team", max_seats?}；401 无效/停用；409 设备已绑定等冲突；429 → {retry_after: 秒}
+//!   200 → {ok, device_id, plan: "free"|"pro"|"team", max_seats, expires_at}；
+//!   400 invalid_input；403 activation_failed；409 seat_limit_reached；429 → {retry_after: 秒}；5xx server_error
 //! - 状态：GET /api/license/status?license_key=...
-//!   200 → {valid, plan, status, expires_at(ISO8601|null), max_seats?, used_seats?}
+//!   200 → {valid, plan, status, expires_at(ISO8601|null), max_seats, used_seats}
 //!
-//! 授权有效性策略：仅服务端确认 active 时解锁 Pro；断网/服务不可达立即
-//! 锁定（status=offline），联网后由后台周期校验自动恢复。不做离线宽限。
+//! 授权有效性策略：仅服务端确认 active 时解锁 Pro。每天首次启动 APP 时自动
+//! 与服务器同步一次并更新本地加密缓存；当天内授权信息只从该文件读取，不再
+//! 联网。当天首次同步失败（断网/服务不可达）立即锁定（status=offline），
+//! 恢复联网后自动重试。
 //!
-//! 本地仅缓存 license_key 与最近一次授权快照（信任 HTTPS 传输，不再做本地签名验证）。
+//! 本地缓存整体 AES-256-GCM 加密落盘（license.dat），密钥由设备 ID 派生：
+//! 拷走文件读不出 Key/邮箱/有效期，篡改密文解密即失败，防逆向与破解。
 
 use std::path::{Path, PathBuf};
 
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::core::state::UserSettings;
 
@@ -78,6 +85,28 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// 当前 UTC 日期（YYYY-MM-DD），用于「每天首次启动同步」节流。
+/// 同步节流以 UTC 日期为准（与服务器时间基准一致，不受设备本地时区影响）。
+fn today_utc() -> String {
+    let days = now_secs().div_euclid(86400);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Howard Hinnant 的 civil_from_days 算法：距 1970-01-01 的天数 → 公历日期
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 // ---------------- 设备标识 ----------------
 
 /// 读取/首次生成设备 ID（每安装实例唯一，落盘 device.json）。
@@ -103,35 +132,126 @@ fn device_name() -> String {
         .unwrap_or_else(|_| "Prism Client".into())
 }
 
-// ---------------- 本地缓存 ----------------
+// ---------------- 本地加密缓存 ----------------
 
+/// 缓存明文结构（整体加密后落盘）
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CachedLicense {
     license: String,
+    /// 激活时绑定的邮箱（同步/查询凭据对）
+    #[serde(default)]
+    email: String,
+    /// 最近一次与服务器同步成功的日期（UTC YYYY-MM-DD）
+    #[serde(default)]
+    synced_on: String,
     entitlement: EntitlementStatus,
 }
 
+/// 旧版明文缓存（license_cache.json），仅用于一次性迁移
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyCache {
+    license: String,
+    entitlement: EntitlementStatus,
+}
+
+/// 加密容器魔数 + 版本（换密钥/格式时递增）
+const CACHE_MAGIC: &[u8; 6] = b"PRLIC1";
+/// GCM nonce 长度
+const NONCE_LEN: usize = 12;
+
 fn cache_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("license.dat")
+}
+
+fn legacy_cache_path(data_dir: &Path) -> PathBuf {
     data_dir.join("license_cache.json")
 }
 
+/// 缓存加密密钥：SHA-256(固定盐 || 设备 ID)。
+/// 绑定本机设备标识——文件被拷到其他机器/环境无法解密。
+fn cache_key(data_dir: &Path) -> [u8; 32] {
+    let device = device_id(data_dir).unwrap_or_else(|_| "prism-unknown-device".into());
+    let digest = Sha256::digest(format!("prism-license-v1:{device}").as_bytes());
+    digest.into()
+}
+
+/// AES-256-GCM 加密：输出 PRLIC1 || nonce(12B) || ciphertext(+tag)
+fn encrypt_cache(key: &[u8; 32], cache: &CachedLicense) -> Result<Vec<u8>> {
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|e| anyhow::anyhow!("license cache key error: {e}"))?;
+    // uuid v4 内部使用系统 CSPRNG：取 16 字节随机数截 12 字节作 nonce
+    let uuid_bytes = *uuid::Uuid::new_v4().as_bytes();
+    let nonce = Nonce::from_slice(&uuid_bytes[..NONCE_LEN]);
+    let ciphertext = cipher
+        .encrypt(nonce, serde_json::to_vec(cache)?.as_slice())
+        .map_err(|e| anyhow::anyhow!("license cache encrypt error: {e}"))?;
+
+    let mut out = Vec::with_capacity(CACHE_MAGIC.len() + NONCE_LEN + ciphertext.len());
+    out.extend_from_slice(CACHE_MAGIC);
+    out.extend_from_slice(&uuid_bytes[..NONCE_LEN]);
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+/// 解密并反序列化；密文损坏/被篡改/密钥不匹配均返回 None
+fn decrypt_cache(key: &[u8; 32], raw: &[u8]) -> Option<CachedLicense> {
+    if raw.len() < CACHE_MAGIC.len() + NONCE_LEN + 16 {
+        return None;
+    }
+    if &raw[..CACHE_MAGIC.len()] != CACHE_MAGIC {
+        return None;
+    }
+    let cipher = Aes256Gcm::new_from_slice(key).ok()?;
+    let nonce = Nonce::from_slice(&raw[CACHE_MAGIC.len()..CACHE_MAGIC.len() + NONCE_LEN]);
+    let plaintext = cipher
+        .decrypt(nonce, &raw[CACHE_MAGIC.len() + NONCE_LEN..])
+        .ok()?;
+    serde_json::from_slice(&plaintext).ok()
+}
+
 fn load_cache(data_dir: &Path) -> Option<CachedLicense> {
-    let raw = std::fs::read_to_string(cache_path(data_dir)).ok()?;
-    serde_json::from_str(&raw).ok()
+    let key = cache_key(data_dir);
+
+    if let Ok(raw) = std::fs::read(cache_path(data_dir))
+        && let Some(cache) = decrypt_cache(&key, &raw)
+    {
+        return Some(cache);
+    }
+
+    // 旧版明文缓存一次性迁移为加密格式（随后删除明文文件）
+    if let Ok(text) = std::fs::read_to_string(legacy_cache_path(data_dir))
+        && let Ok(legacy) = serde_json::from_str::<LegacyCache>(&text)
+    {
+        let migrated = CachedLicense {
+            license: legacy.license,
+            email: String::new(),
+            synced_on: String::new(),
+            entitlement: legacy.entitlement,
+        };
+        if save_cache(data_dir, &migrated).is_ok() {
+            std::fs::remove_file(legacy_cache_path(data_dir)).ok();
+            return Some(migrated);
+        }
+        return Some(migrated);
+    }
+
+    None
 }
 
 fn save_cache(data_dir: &Path, cache: &CachedLicense) -> Result<()> {
-    let raw = serde_json::to_vec_pretty(cache)?;
-    super::store::atomic_write(&cache_path(data_dir), &raw)?;
+    let key = cache_key(data_dir);
+    super::store::atomic_write(&cache_path(data_dir), &encrypt_cache(&key, cache)?)?;
     Ok(())
 }
 
 fn clear_cache(data_dir: &Path) {
     std::fs::remove_file(cache_path(data_dir)).ok();
+    std::fs::remove_file(legacy_cache_path(data_dir)).ok();
 }
 
-/// 启动期从缓存恢复（不联网；联网有效性由后台周期校验任务刷新）。
+/// 启动期从缓存恢复（不联网；当天有效性以后台每日同步为准）。
 /// 旧版缓存可能存有 grace（离线宽限）状态：该策略已移除，统一迁移为 offline 锁定。
 pub fn cached_entitlement(data_dir: &Path) -> EntitlementStatus {
     load_cache(data_dir)
@@ -205,7 +325,7 @@ async fn get_with_fallback(url: &str, license_key: &str) -> Result<reqwest::Resp
 
 // ---------------- 协议响应体 ----------------
 
-/// POST /api/license/activate 成功响应（device_id 客户端不消费，忽略）
+/// POST /api/license/activate 成功响应（device_id 回显不消费，忽略）
 #[derive(Deserialize)]
 struct ActivateResponse {
     ok: bool,
@@ -213,6 +333,9 @@ struct ActivateResponse {
     plan: String,
     #[serde(default)]
     max_seats: Option<u32>,
+    /// 到期时间（ISO8601）：试用 = 到期时间；Pro = 当前计费周期结束；买断 = null
+    #[serde(default)]
+    expires_at: Option<String>,
 }
 
 /// GET /api/license/status 响应
@@ -241,15 +364,19 @@ enum StatusError {
     Transient(String),
 }
 
-/// 提取服务端错误体 message（兼容 {message} / {error: "..."} / {error:{message}}）
+/// 提取服务端错误体的官方文案与机器可读码，组装为
+/// 「{官方 message}（错误码 {error} / HTTP {status}）」格式——
+/// 用户可拿错误码到官网帮助中心查询具体原因。
+/// 兼容 {message, error:"code"} 与 {error:{message}} 两种错误体。
 async fn error_message(resp: reqwest::Response) -> String {
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+
+    let code = parsed.get("error").and_then(|e| e.as_str());
     let message = parsed
         .get("message")
         .and_then(|m| m.as_str())
-        .or_else(|| parsed.get("error").and_then(|e| e.as_str()))
         .or_else(|| {
             parsed
                 .get("error")
@@ -257,8 +384,14 @@ async fn error_message(resp: reqwest::Response) -> String {
                 .and_then(|m| m.as_str())
         })
         .filter(|m| !m.is_empty())
-        .unwrap_or(&text);
-    format!("授权服务返回错误（HTTP {status}）：{message}")
+        .unwrap_or(text.trim());
+
+    match (code, message.is_empty()) {
+        (Some(c), false) => format!("{message}（错误码 {c} / HTTP {status}）"),
+        (Some(c), true) => format!("授权服务返回错误（错误码 {c} / HTTP {status}）"),
+        (None, false) => format!("{message}（HTTP {status}）"),
+        (None, true) => format!("授权服务返回错误（HTTP {status}）"),
+    }
 }
 
 /// 从 429 响应体提取 retry_after（秒）；缺失/非法时回退 30
@@ -429,9 +562,15 @@ pub async fn activate(
         bail!("激活失败：服务端未确认（ok=false）");
     }
 
-    // 激活响应不含到期时间：best-effort 拉一次状态补全 expires_at/kind；
-    // 查询失败不影响激活结果（下次 verify_remote 会修正）
-    let mut ent = map_entitlement(&data.plan, "", None, data.max_seats, None);
+    // 优先用激活响应自带的 expires_at；缺失时 best-effort 拉一次状态补全
+    // （查询失败不影响激活结果，恢复联网后每日同步会修正）
+    let mut ent = map_entitlement(
+        &data.plan,
+        "",
+        data.expires_at.as_deref().and_then(parse_expires_at),
+        data.max_seats,
+        None,
+    );
     match fetch_status(&base, license_key).await {
         Ok(s) if s.valid => {
             ent = map_entitlement(
@@ -449,17 +588,20 @@ pub async fn activate(
         Err(e) => tracing::warn!("post-activate status query failed: {e:?}"),
     }
 
+    // 首次激活：授权中心信息（Key、邮箱、有效期）加密落盘并记为当天已同步
     save_cache(
         data_dir,
         &CachedLicense {
             license: license_key.to_string(),
+            email,
+            synced_on: today_utc(),
             entitlement: ent.clone(),
         },
     )?;
     Ok(ent)
 }
 
-/// 联网校验；网络不可用时离线评估宽限期
+/// 联网校验授权并更新本地加密缓存（成功后记为当天已同步）
 pub async fn verify_remote(
     data_dir: &Path,
     settings: &UserSettings,
@@ -484,11 +626,13 @@ pub async fn verify_remote(
                 s.max_seats,
                 s.used_seats,
             );
-            // 吊销/过期/降级同样落盘，保证重启后状态一致
+            // 同步成功：授权信息（含有效期）重新加密落盘，并记为当天已同步
             save_cache(
                 data_dir,
                 &CachedLicense {
                     license: cache.license,
+                    email: cache.email,
+                    synced_on: today_utc(),
                     entitlement: ent.clone(),
                 },
             )?;
@@ -512,8 +656,38 @@ pub async fn verify_remote(
     }
 }
 
+/// 每天首次启动时与服务器同步授权；当天内已同步则只读本地加密缓存，不再联网。
+/// 返回 Some(状态) 表示需要应用到内存并广播（None = 无需变更）。
+///
+/// 判定规则：
+/// - 本地无缓存（未激活）→ 无需同步
+/// - 缓存 synced_on == 今天 且状态非 offline → 当天已同步，只读文件
+/// - 否则（跨天 / 上次同步失败留有 offline）→ 联网校验：
+///   成功 → 更新缓存并应用新状态；失败 → 应用 offline 锁定（不更新 synced_on，
+///   恢复联网后下一轮自动重试）
+pub async fn daily_sync(
+    data_dir: &Path,
+    settings: &UserSettings,
+) -> Option<EntitlementStatus> {
+    let cache = load_cache(data_dir)?;
+    let today = today_utc();
+
+    if cache.synced_on == today && cache.entitlement.status != "offline" {
+        return None;
+    }
+
+    match verify_remote(data_dir, settings).await {
+        Ok(next) => Some(next),
+        Err(e) => {
+            // 429 限流等：保持缓存状态不变，等下一轮重试
+            tracing::warn!("daily license sync failed: {e}");
+            None
+        }
+    }
+}
+
 /// 断网/服务不可达时的授权状态：立即锁定 Pro（status=offline），
-/// 保留方案信息（plan/kind/expires_at）供 UI 展示；联网后周期校验自动恢复。
+/// 保留方案信息（plan/kind/expires_at）供 UI 展示；恢复联网后每日同步自动重试。
 fn offline_status(prev: &EntitlementStatus) -> EntitlementStatus {
     EntitlementStatus {
         status: "offline".into(),

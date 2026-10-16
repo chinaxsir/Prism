@@ -69,23 +69,21 @@ pub fn run() {
                 tracing::error!("mobile platform init failed: {e:#}");
             }
 
-            // 后台授权校验循环：启动时立即校验一次，此后每 5 分钟轮询。
-            // APP 常驻后台/长期不关闭也持续保证授权有效；断网或服务不可达
-            // 时 verify_remote 返回 offline 锁定态，Pro 功能随之关闭，
-            // 联网恢复后自动解锁。429 限流保持现状态不变。
+            // 每日授权同步：每天首次启动 APP 时与服务器同步一次授权信息并
+            // 更新本地加密缓存；当天内授权只从缓存文件读取，不再联网。
+            // offline（当天首次同步失败）状态每小时重试一次，恢复联网即解锁。
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<core::state::AppState>();
                 loop {
                     let settings = state.settings.read().clone();
-                    match core::license::verify_remote(&data_dir, &settings).await {
-                        Ok(next) => {
-                            tracing::info!("license verified: {}", next.status);
-                            state.apply_entitlement(next);
-                        }
-                        Err(e) => tracing::warn!("license verify failed: {e}"),
+                    if let Some(next) =
+                        core::license::daily_sync(&data_dir, &settings).await
+                    {
+                        tracing::info!("license synced: {}", next.status);
+                        state.apply_entitlement(next);
                     }
-                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 }
             });
 

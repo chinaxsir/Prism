@@ -426,7 +426,7 @@ async fn auto_select_fastest(api: &KernelApi, group: &str) -> anyhow::Result<Opt
     const GROUP_TYPES: [&str; 4] = ["Selector", "URLTest", "Fallback", "LoadBalance"];
     const BUILTIN_TAGS: [&str; 4] = ["direct", "block", "dns-out", "GLOBAL"];
 
-    let delays = api.group_url_test(group, None, Some(2500), None).await?;
+    let delays = api.group_url_test(group, None, Some(2000), None).await?;
     let proxies = api.get_proxies().await?;
     let empty = serde_json::Map::new();
     let map = proxies
