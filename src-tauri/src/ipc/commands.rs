@@ -669,6 +669,13 @@ pub async fn select_proxy(
         .await
         .map_err(|e| e.to_string())?;
 
+    // 全局模式同步（build 172 方案）：GLOBAL 选择组与主组保持同一节点。
+    // clash_mode global 规则指向独立的 GLOBAL 组，若只切主组，切到
+    // 全局模式后流量会落到 GLOBAL 的默认（第一个）节点——与用户所选脱节
+    if group != "GLOBAL" {
+        let _ = state.kernel_api().select_proxy("GLOBAL", &name).await;
+    }
+
     // 「切换策略时关闭连接」：断开后由应用按新节点重建，避免旧连接继续走旧节点
     if state.settings.read().close_connections_on_switch {
         let _ = state.kernel_api().close_all_connections().await;
@@ -830,11 +837,14 @@ async fn fetch_remote_text(url: &str, local_proxy: Option<u16>) -> Result<String
     // 原串行实现：第一次请求若撞上 IPv6 黑洞，必须等满 10s 连接超时才
     // 发起第二次，导入体感「非常慢」。竞速后任一栈先成功立即返回，
     // 整体只受实际网络 RTT 约束，不再为黑洞等待。
+    // 1. http1_only + http2 兜底说明：CF Worker 类端点 HTTP/2 流关闭
+    //    顺序异常是 error decoding response body 的另一诱因，优先 HTTP/1.1
     let build_direct_client = |force_v4: bool| -> Result<reqwest::Client, String> {
         let mut builder = reqwest::Client::builder()
+            .http1_only()
             // 部分机场面板按 UA 识别 Clash 系客户端分流订阅格式，非 Clash
-            // UA 会拿到浏览器提示页（0 节点）；用 mihomo 通行 UA + Accept */*
-            .user_agent("mihomo/1.18.3 ClashMetaForAndroid/2.10.1.Meta")
+            // UA 会拿到浏览器提示页（0 节点）；用 Clash for Windows 通行 UA
+            .user_agent("ClashforWindows/0.20.39")
             .timeout(std::time::Duration::from_secs(30))
             // 连接阶段独立短超时：黑洞地址快速失败
             .connect_timeout(std::time::Duration::from_secs(8))
@@ -877,7 +887,7 @@ async fn fetch_remote_text(url: &str, local_proxy: Option<u16>) -> Result<String
         let proxy = reqwest::Proxy::all(&format!("http://127.0.0.1:{port}"))
             .map_err(|e| format!("配置本地代理失败: {e}"))?;
         let builder = reqwest::Client::builder()
-            .user_agent("mihomo/1.18.3 ClashMetaForAndroid/2.10.1.Meta")
+            .user_agent("ClashforWindows/0.20.39")
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
             .proxy(proxy);
@@ -905,10 +915,13 @@ async fn fetch_remote_text(url: &str, local_proxy: Option<u16>) -> Result<String
 
 /// 用给定客户端执行一次 GET 文本下载（状态码 / UTF-8 校验）
 async fn try_fetch_text(client: &reqwest::Client, url: &str) -> Result<String, String> {
-    let resp = client
+    let mut resp = client
         .get(url)
-        // 与 mihomo/Clash 通行 UA 配套：部分面板按 Accept 头判定客户端类型
+        // 与 Clash 通行 UA 配套：部分面板按 Accept 头判定客户端类型
         .header("Accept", "*/*")
+        // 禁用压缩：部分 Worker 端点返回的 Content-Encoding 与实际正文
+        // 编码不一致，会触发 reqwest 解压器报错
+        .header("Accept-Encoding", "identity")
         .send()
         .await
         .map_err(|e| describe_reqwest_error(&e))?;
@@ -918,8 +931,28 @@ async fn try_fetch_text(client: &reqwest::Client, url: &str) -> Result<String, S
             resp.status()
         ));
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("读取响应失败: {e}"))?;
-    String::from_utf8(bytes.to_vec()).map_err(|_| "内容不是有效 UTF-8 文本".to_string())
+    // 分段流式读取（禁用 resp.text()/bytes 整包等待）：Cloudflare Worker
+    // 类端点下发完正文后常不发 TLS close_notify（或 HTTP/2 提前重置流），
+    // 整包读取会把已完整收到的数据包装成 error decoding response body
+    // 整包丢弃。流末尾报错时只要已读到有效内容（>32 字节）就保留使用
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            Ok(None) => break,
+            Err(e) => {
+                if buf.len() > 32 {
+                    tracing::warn!(
+                        "订阅流末尾非致命中断，保留已接收的 {} 字节: {e}",
+                        buf.len()
+                    );
+                    break;
+                }
+                return Err(format!("读取响应失败: {e}"));
+            }
+        }
+    }
+    String::from_utf8(buf).map_err(|_| "内容不是有效 UTF-8 文本".to_string())
 }
 
 /// reqwest 顶层 Display 只有 "error sending request"，

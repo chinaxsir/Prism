@@ -4,6 +4,34 @@
 每次发布前更新本文件，并在 Git 打对应 tag。
 移动端与桌面端共用同一版本 tag；更新内容按平台分节说明。
 
+## [0.3.13] - 2026-10-17
+
+> 根治订阅下载「error decoding response body」与三种模式上网断连。
+
+### 共用更新（移动端 + 桌面端）
+- **订阅下载流式容错**：弃用整包读取改为 chunk 分段流式——Cloudflare
+  Worker 类端点下发完正文后常不发 TLS close_notify（或 HTTP/2 提前
+  重置流），整包读取会把已完整收到的数据以 error decoding response
+  body 整包丢弃；流末尾报错时只要已收到有效内容即保留使用。
+- **直连客户端 http1_only**：规避 HTTP/2 流异常关闭诱因；UA 统一为
+  ClashforWindows/0.20.39 并带 Accept-Encoding: identity（禁压缩
+  协商，规避解压器报错）。
+- **geoip 抢跑兜底**：内置规则在订阅规则之后、geoip 之前新增
+  geosite geolocation-!cn → 主选择组——无规则订阅（纯节点）下被墙
+  域名零解析开销直达节点，不再触发 geoip cn 的污染解析改道直连。
+- **GLOBAL 组同步选择**：手动选点与启动自动测速同时同步主组与
+  GLOBAL 组，全局模式不再落到 GLOBAL 默认第一个节点。
+- **开关 SVG 化**：Switch 组件改为 44×24 SVG viewBox 内绘轨道+滑块
+  （内置 ✓/− 图标，零 CSS 位移），滑块物理上不可能冲出轨道。
+
+### 移动端（iOS）
+- **DNS 致命修正**：扩展配置 dns-remote 从 tcp://1.1.1.1 改为
+  tcp://8.8.8.8——Cloudflare 官方安全策略禁止 Worker 节点出站连接
+  1.1.1.1，代理 DNS 请求 100% 被边缘拒绝导致全部域名无法解析。
+- **DNS 模式分流补齐**：DNS rules 新增 clash_mode direct → dns-direct、
+  global → dns-remote、geosite cn/private → dns-direct——直连模式下
+  国内域名 DNS 不再被强送代理 DNS。
+
 ## [0.3.12] - 2026-10-17
 
 > 修复「订阅同步了却没有节点」与开关滑块溢出。

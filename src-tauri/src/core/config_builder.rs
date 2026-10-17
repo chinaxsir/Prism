@@ -524,6 +524,22 @@ pub fn build(
     // 构建期丢弃后，「分析-规则统计/命中」与国内直连分流由内置规则
     // （域名类在前 + IP 类在此）继续提供，其余走策略组（默认出站）
 
+    // ---- 内置常见分流规则·兜底域名类（订阅规则之后、geoip 之前）----
+    // 无规则订阅（纯节点，如 Cloudflare Worker 订阅）场景：MATCH 兜底
+    // 不存在，被墙域名会一路落到 geoip cn 触发本地解析→污染 CN IP→
+    // 误判直连断网。geolocation-!cn（非中国大陆域名）零解析开销直接走
+    // 主选择组；有规则订阅中更具体的订阅域名规则优先级不受影响
+    // （geolocation-!cn 仅在订阅规则未命中时兜底）
+    let rule_final = final_tag
+        .or(first_group_tag)
+        .unwrap_or_else(|| "direct".into());
+    if rule_final != "direct" {
+        route_rules.push(json!({
+            "geosite": "geolocation-!cn",
+            "outbound": rule_final,
+        }));
+    }
+
     // ---- 内置常见分流规则·IP 类（全平台，位于订阅规则之后）----
     // 订阅 MATCH 命中的流量（被墙域名，无论 DNS 污染成什么 IP）已在上方
     // 走节点，永远不会到达这两条——杜绝污染 IP 触发 geoip 改道直连；
@@ -532,10 +548,7 @@ pub fn build(
     route_rules.push(json!({ "geoip": "private", "outbound": "direct" }));
     route_rules.push(json!({ "geoip": "cn", "outbound": "direct" }));
 
-    // 未显式 MATCH：优先全部订阅中的首个策略组，否则 direct
-    let rule_final = final_tag
-        .or(first_group_tag)
-        .unwrap_or_else(|| "direct".into());
+    // 未显式 MATCH：优先全部订阅中的首个策略组，否则 direct（上方已算）
 
     // 出站模式：规则=按订阅 MATCH 分流；全局=所有流量进 GLOBAL 选择组；直连=全部 direct。
     // GLOBAL 组常驻生成（节点存在时）：sing-box 的 mode 不是内置路由开关，
