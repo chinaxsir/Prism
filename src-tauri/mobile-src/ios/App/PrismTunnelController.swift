@@ -183,6 +183,11 @@ final class PrismTunnelController {
     /// stopVPNTunnel 重置系统 VPN 状态（IPA.txt 主 App 端方案）
     private var activeManager: NETunnelProviderManager?
 
+    /// 本次 start() 的真实配置路径：Code=12 自愈重试可能从 reload/
+    /// 连接超时等拿不到 configPath（空串）的失败点发起，重建
+    /// providerConfiguration 时必须用它
+    private var lastStartConfigPath: String = ""
+
     /// 当前 VPN 连接状态（Rust 经 C ABI prism_ios_vpn_is_connected 轮询，
     /// build 157）：activeManager 未启动时视为 invalid
     var currentConnectionStatus: NEVPNStatus {
@@ -1289,8 +1294,8 @@ final class PrismTunnelController {
     /// bundle ID 表面一致，继续在旧 manager 上 save/start 只会反复报：
     ///   NEVPNConnectionErrorDomain code=14
     ///   "The VPN app used by the VPN configuration is not installed"
-    /// 唯一可靠的恢复方式是 removeFromPreferences 清除旧配置，
-    /// 再用全新的 NETunnelProviderManager 重建。
+    /// （build 169 方案：该错误仅记录诊断交回上层，交由用户重装/
+    /// TrollStore 处理，运行期绝不自动清理配置或调用 uicache）
     ///
     /// 是否为 Code=14「VPN 插件未安装/未注册」错误（build 144 方案：
     /// 该错误码是 rootHelper uicache 修复的唯一触发条件）
@@ -1308,10 +1313,10 @@ final class PrismTunnelController {
 
     /// 失效/无效配置判定（曾用于自动重建重试的依据）。
     ///
-    /// 注意（build 143 方案）：自动重试清理已禁用——start() 恒传
-    /// attemptsRemaining=0，recoverOrFinish 的 resetAllManagers 分支
-    /// 不可达。失败路径绝不允许 removeFromPreferences（误删合法配置
-    /// → managers=0 → 反复授权弹窗）；本函数仅用于错误分类上报。
+    /// 注意（build 169 方案）：失败路径绝不允许 removeFromPreferences
+    /// （误删合法配置 → managers=0 → 反复授权弹窗），resetAllManagers
+    /// 重建重试分支已随 Code=12 自愈方案一并移除；本函数保留作
+    /// 错误分类备用。
     static func isStaleOrInvalid(_ error: Error) -> Bool {
         var current: NSError? = error as NSError
         while let ns = current {
@@ -1355,11 +1360,15 @@ final class PrismTunnelController {
         // 供失败诊断（此前每次尝试开头都清，错误证据全被抹掉）
         clearSharedErrorFile()
         PrismTunnelController.code12SelfHealed = false
-        // 【build 154 方案】覆盖安装检测移交 preCleanAndSyncVersion：
-        // 用 NETunnelProviderManager disable/enable 重置会话，App 运行期
-        // 严禁调用 rootHelper(uicache)/selfHelper（uicache 会注销运行中的
-        // App → nesessionmanager 会话失效 → Code=12 且 hb=无，build 153 实证；
-        // 凡 rootHelper=helper=u0 的版本 133/138/140/153 全部 Code=12）
+        // 记录真实配置路径：Code=12 自愈重试从任意失败点发起时，
+        // 部分 recoverOrFinish 调用点（reload/连接超时）拿不到
+        // configPath（传空串），重试必须用真实路径
+        lastStartConfigPath = configPath
+        // 【build 169 方案】覆盖安装检测移交 preCleanAndSyncVersion：
+        // 版本变化仅调一次 PrismHelper killext 清理驻留旧扩展进程，
+        // App 运行期严禁调用 rootHelper(uicache)/selfHelper（uicache 会
+        // 注销运行中的 App → nesessionmanager 会话失效 → Code=12 且 hb=无，
+        // build 153 实证；凡 rootHelper=helper=u0 的版本 133/138/140/153 全部 Code=12）
 
         // attemptsRemaining=0：失败后严禁自动删配置重建——重建会触发
         // 第二次"添加 VPN 配置"授权弹窗，且刚授权的配置被删光后
@@ -1384,8 +1393,10 @@ final class PrismTunnelController {
         // 覆盖了官方注册——缺 NSExtension/CFBundleExecutable/TeamIdentifier，
         // LaunchServices 里扩展点标识被抹掉 → nesessionmanager 立刻报
         // Code=14 "VPN 插件未安装"（build 143 实证）。
-        // 现在仅当 startVPNTunnel 真正返回 Code=14 时，才在失败出口
-        // （recoverOrFinish）调一次 rootHelper uicache 修复。
+        // 现在失败出口（recoverOrFinish）对 Code=14 仅记录诊断交回上层：
+        // App 运行期严禁 uicache/rootHelper（会注销运行中的 App 造成
+        // Code=12 且 hb=无，build 153/169 实证），注册问题交由用户
+        // 重装/TrollStore 处理。
 
         // 主动 pre-clean + 版本同步（同时解决三个问题）：
         //
@@ -1459,27 +1470,21 @@ final class PrismTunnelController {
                 stale.append(manager)
             }
             if let matched = matched {
-                // 【build 154 方案】版本变化（TrollStore 覆盖安装）：
-                // nesessionmanagerd 内存里缓存着绑定旧版本的插件会话
-                // （managers=1），直接复用必报 Code=12。用 disable/enable
-                // 循环强制系统销毁旧会话并重新绑定新版本 appex——无需
-                // 用户重新授权，也绝不调用 rootHelper uicache
+                // 【build 169 方案】版本变化（TrollStore 覆盖安装）：只调用
+                // 一次 PrismHelper killext 清理驻留的旧版扩展进程。严禁
+                // stopVPNTunnel → isEnabled=false → save → enable → save
+                // 连续双写——旧扩展进程仍驻留内存时极易卡死
+                // nesessionmanagerd（build 168 真机实证：首启必报 Code=12
+                // 且 hb=无），也绝不调用 rootHelper uicache
                 let current = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
                 let last = UserDefaults.standard.string(forKey: "prism_last_build_version")
                 if last != current {
                     UserDefaults.standard.set(current, forKey: "prism_last_build_version")
-                    NSLog("[PrismVPN] 检测到覆盖安装 \(last ?? "无") -> \(current)：重置 VPN 会话（disable/enable）")
-                    matched.connection.stopVPNTunnel()
-                    matched.isEnabled = false
-                    group.enter()
-                    matched.saveToPreferences { _ in
-                        matched.isEnabled = true
-                        matched.saveToPreferences { _ in
-                            matched.loadFromPreferences { _ in group.leave() }
-                        }
-                    }
+                    NSLog("[PrismVPN] 检测到覆盖安装 \(last ?? "无") -> \(current)：killext 清理驻留旧版扩展进程")
+                    PrismTunnelController.killStaleExtensionProcess()
                 }
-                // 主动 save 同步当前 App 版本号（消除"需要更新"红色提示）
+                // 保持 isEnabled=true，单次 save 同步当前 App 版本号/签名
+                // 时间戳（消除"需要更新"红色提示）
                 NSLog("[PrismVPN] 匹配配置已存在，跳过清理，直接 save 同步版本号")
                 group.enter()
                 matched.saveToPreferences { _ in group.leave() }
@@ -1494,55 +1499,51 @@ final class PrismTunnelController {
         }
     }
 
-    /// 失败出口：若属于失效配置且还有重试机会，清空全部 manager 后重建；
-    /// 否则直接把错误交回上层
+    /// 失败出口：Code=12 且扩展无心跳时执行一次性自愈——killext 杀掉
+    /// 卡死的旧驻留扩展进程，reload 会话句柄后 1.0s 重试一次启动；
+    /// 其余错误直接交回上层。
+    /// 【build 169 方案】任何路径都绝不删除已保存的 VPN 配置（误删 →
+    /// managers=0 → 反复授权弹窗；且新建配置首启必报 Code=12，删配置
+    /// 即形成「新建→报错→被删」死循环，build 168 真机实证）
     private func recoverOrFinish(
         _ error: Error,
         configPath: String,
         attemptsRemaining: Int,
         completion: @escaping (Error?) -> Void
     ) {
-        guard attemptsRemaining > 0, PrismTunnelController.isStaleOrInvalid(error) else {
-            // 【build 154 方案】App 运行期严禁调用 rootHelper（uicache 会
-            // 注销运行中的 App → 会话失效）。Code=14 不再尝试修复注册，
-            // 仅记录诊断交回上层
-            if PrismTunnelController.isVPNAppNotInstalled(error) {
-                NSLog("[PrismVPN] Code=14 插件未注册（App 运行期不再调 uicache，交由用户重装/TrollStore 处理）")
-            }
-            // 【build 154 方案】Code=12 且 hb=无：坏配置已彻底损坏——
-            // 一次性 removeFromPreferences 删掉坏配置，让用户下一次点击
-            // 启动时重新生成干净配置（不自动重试，防死循环）
-            if !PrismTunnelController.code12SelfHealed,
-               PrismTunnelController.isCode12WithNoHeartbeat(error)
-            {
-                PrismTunnelController.code12SelfHealed = true
-                NSLog("[PrismVPN] Code=12 且 hb=无：删除损坏的 VPN 配置，待用户下次启动重建")
-                NETunnelProviderManager.loadAllFromPreferences { managers, _ in
-                    let group = DispatchGroup()
-                    for manager in managers ?? [] {
-                        if let proto = manager.protocolConfiguration
-                            as? NETunnelProviderProtocol,
-                           proto.providerBundleIdentifier?.hasSuffix(".PrismVPN") == true
-                        {
-                            group.enter()
-                            manager.removeFromPreferences { _ in group.leave() }
-                        }
-                    }
-                    group.notify(queue: .main) { completion(error) }
+        if PrismTunnelController.isVPNAppNotInstalled(error) {
+            // App 运行期严禁调用 rootHelper（uicache 会注销运行中的 App
+            // → 会话失效）。Code=14 仅记录诊断交回上层
+            NSLog("[PrismVPN] Code=14 插件未注册（App 运行期不调 uicache，交由用户重装/TrollStore 处理）")
+        }
+        // Code=12 且 hb=无：旧版 PrismVPN 进程驻留占住 nesessionmanager
+        // 会话的典型指纹，配置本身是好的——严禁删除；只杀卡死的旧扩展
+        // 进程，reload 后自动重试一次（code12SelfHealed 置位，仅一次，
+        // 再次失败直接交回上层，绝不循环）
+        if !PrismTunnelController.code12SelfHealed,
+           PrismTunnelController.isCode12WithNoHeartbeat(error)
+        {
+            PrismTunnelController.code12SelfHealed = true
+            NSLog("[PrismVPN] Code=12 且 hb=无：保留 VPN 配置，killext 清理旧扩展进程后自愈重试一次")
+            // 只调 PrismHelper killext（杀旧 PrismVPN 进程）；
+            // 绝不调用 uicache / rootHelper
+            PrismTunnelController.killStaleExtensionProcess()
+            // reload 刷新系统会话句柄（nesessionmanagerd 重新绑定），
+            // 1.0s 后重试启动
+            NETunnelProviderManager.loadAllFromPreferences { managers, _ in
+                PrismTunnelController.lastManagerCount = managers?.count ?? 0
+                NSLog("[PrismVPN] 自愈 reload 完成（\(managers?.count ?? 0) 个配置全部保留），1.0s 后重试启动")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    self.startAttempt(
+                        configPath: self.lastStartConfigPath.isEmpty ? configPath : self.lastStartConfigPath,
+                        attemptsRemaining: attemptsRemaining,
+                        completion: completion
+                    )
                 }
-                return
             }
-            completion(error)
             return
         }
-        NSLog("[PrismVPN] 检测到失效 VPN 配置，清除全部 manager 后重建重试: \(PrismTunnelController.describe(error: error))")
-        resetAllManagers {
-            self.startAttempt(
-                configPath: configPath,
-                attemptsRemaining: attemptsRemaining - 1,
-                completion: completion
-            )
-        }
+        completion(error)
     }
 
     private func configureSaveAndStart(
@@ -1573,133 +1574,61 @@ final class PrismTunnelController {
             }
             NSLog("[PrismVPN] saveToPreferences 成功, extBundleId=\(extensionBundleIdentifier)")
 
-            // 关键修复（TrollStore 环境 code=14 根因）：
-            // saveToPreferences completion 只保证偏好文件写入磁盘，
-            // 但 nesessionmanager 异步处理配置变更（校验扩展 bundle、
-            // 注册路径、加载签名），紧接着的 startVPNTunnel 会触发
-            // 系统扩展校验，此时 bundle 还没注册 → code=14
-            // "The VPN app used by the VPN configuration is not installed"。
-            //
-            // 正确做法：等 NEVPNConfigurationChangeNotification
-            // （系统完成配置变更处理后发出）再 reload+start；
-            // 2s 兜底定时器防止通知丢失（极端 iOS 版本）。
-            self.waitForConfigChangeThenStart(
-                attemptsRemaining: attemptsRemaining,
-                completion: completion
-            )
-        }
-    }
-
-    /// 等待系统配置变更通知后，再 reload 并 startVPNTunnel。
-    /// 2 秒内若通知未到，直接兜底 start（正常情况下 save 后配置应已生效）
-    private func waitForConfigChangeThenStart(
-        attemptsRemaining: Int,
-        completion: @escaping (Error?) -> Void
-    ) {
-        var observer: NSObjectProtocol?
-        var fired = false
-        var timer: Timer?
-
-        let fireOnce: () -> Void = { [weak self] in
-            guard !fired, let self = self else { return }
-            fired = true
-            if let o = observer {
-                NotificationCenter.default.removeObserver(o)
-            }
-            timer?.invalidate()
-            self.reloadAndStart(
-                attemptsRemaining: attemptsRemaining,
-                completion: completion
-            )
-        }
-
-        observer = NotificationCenter.default.addObserver(
-            forName: NSNotification.Name.NEVPNConfigurationChange,
-            object: nil,
-            queue: .main,
-            using: { _ in
-                NSLog("[PrismVPN] 收到 NEVPNConfigurationChange，准备 reload+start")
-                fireOnce()
-            }
-        )
-
-        // 兜底：0.5s 内系统未发变更通知就直接 reload+start（build 144
-        // 方案：启动路径已零干预注册，save 后 nesessionmanager 通常
-        // 100ms 内即广播通知；缩短兜底避免"点了连接没反应"的体感）。
-        // 正常路径由通知触发，定时器只在极端场景生效
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
-            NSLog("[PrismVPN] NEVPNConfigurationChange 未在 0.5s 内到达，兜底 reload+start")
-            fireOnce()
-        }
-        RunLoop.main.add(timer!, forMode: .common)
-    }
-
-    /// reload（loadAllFromPreferences）找到持久化配置后发起 startVPNTunnel
-    private func reloadAndStart(
-        attemptsRemaining: Int,
-        completion: @escaping (Error?) -> Void
-    ) {
-        self.reloadByServerTag { reloadResult in
-            switch reloadResult {
-            case .failure(let error):
-                NSLog("[PrismVPN] reload 失败: \(PrismTunnelController.describe(error: error))")
-                self.recoverOrFinish(
-                    error, configPath: "",
-                    attemptsRemaining: attemptsRemaining, completion: completion
-                )
-            case .success(let saved):
-                // 记住本次连接的 manager：看门狗判死 / 停止后清理都要用它
-                self.activeManager = saved
-                do {
-                    try saved.connection.startVPNTunnel()
-                    NSLog("[PrismVPN] startVPNTunnel 调用成功")
-
-                    self.waitForConnected(connection: saved.connection, timeout: 20) { err in
-                        if let err = err {
-                            self.recoverOrFinish(
-                                err, configPath: "",
-                                attemptsRemaining: attemptsRemaining, completion: completion
-                            )
-                        } else {
-                            completion(nil)
-                        }
-                    }
-                } catch {
-                    NSLog("[PrismVPN] startVPNTunnel 失败: \(PrismTunnelController.describe(error: error))")
+            // 【build 169 方案·关键】新建或修改配置 saveToPreferences 成功
+            // 后，必须重新 loadFromPreferences 从系统刷新会话句柄——
+            // nesessionmanagerd 完成会话绑定前直接 startVPNTunnel 必报
+            // Code=12 且扩展进程根本不被拉起（hb=无）。loadFromPreferences
+            // 完成后再等 0.8s 确保绑定落定，随后直接在已绑定的 manager
+            // 上启动隧道（取代旧的「通知等待 + loadAllFromPreferences 重查」
+            // 链路——0.5s 兜底过短，build 168 真机实证首启必失败）
+            manager.loadFromPreferences { loadError in
+                if let loadError = loadError {
+                    NSLog("[PrismVPN] loadFromPreferences 失败: \(PrismTunnelController.describe(error: loadError))")
                     self.recoverOrFinish(
-                        error, configPath: "",
+                        loadError, configPath: configPath,
                         attemptsRemaining: attemptsRemaining, completion: completion
+                    )
+                    return
+                }
+                self.activeManager = manager
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    self.launchTunnelSession(
+                        manager: manager,
+                        attemptsRemaining: attemptsRemaining,
+                        completion: completion
                     )
                 }
             }
         }
     }
 
-    /// 简化版 reload：按 server tag（"Prism"）查找持久化配置，
-    /// 供 waitForConfigChangeThenStart 使用（此时已知 save 完成，
-    /// 不再需要在 reload 里校验 providerBundleIdentifier——
-    /// save 时已正确设置）
-    private func reloadByServerTag(
-        completion: @escaping (Result<NETunnelProviderManager, Error>) -> Void
+    /// 在已完成 saveToPreferences + loadFromPreferences 的 manager 上
+    /// 发起 startVPNTunnel 并等待连接结果（build 169 方案）
+    private func launchTunnelSession(
+        manager: NETunnelProviderManager,
+        attemptsRemaining: Int,
+        completion: @escaping (Error?) -> Void
     ) {
-        NETunnelProviderManager.loadAllFromPreferences { managers, error in
-            if let error = error {
-                completion(.failure(error))
-                return
+        do {
+            try manager.connection.startVPNTunnel()
+            NSLog("[PrismVPN] startVPNTunnel 调用成功")
+
+            waitForConnected(connection: manager.connection, timeout: 20) { err in
+                if let err = err {
+                    self.recoverOrFinish(
+                        err, configPath: "",
+                        attemptsRemaining: attemptsRemaining, completion: completion
+                    )
+                } else {
+                    completion(nil)
+                }
             }
-            let saved = managers?.first {
-                ($0.protocolConfiguration as? NETunnelProviderProtocol)?
-                    .serverAddress == managerServerTag
-            }
-            if let saved = saved {
-                NSLog("[PrismVPN] reload 找到持久化配置")
-                completion(.success(saved))
-            } else {
-                completion(.failure(NSError(
-                    domain: "NEVPNErrorDomain", code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "reload 未找到持久化 VPN 配置"]
-                )))
-            }
+        } catch {
+            NSLog("[PrismVPN] startVPNTunnel 失败: \(PrismTunnelController.describe(error: error))")
+            self.recoverOrFinish(
+                error, configPath: "",
+                attemptsRemaining: attemptsRemaining, completion: completion
+            )
         }
     }
 
@@ -2128,30 +2057,9 @@ final class PrismTunnelController {
         )
     }
 
-    /// 无条件删除系统中本 App 的全部 VPN 配置（code=14 自愈用）
-    private func resetAllManagers(_ completion: @escaping () -> Void) {
-        NETunnelProviderManager.loadAllFromPreferences { managers, _ in
-            let all = managers ?? []
-            guard !all.isEmpty else {
-                completion()
-                return
-            }
-            let group = DispatchGroup()
-            for manager in all {
-                group.enter()
-                manager.removeFromPreferences { removeError in
-                    if let removeError = removeError {
-                        NSLog("[PrismVPN] reset removeFromPreferences 失败: \(PrismTunnelController.describe(error: removeError))")
-                    }
-                    group.leave()
-                }
-            }
-            group.notify(queue: .main) {
-                NSLog("[PrismVPN] 已清除全部 \(all.count) 个残留 VPN 配置")
-                completion()
-            }
-        }
-    }
+    /// 【build 169 方案】无条件删除全部 VPN 配置的入口已从启动/自愈
+    /// 失败路径移除（误删合法配置 → managers=0 → 反复授权弹窗 +
+    /// 新建配置首启必报 Code=12 的死循环）。
 
     private func reload(
         manager: NETunnelProviderManager,

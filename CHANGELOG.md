@@ -4,6 +4,26 @@
 每次发布前更新本文件，并在 Git 打对应 tag。
 移动端与桌面端共用同一版本 tag；更新内容按平台分节说明。
 
+## [0.3.11] - 2026-10-17
+
+> 修复 iOS 端 VPN 隧道「managers=0 ↔ Code=12」死循环（build 169 方案）。
+
+### 移动端（iOS）
+- **修复选择节点后无法通过节点代理上网**：三个组合 Bug 形成死循环——
+  1. `recoverOrFinish` 遇 Code=12 且扩展无心跳时自动删除 VPN 配置，
+     导致 managers=0；现改为任何失败路径绝不删配置，仅调一次
+     PrismHelper killext 清理驻留旧扩展进程，reload 会话句柄后 1.0s
+     自动重试一次（仅一次，防循环）；
+  2. 新建配置 saveToPreferences 后未 loadFromPreferences 即启动隧道，
+     nesessionmanagerd 会话未绑定必报 Code=12；现保存后先
+     loadFromPreferences 并等待 0.8s 再 startVPNTunnel；
+  3. 覆盖安装时 disable/enable 连续双写易卡死系统会话；现仅 killext
+     一次 + 保持 isEnabled 单次 save。
+- **init() 级最早心跳**：扩展进程被系统实例化瞬间即写入 "init" 心跳，
+  精准区分「进程未拉起」与「拉起了但未进 startTunnel」。
+- **主副包版本一致性兜底**：CI 从主程序 Info.plist 读回
+  CFBundleShortVersionString 强制写入 appex，杜绝 pkd 因版本漂移拒载。
+
 ## [0.3.10] - 2026-10-16
 
 > 修复「选择了节点却无法通过节点上网」的路由回归。

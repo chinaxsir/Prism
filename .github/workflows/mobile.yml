@@ -457,6 +457,12 @@ jobs:
             /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUM" "$APPEX/Info.plist"
             /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$APPEX/Info.plist" 2>/dev/null || \
             /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $APP_VERSION" "$APPEX/Info.plist"
+            # 主副包营销版本一致性兜底（build 169 方案）：从主程序
+            # Info.plist 读回实际值强制写入 appex——杜绝 pkd 因主副包
+            # CFBundleShortVersionString 漂移而拒载副包
+            SHORT_VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $SHORT_VER" "$APPEX/Info.plist" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $SHORT_VER" "$APPEX/Info.plist"
             /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $MAIN_BUNDLE.PrismVPN" "$APPEX/Info.plist" 2>/dev/null || true
             /usr/libexec/PlistBuddy -c "Set :MinimumOSVersion 14.0" "$APPEX/Info.plist" 2>/dev/null || \
             /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string 14.0" "$APPEX/Info.plist"

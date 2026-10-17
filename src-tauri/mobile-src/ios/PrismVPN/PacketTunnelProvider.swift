@@ -137,6 +137,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var activeBoundInterface: String = ""
     private var isReloadingForNetworkChange: Bool = false
 
+    // MARK: - 生命周期
+
+    /// 【build 169 方案】init() 级最早心跳：系统 pkd 实例化扩展进程的
+    /// 瞬间（早于 startTunnel）即写入 "init" 心跳，诊断可精准区分
+    /// 「进程未被拉起（hb=无）」与「拉起了但未进 startTunnel」
+    override init() {
+        super.init()
+        prismProviderRef = self
+        writeHeartbeat("init")
+    }
+
     // MARK: - 共享目录与诊断写入
 
     private func sharedDirURLs() -> [URL] {
