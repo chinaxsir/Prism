@@ -23,6 +23,7 @@ import {
 } from "recharts";
 
 import {
+  getCachedProxies,
   getCoreStatus,
   getProxyGroups,
   selectProxy,
@@ -113,7 +114,16 @@ export default function Dashboard() {
       setMainSelector(group);
       if (st.status !== "running" || !group) {
         setCurrentNode("");
-        setNodes([]);
+        // 未启动兜底：读取订阅缓存节点展示第一个，并支持点击预选
+        // （ipa-8 方案：启动前卡片不再显示「—」死状态）
+        try {
+          const cached = await getCachedProxies();
+          setNodes(
+            cached.map((c) => ({ name: c.name, type: c.kind, history: [] }))
+          );
+        } catch {
+          setNodes([]);
+        }
         return;
       }
       const resp = (await getProxyGroups()) as {
@@ -134,14 +144,17 @@ export default function Dashboard() {
     }
   };
 
-  // 当前节点随内核状态与节点变化刷新（启动自动选点、节点页手动切换）
+  // 当前节点随内核状态与节点变化刷新（启动自动选点、节点页手动切换、
+  // 云端订阅同步补拉）
   useEffect(() => {
     loadCurrentNode();
     const unStatus = listen("core://status", () => loadCurrentNode());
     const unProxies = listen("proxies://changed", () => loadCurrentNode());
+    const unSubs = listen("subscriptions://changed", () => loadCurrentNode());
     return () => {
       unStatus.then((fn) => fn());
       unProxies.then((fn) => fn());
+      unSubs.then((fn) => fn());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -206,7 +219,15 @@ export default function Dashboard() {
 
   /// 从仪表盘直接指定使用节点
   const pickNode = async (name: string) => {
-    if (!mainSelector || selecting) return;
+    if (selecting) return;
+    // 未启动时仅做预选：内核 API 不存在，无法真正切换；
+    // 本地记住选择，启动自动选点后用户仍可手动改选
+    if (!mainSelector) {
+      setCurrentNode(name);
+      setPickerOpen(false);
+      toast.success(`已预选节点：${name}（内核启动后生效）`);
+      return;
+    }
     setSelecting(true);
     try {
       await selectProxy(mainSelector, name);
@@ -300,8 +321,12 @@ export default function Dashboard() {
         <StatChip
           icon={<Globe size={14} className="text-gray-400" />}
           label="当前节点"
-          value={running ? currentNode || "未选择" : "—"}
-          onClick={running && nodes.length > 0 ? () => setPickerOpen(true) : undefined}
+          value={
+            running
+              ? currentNode || "未选择"
+              : currentNode || nodes[0]?.name || "—"
+          }
+          onClick={nodes.length > 0 ? () => setPickerOpen(true) : undefined}
         />
         {mobile ? (
           <StatChip
@@ -496,13 +521,17 @@ function StatChip({
         onClick && "cursor-pointer hover:border-accent/40 transition-colors"
       )}
     >
-      <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+      {/* 顶部标签行禁止换行（ipa-8：三列窄卡片内「当前节点」不再折行）；
+          右箭头移到第二行数值右侧，保证启动前后顶部布局一致 */}
+      <div className="flex items-center gap-1.5 text-[11px] text-gray-400 whitespace-nowrap">
         {icon}
         <span>{label}</span>
-        {onClick && <ChevronRight size={11} className="ml-auto text-gray-600" />}
       </div>
-      <div className="text-sm font-semibold tabular-nums text-gray-100 mt-1 truncate">
-        {value}
+      <div className="mt-1 flex items-center gap-0.5 min-w-0">
+        <span className="text-sm font-semibold tabular-nums text-gray-100 truncate">
+          {value}
+        </span>
+        {onClick && <ChevronRight size={12} className="shrink-0 text-gray-600" />}
       </div>
     </div>
   );

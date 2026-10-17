@@ -1838,7 +1838,21 @@ final class PrismTunnelController {
             // alive = 心跳时间戳距今 ≤ 10s（readExtensionHeartbeat 内置判定，
             // 等价于 IPA.txt 的 alive && (now - timestamp < 10)）
             guard hb.alive else {
-                NSLog("[PrismVPN] 巨魔扩展心跳丢失 (stage=\(hb.stage), age=\(hb.age)s)，判定为内核已在后台崩溃！")
+                // ipa-8 隐患 A（锁屏误杀）：iOS 休眠会挂起后台进程的 Timer，
+                // 扩展心跳文件停在睡眠前的时间戳，但 utun 网卡与 Go 隧道
+                // 仍在正常待机；亮屏瞬间主 App 的定时器先于扩展心跳恢复
+                // 触发，会读到滞后时间戳。以系统 connection.status 为准：
+                // 只要系统仍认为已连接/重连中，绝不因心跳滞后调用
+                // stopVPNTunnel——扩展真被 Jetsam 强杀时 nesessionmanagerd
+                // 会立刻把 status 置为 .disconnected，由 NEVPNStatusDidChange
+                // 监听器处理断开回报，无需心跳文件判死
+                let st = manager.connection.status
+                if st == .connected || st == .reasserting || st == .connecting {
+                    NSLog("[PrismVPN] 心跳滞后 (stage=\(hb.stage), age=\(hb.age)s) 但系统状态仍为 \(st.rawValue)（疑似锁屏休眠），保持连接不误杀")
+                    return
+                }
+
+                NSLog("[PrismVPN] 扩展心跳丢失 (stage=\(hb.stage), age=\(hb.age)s)，判定为内核已在后台崩溃！")
                 self.stopVpnWatchdog()
 
                 // 读取精确报错；扩展来不及写文件时给通用 Jetsam 描述

@@ -83,7 +83,7 @@ struct PreparedStart {
 
 /// 启动前的全部准备与校验（不提权变更、不写内核状态）：
 /// 提权预检 → 工作目录 → 订阅 profile → 内核二进制 → 端口预检 → 构建配置
-async fn prepare_start(state: &AppState) -> Result<PreparedStart, String> {
+async fn prepare_start(app: &AppHandle, state: &AppState) -> Result<PreparedStart, String> {
     let mode = *state.mode.read();
     let settings = state.settings.read().clone();
 
@@ -108,8 +108,30 @@ async fn prepare_start(state: &AppState) -> Result<PreparedStart, String> {
         .map_err(|e| format!("创建内核工作目录失败: {}", e))?;
 
     // 读取全部启用订阅的 profile（多订阅模型；旧版单 profile.yaml 自动兼容）
-    let profiles = load_enabled_profiles(state);
+    let mut profiles = load_enabled_profiles(state);
     if profiles.is_empty() {
+        // 空缓存兜底（ipa-8）：启用订阅存在但内容未拉取成功（云同步对账
+        // 时网络抖动只建了保底记录）→ 启动前自动补拉一次，避免用户必须
+        // 先去订阅页手动更新。仅在非运行态执行：restart_core 期间内核
+        // 仍在运行，refresh_subscription 会再次触发重启造成递归
+        if *state.status.read() != CoreStatus::Running {
+            let records = crate::core::store::load_subscriptions(&state.data_dir);
+            for r in records.iter().filter(|r| r.enabled) {
+                let path = crate::core::store::profile_path(&state.data_dir, &r.url);
+                if !path.exists() {
+                    tracing::info!("启动前自动补拉缺失缓存的订阅：{}", r.url);
+                    // Box::pin 打断 prepare_start → refresh_subscription →
+                    // restart_core → prepare_start 的静态递归环（运行时已有
+                    // status != Running 守卫，实际不会递归执行）
+                    if let Err(e) =
+                        Box::pin(refresh_subscription(app, state, &r.url)).await
+                    {
+                        tracing::warn!("启动前补拉失败（继续启动流程）：{e}");
+                    }
+                }
+            }
+            profiles = load_enabled_profiles(state);
+        }
         let has_records =
             !crate::core::store::load_subscriptions(&state.data_dir).is_empty();
         return Err(if has_records {
@@ -255,7 +277,7 @@ async fn apply_prepared(
 }
 
 async fn do_start(app: &AppHandle, state: &State<'_, AppState>) -> Result<(), String> {
-    let prepared = prepare_start(state).await?;
+    let prepared = prepare_start(app, state).await?;
     apply_prepared(prepared, app, state).await
 }
 
@@ -330,7 +352,7 @@ fn load_enabled_profiles(state: &AppState) -> Vec<(String, String, String)> {
 /// 先构建并静态校验新配置，通过后才停旧内核；校验失败则网络不中断。
 pub(crate) async fn restart_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
     // 1. 准备新配置（不改变任何状态）
-    let prepared = prepare_start(state).await?;
+    let prepared = prepare_start(app, state).await?;
 
     // 2. sing-box check 静态校验
     let check_path = state.work_dir().join("config.precheck.json");

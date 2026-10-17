@@ -12,6 +12,10 @@ private var cachedPhysicalIfName: String = "en0"
 private struct PhysicalInterface {
     let name: String
     let index: UInt32
+    /// 该网卡是否具备真实可路由 IP（ipa-8 隐患 C）：电梯/地下室等
+    /// 短暂无网场景下兜底候选（pdp_ip0/en0 盲猜）标记为 false，
+    /// 热重载检测据此保持待机，不切到死网卡
+    let hasRoutableIP: Bool
 }
 
 /// 严格判断网卡上的地址是否为真正可路由的 IP（排除 127.0.0.1、169.254.x.x 以及 iOS Wi-Fi 断开后残留的 fe80:: 链路本地地址）
@@ -52,7 +56,7 @@ private func findActivePhysicalInterface() -> PhysicalInterface {
     var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
     guard getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr else {
         let idx = if_nametoindex("en0")
-        return PhysicalInterface(name: "en0", index: idx)
+        return PhysicalInterface(name: "en0", index: idx, hasRoutableIP: false)
     }
     defer { freeifaddrs(ifaddrPtr) }
 
@@ -72,13 +76,13 @@ private func findActivePhysicalInterface() -> PhysicalInterface {
                 let idx = if_nametoindex(name)
                 if idx > 0 {
                     if name == "en0" {
-                        wifiCandidate = PhysicalInterface(name: name, index: idx)
+                        wifiCandidate = PhysicalInterface(name: name, index: idx, hasRoutableIP: true)
                     } else if name.hasPrefix("pdp_ip") {
                         if cellCandidate == nil || name == "pdp_ip0" {
-                            cellCandidate = PhysicalInterface(name: name, index: idx)
+                            cellCandidate = PhysicalInterface(name: name, index: idx, hasRoutableIP: true)
                         }
                     } else if otherCandidate == nil {
-                        otherCandidate = PhysicalInterface(name: name, index: idx)
+                        otherCandidate = PhysicalInterface(name: name, index: idx, hasRoutableIP: true)
                     }
                 }
             }
@@ -106,12 +110,12 @@ private func findActivePhysicalInterface() -> PhysicalInterface {
     if pdpIdx > 0 {
         cachedPhysicalIfIndex = pdpIdx
         cachedPhysicalIfName = "pdp_ip0"
-        return PhysicalInterface(name: "pdp_ip0", index: pdpIdx)
+        return PhysicalInterface(name: "pdp_ip0", index: pdpIdx, hasRoutableIP: false)
     }
     let enIdx = if_nametoindex("en0")
     cachedPhysicalIfIndex = enIdx
     cachedPhysicalIfName = "en0"
-    return PhysicalInterface(name: "en0", index: enIdx)
+    return PhysicalInterface(name: "en0", index: enIdx, hasRoutableIP: false)
 }
 
 final class PacketTunnelProvider: NEPacketTunnelProvider {
@@ -310,7 +314,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         guard isRunning, !isReloadingForNetworkChange else { return }
 
         let latestPhy = findActivePhysicalInterface()
-        guard !latestPhy.name.isEmpty, latestPhy.name != activeBoundInterface else {
+        // ipa-8 隐患 C：仅当新候选网卡具备真实可路由 IP 时才热重载。
+        // 飞行模式/电梯等短暂完全无网时 findActivePhysicalInterface 走
+        // 盲猜兜底（hasRoutableIP=false），此时保持现有隧道待机，等
+        // 信号恢复（真实网卡出现）后再平滑切网，绝不报错停止
+        guard !latestPhy.name.isEmpty,
+              latestPhy.hasRoutableIP,
+              latestPhy.name != activeBoundInterface
+        else {
             return
         }
 

@@ -12,6 +12,7 @@ import Settings from "@/pages/Settings";
 import { useCoreStore, type CoreStatus, type OutboundMode, type RunMode } from "@/stores/core";
 import { useProStore } from "@/stores/pro";
 import { stopCore, type Entitlement } from "@/api/ipc";
+import { isMobile } from "@/pro/gating";
 import ProxiesHub from "@/pages/ProxiesHub";
 
 export default function App() {
@@ -74,9 +75,17 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen bg-surface text-gray-200 overflow-hidden">
       <TitleBar />
+      {/* 移动端顶部状态栏独立安全区（ipa-8）：占位条固定不滚动，页面标题
+          不会与系统时间/信号栏重叠，滚动时内容也不会穿透到状态栏下方 */}
+      {isMobile() && (
+        <div
+          className="w-full shrink-0 bg-surface"
+          style={{ height: "max(env(safe-area-inset-top, 0px), 48px)" }}
+        />
+      )}
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        <main className="flex-1 overflow-y-auto overflow-x-hidden px-6 pt-[calc(1.5rem+env(safe-area-inset-top))] pb-[calc(4rem+env(safe-area-inset-bottom))] md:pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
+        <main className="flex-1 overflow-y-auto overflow-x-hidden px-6 pt-3 pb-[calc(4rem+env(safe-area-inset-bottom))] md:pt-[calc(1.5rem+env(safe-area-inset-top))] md:pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
           <Routes>
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="/dashboard" element={<Dashboard />} />
