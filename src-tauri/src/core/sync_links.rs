@@ -294,18 +294,27 @@ async fn reconcile_inner(app: &AppHandle) -> Result<(), SyncError> {
 
     let mut changed = false; // 本地是否发生增删（决定是否重启内核）
 
-    // 2. 云端有、本地无 → 拉取到本地
+    // 2. 云端有、本地无（或本地为空壳）→ 拉取到本地。
+    // 空壳判定：缓存文件缺失，或内容解析不出可用节点——这正是
+    // 「订阅同步了却没有节点」的场景：上一台设备同步时只建了记录
+    // （下载失败保底），本台设备对账必须重新拉取内容
     for link in &cloud {
-        if local.iter().any(|r| r.url == link.url) {
+        let has_record = local.iter().any(|r| r.url == link.url);
+        if has_record && !profile_is_empty_shell(&data_dir, &link.url) {
             continue;
         }
-        tracing::info!("订阅同步：从云端拉取 {}", link.url);
+        if has_record {
+            tracing::info!("订阅同步：本地为空壳（缓存缺失或 0 节点），重新拉取 {}", link.url);
+        } else {
+            tracing::info!("订阅同步：从云端拉取 {}", link.url);
+        }
         match crate::ipc::commands::refresh_subscription(app, &state, &link.url).await {
             Ok(()) => {}
             Err(e) => {
-                // 下载失败（临时网络/机场不可达）：先建记录保底，待手动更新补内容
-                tracing::warn!("订阅同步：拉取内容失败（先建记录）：{e}");
-                if super::store::upsert_subscription(&data_dir, &link.url).is_ok() {
+                // 下载失败（临时网络/机场不可达）：先建记录保底，
+                // updated_at 置 0（前端显示「从未更新」标识内容待补）
+                tracing::warn!("订阅同步：拉取内容失败（先建空壳记录）：{e}");
+                if super::store::upsert_subscription_pending(&data_dir, &link.url).is_ok() {
                     set_local_name(&data_dir, &link.url, link.name.clone());
                 }
             }
@@ -364,7 +373,47 @@ async fn reconcile_inner(app: &AppHandle) -> Result<(), SyncError> {
             tracing::warn!("订阅同步后内核重启失败：{e}");
         }
     }
+
+    // 7. 有任何变更（新增/删除/空壳补拉）→ 通知前端刷新订阅列表与
+    // 节点缓存。对账全程静默，仅以事件驱动 UI 更新，不弹窗
+    if changed {
+        use tauri::Emitter;
+        let _ = app.emit("subscriptions://changed", ());
+        let _ = app.emit("proxies://changed", ());
+    }
     Ok(())
+}
+
+/// 判断本地订阅缓存是否为「空壳」：profile 文件缺失，或内容解析不出
+/// 任何可用节点（127.x/localhost 机场提示节点不算）。空壳在对账时
+/// 会被重新拉取（「同步了却没有节点」的根治入口）
+fn profile_is_empty_shell(data_dir: &std::path::Path, url: &str) -> bool {
+    let path = super::store::profile_path(data_dir, url);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return true;
+    };
+    // 缓存统一为 Clash YAML（refresh_subscription 落盘前已归一化）；
+    // 解析失败同样按空壳处理，触发重新拉取兜底
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&text) else {
+        return true;
+    };
+    let real_nodes = value
+        .get("proxies")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter(|p| {
+                    let server = p.get("server").and_then(|v| v.as_str()).unwrap_or("");
+                    !server.is_empty() && !server.starts_with("127.") && server != "localhost"
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let has_providers = value
+        .get("proxy-providers")
+        .and_then(|v| v.as_mapping())
+        .is_some_and(|m| !m.is_empty());
+    real_nodes == 0 && !has_providers
 }
 
 /// 更新本地订阅记录的备注名（记录不存在则忽略）

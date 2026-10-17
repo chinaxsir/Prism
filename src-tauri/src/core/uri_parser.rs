@@ -75,6 +75,15 @@ pub fn parse_lines(text: &str) -> (Vec<Value>, Vec<String>, Option<String>) {
     (nodes, errors, notice)
 }
 
+/// 订阅文本 base64 包裹还原：已是 URI 列表则原样返回；否则尝试 base64
+/// 解码（机场默认订阅多为 base64 包裹的 URI 列表）。解码失败原样返回
+pub fn unwrap_base64(text: &str) -> String {
+    if is_uri_list(text) {
+        return text.to_string();
+    }
+    b64_decode_str(text.trim()).unwrap_or_else(|_| text.to_string())
+}
+
 // ---------------- 通用工具 ----------------
 
 /// base64 解码（先尝试标准，再尝试 URL_SAFE_NO_PAD，最后 URL_SAFE）

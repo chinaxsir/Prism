@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { RefreshCw, Rss, Trash2 } from "lucide-react";
 
 import {
@@ -49,6 +50,12 @@ export default function Subscription() {
 
   useEffect(() => {
     load();
+    // 订阅云同步对账（新增/删除/空壳补拉）后端完成时静默刷新列表，
+    // 无需用户手动下拉
+    const unSubs = listen("subscriptions://changed", () => load());
+    return () => {
+      unSubs.then((f) => f());
+    };
   }, [load]);
 
   const handleAdd = async () => {

@@ -261,6 +261,25 @@ pub fn upsert_subscription(data_dir: &Path, url: &str) -> anyhow::Result<()> {
     write_subscriptions(data_dir, &records)
 }
 
+/// 建立「待补内容」的保底记录：updated_at 置 0（前端显示「从未更新」）。
+/// 供订阅云同步对账使用——云端拉取下载失败时先落记录，下次手动更新/
+/// 对账空壳重拉时补齐内容；不能误用 now，否则用户会误以为内容已就绪
+pub fn upsert_subscription_pending(data_dir: &Path, url: &str) -> anyhow::Result<()> {
+    let mut records = load_subscriptions(data_dir);
+
+    if let Some(existing) = records.iter_mut().find(|r| r.url == url) {
+        existing.updated_at = 0;
+    } else {
+        records.push(SubscriptionRecord {
+            url: url.to_string(),
+            updated_at: 0,
+            name: None,
+            enabled: true,
+        });
+    }
+    write_subscriptions(data_dir, &records)
+}
+
 /// 设置订阅启用状态；返回是否存在该记录
 pub fn set_subscription_enabled(
     data_dir: &Path,

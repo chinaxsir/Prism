@@ -832,7 +832,9 @@ async fn fetch_remote_text(url: &str, local_proxy: Option<u16>) -> Result<String
     // 整体只受实际网络 RTT 约束，不再为黑洞等待。
     let build_direct_client = |force_v4: bool| -> Result<reqwest::Client, String> {
         let mut builder = reqwest::Client::builder()
-            .user_agent("clash-verge/v2.0.0")
+            // 部分机场面板按 UA 识别 Clash 系客户端分流订阅格式，非 Clash
+            // UA 会拿到浏览器提示页（0 节点）；用 mihomo 通行 UA + Accept */*
+            .user_agent("mihomo/1.18.3 ClashMetaForAndroid/2.10.1.Meta")
             .timeout(std::time::Duration::from_secs(30))
             // 连接阶段独立短超时：黑洞地址快速失败
             .connect_timeout(std::time::Duration::from_secs(8))
@@ -875,7 +877,7 @@ async fn fetch_remote_text(url: &str, local_proxy: Option<u16>) -> Result<String
         let proxy = reqwest::Proxy::all(&format!("http://127.0.0.1:{port}"))
             .map_err(|e| format!("配置本地代理失败: {e}"))?;
         let builder = reqwest::Client::builder()
-            .user_agent("clash-verge/v2.0.0")
+            .user_agent("mihomo/1.18.3 ClashMetaForAndroid/2.10.1.Meta")
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
             .proxy(proxy);
@@ -905,6 +907,8 @@ async fn fetch_remote_text(url: &str, local_proxy: Option<u16>) -> Result<String
 async fn try_fetch_text(client: &reqwest::Client, url: &str) -> Result<String, String> {
     let resp = client
         .get(url)
+        // 与 mihomo/Clash 通行 UA 配套：部分面板按 Accept 头判定客户端类型
+        .header("Accept", "*/*")
         .send()
         .await
         .map_err(|e| describe_reqwest_error(&e))?;
@@ -1085,33 +1089,58 @@ pub async fn get_cached_proxies(
             Ok(t) => t,
             Err(_) => continue,
         };
-        let value: serde_yaml::Value = match serde_yaml::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let proxies = match value.get("proxies").and_then(|v| v.as_sequence()) {
-            Some(s) => s,
-            None => continue,
-        };
-        for p in proxies {
-            let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let kind = p.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let server = p.get("server").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let port = p.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-            if name.is_empty() || server.is_empty() {
-                continue;
+        // 双格式解析：Clash YAML 优先；解析失败或未产出节点时回退
+        // base64/URI 列表（正常落盘已归一化为 YAML，此为兜底防漏）
+        let before = out.len();
+        if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
+            if let Some(proxies) = value.get("proxies").and_then(|v| v.as_sequence()) {
+                for p in proxies {
+                    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let kind = p.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let server = p.get("server").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let port = p.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                    if name.is_empty() || server.is_empty() {
+                        continue;
+                    }
+                    // 跳过机场提示节点（127.x / localhost）
+                    if server.starts_with("127.") || server == "localhost" {
+                        continue;
+                    }
+                    out.push(CachedProxyDto {
+                        name,
+                        kind,
+                        server,
+                        port,
+                        from_subscription: r.url.clone(),
+                    });
+                }
             }
-            // 跳过机场提示节点（127.x / localhost）
-            if server.starts_with("127.") || server == "localhost" {
-                continue;
+        }
+        if out.len() == before {
+            let decoded = crate::core::uri_parser::unwrap_base64(&text);
+            let (nodes, errors, _notice) = crate::core::uri_parser::parse_lines(&decoded);
+            if !errors.is_empty() {
+                tracing::warn!("cached proxies URI fallback: {}", errors.join("；"));
             }
-            out.push(CachedProxyDto {
-                name,
-                kind,
-                server,
-                port,
-                from_subscription: r.url.clone(),
-            });
+            for node in nodes {
+                let name = node.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let kind = node.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let server = node.get("server").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let port = node.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                if name.is_empty() || server.is_empty() {
+                    continue;
+                }
+                if server.starts_with("127.") || server == "localhost" {
+                    continue;
+                }
+                out.push(CachedProxyDto {
+                    name,
+                    kind,
+                    server,
+                    port,
+                    from_subscription: r.url.clone(),
+                });
+            }
         }
     }
     Ok(out)
